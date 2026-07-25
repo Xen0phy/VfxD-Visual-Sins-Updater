@@ -1793,6 +1793,165 @@ void ApplyPendingCategoryMove()
     s_installedTreeLoaded = false; // force a clean reload from disk next expand, same as after an applied update
 }
 
+// ---------------------------------------------------------------------------
+// Installed-effects tree search box (RenderInstalledEffects). A single text
+// box filters every installed sin file's tree at once by name, category
+// name, description, or GUID substring, case-insensitively. s_treeSearchBuf
+// is the raw ImGui input buffer; s_treeSearchQueryLower is recomputed from
+// it once per frame at the top of RenderInstalledEffects and is what the
+// matching helpers below actually compare against, so nothing else in this
+// file has to lowercase repeatedly.
+static char        s_treeSearchBuf[256] = {};
+static std::string s_treeSearchQueryLower;
+
+// Search only actually starts once at least this many characters are
+// typed -- a 1-2 character query matches almost everything in a typical
+// tree anyway, so there's little value in it and it's needless work (both
+// the matching itself and the expansion it triggers) on every keystroke
+// along the way to a more useful query.
+static constexpr size_t kMinTreeSearchLength = 3;
+
+// True only on the single frame where s_treeSearchQueryLower just changed
+// from what it was last frame (recomputed once, at the top of
+// RenderInstalledEffects). RenderCategoryTree gates its forced-open calls
+// on this rather than on "a search is active" -- forcing potentially
+// hundreds of nodes open is only meant to happen once, right when the
+// query changes, not on every single frame the search box merely still has
+// text in it. Re-forcing it every frame was expensive enough on a large
+// tree to stall the whole overlay (dropped keystrokes, unresponsive
+// scrolling) while typing.
+static bool s_treeSearchQueryChanged = false;
+
+// Case-insensitive substring test. An empty `needleLower` always matches
+// (an empty search box means "no filter"), so callers don't need their own
+// early-out for that case.
+static bool ContainsCI(const std::string& haystack, const std::string& needleLower)
+{
+    if (needleLower.empty())
+        return true;
+
+    std::string haystackLower = haystack;
+    std::transform(haystackLower.begin(), haystackLower.end(), haystackLower.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return haystackLower.find(needleLower) != std::string::npos;
+}
+
+// True if `effect`'s own visible name -- what's shown right on its
+// (possibly collapsed) row -- contains `queryLower`. A name match never
+// needs the effect's own node opened: the match is already on-screen.
+static bool EffectNameMatches(const nlohmann::ordered_json& effect, const std::string& queryLower)
+{
+    if (queryLower.empty())
+        return false;
+    return ContainsCI(effect.value("name", std::string()), queryLower);
+}
+
+// True if `effect` matches `queryLower` only through content that's hidden
+// until its own node is opened -- its description or any one of its GUIDs.
+// Unlike a name match, this DOES need the node forced open, or the reason
+// it matched never becomes visible.
+static bool EffectHiddenContentMatches(const nlohmann::ordered_json& effect, const std::string& queryLower)
+{
+    if (queryLower.empty())
+        return false;
+
+    if (ContainsCI(effect.value("description", std::string()), queryLower))
+        return true;
+
+    if (effect.contains("guids") && effect["guids"].is_array())
+        for (const auto& g : effect["guids"])
+            if (g.is_string() && ContainsCI(g.get<std::string>(), queryLower))
+                return true;
+
+    return false;
+}
+
+// True if `effect` matches `queryLower` at all -- by name or by hidden
+// content. Used for the filtering decision (show this effect or skip it),
+// which doesn't care which part of it matched, only whether it did.
+static bool EffectMatchesSearch(const nlohmann::ordered_json& effect, const std::string& queryLower)
+{
+    if (queryLower.empty())
+        return true;
+    return EffectNameMatches(effect, queryLower) || EffectHiddenContentMatches(effect, queryLower);
+}
+
+// True if `category`'s own visible name -- shown right on its (possibly
+// collapsed) row -- contains `queryLower`. Same reasoning as
+// EffectNameMatches: a name match doesn't by itself need this category's
+// own node opened.
+static bool CategoryNameMatches(const nlohmann::ordered_json& category, const std::string& queryLower)
+{
+    if (queryLower.empty())
+        return false;
+    return ContainsCI(category.value("name", std::string()), queryLower);
+}
+
+// True if `category`'s own description -- only shown once this category's
+// node is open -- contains `queryLower`. Unlike a name match, this DOES
+// need the node forced open to be seen at all.
+static bool CategoryDescriptionMatches(const nlohmann::ordered_json& category, const std::string& queryLower)
+{
+    if (queryLower.empty())
+        return false;
+    return ContainsCI(category.value("description", std::string()), queryLower);
+}
+
+// True if `category` (its own name/description), any effect directly inside
+// it, or any nested subcategory (recursively) matches `queryLower`. This is
+// the "does this subtree have anything worth showing at all" check
+// RenderCategoryTree uses to decide whether to draw a category during a
+// search rather than skip it outright.
+static bool CategorySubtreeMatchesSearch(const nlohmann::ordered_json& category, const std::string& queryLower)
+{
+    if (queryLower.empty())
+        return true;
+
+    if (CategoryNameMatches(category, queryLower) || CategoryDescriptionMatches(category, queryLower))
+        return true;
+
+    if (category.contains("effects") && category["effects"].is_array())
+        for (const auto& eff : category["effects"])
+            if (EffectMatchesSearch(eff, queryLower))
+                return true;
+
+    if (category.contains("categories") && category["categories"].is_array())
+        for (const auto& sub : category["categories"])
+            if (CategorySubtreeMatchesSearch(sub, queryLower))
+                return true;
+
+    return false;
+}
+
+// True if something *below* `category` (a direct effect, or a nested
+// subcategory either by its own name/description or transitively via this
+// same check) matches `queryLower`. Deliberately excludes `category`'s own
+// name/description -- this is only about whether opening THIS category is
+// necessary to reveal a match further down, not about whether this category
+// is itself the match. That distinction is exactly what keeps "Warrior"
+// itself collapsed when a search for "Warrior" only matched its own name,
+// while still forcing "Classes" (Warrior's parent) open so Warrior's row
+// isn't hidden.
+static bool CategoryHasDescendantMatch(const nlohmann::ordered_json& category, const std::string& queryLower)
+{
+    if (queryLower.empty())
+        return false;
+
+    if (category.contains("effects") && category["effects"].is_array())
+        for (const auto& eff : category["effects"])
+            if (EffectMatchesSearch(eff, queryLower))
+                return true;
+
+    if (category.contains("categories") && category["categories"].is_array())
+        for (const auto& sub : category["categories"])
+            if (CategoryNameMatches(sub, queryLower) || CategoryDescriptionMatches(sub, queryLower) ||
+                CategoryHasDescendantMatch(sub, queryLower))
+                return true;
+
+    return false;
+}
+
+
 // Recursively walks one category node (read-only by default): a TreeNode
 // per category, effects listed as nested TreeNodes underneath. `category`
 // and `effects`/`categories` are exactly the same JSON shape merge.cpp
@@ -1815,11 +1974,74 @@ void ApplyPendingCategoryMove()
 // this tree is rebuilt wholesale on every reload rather than mutated in
 // place) before calling, so sibling categories that happen to share a
 // name don't collide in imgui's ID stack.
+//
+// `forceShow` is true once an ancestor category has already matched the
+// tree search box directly (by its own name/description) -- from that
+// point down, the whole subtree is shown unfiltered, the same way a folder
+// search that matches a folder name shows everything inside it rather than
+// filtering further. Callers outside this function never need to pass it;
+// it's only ever set by RenderCategoryTree itself on the recursive call for
+// its own subcategories.
 void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json& category,
-                         std::vector<int>& pathSoFar, int myIndex)
+                         std::vector<int>& pathSoFar, int myIndex, bool forceShow = false)
 {
     std::string name = category.value("name", std::string("(unnamed category)"));
     pathSoFar.push_back(myIndex);
+
+    bool searchActive = !s_treeSearchQueryLower.empty();
+
+    // Skip this category (and everything under it) entirely when a search
+    // is active and nothing in this subtree matches -- an unrelated branch
+    // just isn't drawn, rather than shown collapsed and empty-looking.
+    // Cancel any edit state scoped under here first, same reasoning as the
+    // "collapsed" branch further down: nothing inside is being drawn this
+    // frame, so nothing should be left running invisibly.
+    if (searchActive && !forceShow && !CategorySubtreeMatchesSearch(category, s_treeSearchQueryLower))
+    {
+        if (s_categoryEdit.active && s_categoryEdit.sinName == sinName && PathHasPrefix(s_categoryEdit.path, pathSoFar))
+            CancelCategoryEdit();
+        if (s_edit.active && s_edit.sinName == sinName && PathHasPrefix(s_edit.originalPath, pathSoFar))
+            CancelEdit();
+        if (s_createCategory.active && s_createCategory.sinName == sinName && PathHasPrefix(s_createCategory.parentPath, pathSoFar))
+            CancelCreateCategory();
+
+        pathSoFar.pop_back();
+        return;
+    }
+
+    // Whether THIS category matched directly (as opposed to only containing
+    // a match further down) -- decides whether its own effects/subcategories
+    // get filtered individually below, or shown in full because the category
+    // itself is what the search was looking for.
+    bool categoryMatchesDirectly = !searchActive || forceShow ||
+        ContainsCI(name, s_treeSearchQueryLower) ||
+        ContainsCI(category.value("description", std::string()), s_treeSearchQueryLower);
+
+    // Only force this category open if leaving it collapsed would hide
+    // something: either its own description (only shown once open), or a
+    // match somewhere in its subtree (whose row only becomes visible once
+    // THIS node is open). A category matching only by its own name does
+    // NOT need forcing open -- that match is already visible right on its
+    // (possibly collapsed) row. This is deliberately independent of
+    // categoryMatchesDirectly/forceShow above: those control what's shown
+    // once a node IS open, not whether it needs to be forced open at all.
+    bool categoryNeedsForceOpen = searchActive &&
+        (CategoryDescriptionMatches(category, s_treeSearchQueryLower) ||
+         CategoryHasDescendantMatch(category, s_treeSearchQueryLower));
+
+    // Only apply on the frame the search query just changed -- see
+    // s_treeSearchQueryChanged's own comment for why doing this every
+    // frame regardless was expensive enough to stall the overlay while
+    // typing. Sets the state explicitly either way (not just when true):
+    // a category that was forced open for a shorter/different query (e.g.
+    // "war" matching "Warhorn" here) but no longer needs it once the query
+    // narrows further (e.g. "warrior", which "Warhorn" doesn't match) must
+    // be forced back shut on that same frame, or it just stays open
+    // forever since nothing else would ever tell it to close. Once set
+    // here, ImGui's own persisted open/closed state carries it forward on
+    // later unchanged frames, same as always.
+    if (s_treeSearchQueryChanged && searchActive)
+        ImGui::SetNextItemOpen(categoryNeedsForceOpen, ImGuiCond_Always);
 
     bool isRenamingThis = s_categoryEdit.active && s_categoryEdit.sinName == sinName &&
                           s_categoryEdit.path == pathSoFar;
@@ -2060,6 +2282,22 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
             for (const auto& effect : category["effects"])
             {
                 const int effIndex = i++;
+
+                // Hidden by the tree search box: this category's own name/
+                // description didn't match, and neither does this effect
+                // (name/description/guids). Cancel any edit in flight on it
+                // first -- same "nothing invisible stays running" reasoning
+                // as the subtree-skip above -- since it won't be drawn this
+                // frame at all, not even collapsed.
+                if (searchActive && !categoryMatchesDirectly && !EffectMatchesSearch(effect, s_treeSearchQueryLower))
+                {
+                    bool isEditingThisHidden = s_edit.active && s_edit.sinName == sinName &&
+                                               s_edit.originalPath == pathSoFar && s_edit.originalIndex == effIndex;
+                    if (isEditingThisHidden)
+                        CancelEdit();
+                    continue;
+                }
+
                 ImGui::PushID(effIndex);
 
                 std::string effName = effect.value("name", std::string("(unnamed effect)"));
@@ -2089,6 +2327,16 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                 else if (effIsRework)
                     ImGui::PushStyleColor(ImGuiCol_Text, kReworkColor);
 
+                // An effect's own node is only forced open if it matched
+                // through content that's actually hidden until then -- its
+                // description or a GUID. A name match alone doesn't need
+                // it: that match is already visible right on this row.
+                bool effectNeedsForceOpen = searchActive && EffectHiddenContentMatches(effect, s_treeSearchQueryLower);
+                // Set explicitly either way, not just when true -- see the
+                // category force-open comment above for why a node that no
+                // longer needs opening has to be forced shut too.
+                if (s_treeSearchQueryChanged && searchActive)
+                    ImGui::SetNextItemOpen(effectNeedsForceOpen, ImGuiCond_Always);
                 bool nodeOpen = ImGui::TreeNode("effect", "%s%s", effName.c_str(), isEditingThis ? " (editing)" : "");
 
                 if (effIsDupe || effIsNew || effIsRework)
@@ -2294,7 +2542,7 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
             for (const auto& sub : category["categories"])
             {
                 ImGui::PushID(i);
-                RenderCategoryTree(sinName, sub, pathSoFar, i);
+                RenderCategoryTree(sinName, sub, pathSoFar, i, categoryMatchesDirectly);
                 ImGui::PopID();
                 ++i;
             }
@@ -2344,6 +2592,36 @@ void RenderInstalledEffects()
     ImGui::TextDisabled("Drag an effect onto a category to move it there (or to the end of its own category), "
                          "or onto another effect to place it just above that one. Categories can be dragged the "
                          "same way to reorder them among their own siblings.");
+
+    // Tree search box -- filters every installed sin file's tree at once by
+    // name, category name, description, or GUID, case-insensitively. Just
+    // recomputes the lowercased query used by RenderCategoryTree's matching
+    // helpers; the actual filtering/expansion happens down there.
+    ImGui::InputTextWithHint("##installed_tree_search", "Search name / category / description / GUID...",
+                              s_treeSearchBuf, sizeof(s_treeSearchBuf));
+    if (s_treeSearchBuf[0] != '\0')
+    {
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Clear##installed_tree_search"))
+            s_treeSearchBuf[0] = '\0';
+    }
+    std::string typedLower = s_treeSearchBuf;
+    std::transform(typedLower.begin(), typedLower.end(), typedLower.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+    if (!typedLower.empty() && typedLower.size() < kMinTreeSearchLength)
+        ImGui::TextDisabled("Keep typing... (search starts at %zu characters)", kMinTreeSearchLength);
+
+    // Below the minimum length, treat the query as empty -- no filtering,
+    // no forced expansion, same as an empty search box.
+    std::string newQueryLower = (typedLower.size() >= kMinTreeSearchLength) ? typedLower : std::string();
+
+    // Only true on this one frame if the query is different from what it
+    // was last frame -- see s_treeSearchQueryChanged's own comment for why
+    // RenderCategoryTree cares about this distinction rather than just
+    // "search box has text in it".
+    s_treeSearchQueryChanged = (newQueryLower != s_treeSearchQueryLower);
+    s_treeSearchQueryLower   = std::move(newQueryLower);
 
     if (!s_editResultMessage.empty())
         ImGui::TextWrapped("%s", s_editResultMessage.c_str());
@@ -2427,6 +2705,28 @@ void RenderInstalledEffects()
                 sin.sinName.c_str());
         }
 
+        // While a tree search is active, check up front whether this file
+        // has any match at all -- lets the root row force itself open (so a
+        // match isn't hidden behind an unexpanded file) and, further down,
+        // lets an empty result say so rather than claim there are no
+        // categories in a file that actually has plenty.
+        bool searchActive   = !s_treeSearchQueryLower.empty();
+        bool anyMatchInFile = false;
+        if (searchActive && fileToRender->contains("categories") && (*fileToRender)["categories"].is_array())
+            for (const auto& cat : (*fileToRender)["categories"])
+                if (CategorySubtreeMatchesSearch(cat, s_treeSearchQueryLower))
+                {
+                    anyMatchInFile = true;
+                    break;
+                }
+
+        // Set explicitly either way on a query change, not just when true
+        // -- a file that matched a shorter/different query but no longer
+        // has anything under a narrower one needs to be forced back shut,
+        // same reasoning as the category/effect force-open comments.
+        if (s_treeSearchQueryChanged && searchActive)
+            ImGui::SetNextItemOpen(anyMatchInFile, ImGuiCond_Always);
+
         if (ImGui::TreeNode("root", "%s (%s)", sin.sinName.c_str(), sin.fileName.c_str()))
         {
             std::vector<int> path; // this sin file's top level -- empty path, same convention as CreateCategoryState::parentPath
@@ -2485,13 +2785,20 @@ void RenderInstalledEffects()
             const nlohmann::ordered_json& file = *fileToRender;
             if (file.contains("categories") && file["categories"].is_array())
             {
-                int i = 0;
-                for (const auto& cat : file["categories"])
+                if (searchActive && !anyMatchInFile)
                 {
-                    ImGui::PushID(i);
-                    RenderCategoryTree(sin.sinName, cat, path, i);
-                    ImGui::PopID();
-                    ++i;
+                    ImGui::TextDisabled("(no matches in this file)");
+                }
+                else
+                {
+                    int i = 0;
+                    for (const auto& cat : file["categories"])
+                    {
+                        ImGui::PushID(i);
+                        RenderCategoryTree(sin.sinName, cat, path, i);
+                        ImGui::PopID();
+                        ++i;
+                    }
                 }
             }
             else
