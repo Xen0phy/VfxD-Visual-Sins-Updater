@@ -24,7 +24,6 @@
 #include <winhttp.h>
 #include <filesystem>
 #include <fstream>
-#include <sstream>
 #include <mutex>
 #include <atomic>
 #include <thread>
@@ -262,6 +261,56 @@ void StartUpdateCheck(const std::string& denoiserAddonDir, bool alsoLoadDiff)
         for (const auto& f : installed)
             installedByName[f.sinName] = f;
 
+        // Shared failure path for all three error cases below. The intent
+        // (see the original comment this replaced) is to leave s_sinInfo
+        // exactly as it was from any previous successful check, so a
+        // rate-limit hit or network hiccup doesn't make an already-known
+        // update disappear. But that only makes sense if there WAS a
+        // previous successful check -- if this is the very first check
+        // this session (e.g. the on-load check itself hits the network
+        // hiccup) s_sinInfo is just empty, and leaving it empty makes
+        // GetSinUpdateInfo() report nothing at all for any sin. The UI
+        // (RenderSinActionRow) then can't tell "installed, unknown
+        // version" apart from "genuinely not installed" and defaults every
+        // sin to NotInstalled -- Install button on everything, even sins
+        // that are sitting right there on disk. So: only in that cold-start
+        // case, fall back to what ScanInstalledSinFiles already found above
+        // (before the network call), reporting installed sins as installed
+        // with an unknown latest version rather than as not-installed.
+        auto storeFailure = [&installedByName]()
+        {
+            std::lock_guard<std::mutex> lock(s_mutex);
+            if (s_sinInfo.empty())
+            {
+                std::vector<SinUpdateInfo> fallback;
+                for (int i = 0; i < kSinCount; ++i)
+                {
+                    SinUpdateInfo info;
+                    info.sinName = kSinNames[i];
+
+                    auto instIt = installedByName.find(info.sinName);
+                    if (instIt != installedByName.end())
+                    {
+                        info.installedPath    = instIt->second.fullPath;
+                        info.installedVersion = instIt->second.version;
+                        // latestVersion stays -1 (unknown) -- UpToDate here
+                        // just means "installed, can't tell if there's an
+                        // update," which is what falls through to the
+                        // non-actionable "Up to date" button rather than
+                        // Install.
+                        info.state = ESinUpdateState::UpToDate;
+                    }
+                    else
+                    {
+                        info.state = ESinUpdateState::NotInstalled;
+                    }
+
+                    fallback.push_back(std::move(info));
+                }
+                s_sinInfo = std::move(fallback);
+            }
+        };
+
         std::string body;
         int statusCode = 0;
         std::string apiUrl = "https://api.github.com/repos/" + std::string(kRepoOwner) + "/" + kRepoName + "/releases/latest";
@@ -269,10 +318,7 @@ void StartUpdateCheck(const std::string& denoiserAddonDir, bool alsoLoadDiff)
 
         if (!ok || statusCode != 200)
         {
-            // Leave s_sinInfo exactly as it was from any previous
-            // successful check -- a rate-limit hit or network hiccup here
-            // must not make the button disappear if we already knew about
-            // an update.
+            storeFailure();
             s_checkStatus.store(ECheckStatus::Error);
             s_requestInFlight.store(false);
             return;
@@ -282,6 +328,7 @@ void StartUpdateCheck(const std::string& denoiserAddonDir, bool alsoLoadDiff)
         try { release = json::parse(body); }
         catch (...)
         {
+            storeFailure();
             s_checkStatus.store(ECheckStatus::Error);
             s_requestInFlight.store(false);
             return;
@@ -289,6 +336,7 @@ void StartUpdateCheck(const std::string& denoiserAddonDir, bool alsoLoadDiff)
 
         if (!release.contains("assets") || !release["assets"].is_array())
         {
+            storeFailure();
             s_checkStatus.store(ECheckStatus::Error);
             s_requestInFlight.store(false);
             return;

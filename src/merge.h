@@ -19,20 +19,27 @@
 // Matching is guid-first, name-fallback. Guids are globally unique (a guid
 // never belongs to more than one effect in oldFile), so any guid overlap
 // unambiguously identifies the specific old effect(s) involved; name is only
-// consulted once guid matching has found nothing, or to break a tie when a
-// new effect's guids are split across more than one old effect (see 1c).
+// consulted once guid matching has found nothing (see case 2), or to decide
+// whether an unambiguous single guid match (case 1) also counts as an
+// unchanged upstream identity.
 //
 //   1. This new effect has at least one guid claimed somewhere in oldFile
 //      (every one of its guids is checked, not just the first that hits
 //      something -- a new effect's guid list can in principle straddle
 //      more than one old effect, e.g. an upstream merge of two
-//      previously-separate effects into one):
+//      previously-separate effects into one). However many distinct old
+//      effects that guid set touches, they all get folded into one
+//      resulting entry -- upstream's name/category always wins once guid
+//      identity is certain, the only question is how many old effects are
+//      being folded together:
 //        a. Every matched guid points to the SAME old effect, and name
-//           also matches that same old effect -> an ArenaNet
-//           skill-effect rework. Keep oldFile's name, category location,
-//           and behaviors (settings) exactly as they are. Guids are
-//           updated by comparing this effect's own old guid list against
-//           its new one (never a whole-file index):
+//           also matches that same old effect -> an ArenaNet skill-effect
+//           rework with nothing upstream actually changed about its
+//           identity. Keep oldFile's name, category location, and
+//           behaviors (settings) exactly as they are -- name/category are
+//           NOT touched in this specific case, since there's nothing to
+//           reconcile. Guids are updated by comparing this effect's own
+//           old guid list against its new one (never a whole-file index):
 //             - nothing in the new list is actually new (old already
 //               covers it) -> not recorded, nothing to do
 //             - new list adds guids without dropping any old one, or the
@@ -43,19 +50,28 @@
 //               contains the other -> reads as a clean upstream renumber;
 //               recorded as a full guid-list replacement
 //        b. Every matched guid points to the same single old effect, but
-//           name differs -> skip entirely. Guid identity says this is the
-//           same underlying effect under upstream's new name, but the user
-//           may have renamed it themselves -- their naming is left alone
-//           rather than guessed at. Never appears in the plan.
-//        c. Matched guids are split across MORE THAN ONE old effect ->
-//           name is the tie-breaker: exactly one of the matched candidates
-//           sharing this new effect's name is reworked (1a's logic, run
-//           against just that one candidate -- the other candidate's own
-//           matched guid is simply treated as newly-added, same as any
-//           other guid the reworked effect didn't have before). Zero, or
-//           more than one, matched candidate sharing the name -> no way to
-//           pick without guessing, so nothing is touched and this never
-//           appears in the plan.
+//           name differs -> reworked same as 1a (guid-diff logic
+//           unchanged), but this time name and category ARE overwritten
+//           from the update: guid identity says this is the same
+//           underlying effect under upstream's new name/location, and
+//           upstream is now treated as authoritative rather than assuming
+//           the user renamed it. Marked as a rework in the plan either
+//           way; only whether name/category also come along for the ride
+//           differs from 1a.
+//        c. Matched guids are split across MORE THAN ONE old effect (an
+//           upstream merge of previously-separate effects into one) ->
+//           always merged now, regardless of name: the first-matched old
+//           effect (in the order this new effect's own guid list matches
+//           them) is the survivor and gets 1b's treatment -- guid diff run
+//           against the union of every matched candidate's guids (so a
+//           guid unique to a losing candidate still counts as already-
+//           known, never silently dropped), name/category overwritten from
+//           the update. Every other matched candidate is deleted outright
+//           once the merge is applied -- their guids now live on the
+//           survivor. If the matched candidates' behaviors (settings)
+//           don't all agree, the result is flagged as a conflict --
+//           display-only, never blocks applying -- so the user knows to
+//           double check the surviving settings.
 //   2. No guid overlap anywhere in oldFile -> fall back to name:
 //        a. Exactly one old effect shares the name -> rework it, same
 //           guid-comparison logic as 1a (this is the "full guid refresh
@@ -91,22 +107,51 @@ struct MergePlanNewEffect
     nlohmann::ordered_json             effect;
 };
 
-// An existing effect (case 1a/2a) whose GUIDs would be updated under its
-// unchanged name/category/settings. `oldGuids` is the matched effect's
-// exact guid list *at resolve time* -- it doubles as this rework's identity
-// key: since guids are globally unique, ApplyMergePlan (and any display
-// code overlaying this onto a tree) looks up the target by checking which
-// old effect owns one of these guids, not by `name`. Looking up by name
-// instead would reintroduce the exact bug this design fixes -- multiple
-// old effects can share a name, so a name-based lookup can't tell them
-// apart, but a guid-based one always can. `newGuids` is the *final* guid
-// list to write -- either newFile's raw list verbatim (a clean same-count
-// renumber) or oldGuids plus whatever's newly added (an add-only change).
+// An existing effect (case 1a/1b/1c/2a) whose GUIDs would be updated, and
+// -- for 1b/1c only -- whose name/category would also be overwritten from
+// the update. `oldGuids` is the survivor's exact guid list *at resolve
+// time* -- it doubles as this rework's identity key: since guids are
+// globally unique, ApplyMergePlan (and any display code overlaying this
+// onto a tree) looks up the target by checking which old effect owns one
+// of these guids, not by name. Looking up by name instead would
+// reintroduce the exact bug this design fixes -- multiple old effects can
+// share a name, so a name-based lookup can't tell them apart, but a
+// guid-based one always can. `newGuids` is the *final* guid list to write
+// -- either newFile's raw list verbatim (a clean same-count renumber) or
+// the old guids (unioned across every merged candidate, for 1c) plus
+// whatever's newly added (an add-only change).
+//
+// `oldName`/`newName` and `oldCategoryPath`/`newCategoryPath` are always
+// populated (even when they're equal -- 1a/2a set both sides to the same
+// value rather than leaving either blank, since "no rename/move" is just
+// as valid a fact to record as a change). `oldCategoryPath` is empty only
+// when this rework's path couldn't be resolved (shouldn't happen against a
+// well-formed oldFile); a legitimate path is never empty, since even a
+// top-level category contributes at least its own name.
+//
+// `mergedAwayGuids` holds one representative guid per OTHER old effect
+// this rework's guids matched (case 1c only -- empty for 1a/1b/2a): each
+// entry is enough to find and delete that duplicate candidate outright
+// when the plan is applied, since guids are globally unique. Their own
+// guids are already folded into `newGuids` above, so nothing is lost by
+// removing the now-redundant JSON objects themselves.
+//
+// `behaviorsConflict` is only ever true for a 1c merge (never a plain 1a/
+// 1b/2a rework, which by definition has just the one candidate and
+// nothing else to disagree with it): true means the matched candidates'
+// behaviors (settings) didn't all agree, so the survivor keeps its own
+// but the user should double-check them. Purely informational -- never
+// blocks ApplyMergePlan.
 struct MergePlanRework
 {
-    std::string              name;
+    std::string              oldName;
+    std::string              newName;
     std::vector<std::string> oldGuids;
     std::vector<std::string> newGuids;
+    std::vector<std::string> oldCategoryPath;
+    std::vector<std::string> newCategoryPath;
+    std::vector<std::string> mergedAwayGuids;
+    bool                      behaviorsConflict = false;
 };
 
 // The full, human-displayable result of resolving newFile against oldFile.
@@ -127,7 +172,11 @@ struct MergePlan
 MergePlan ResolveMergePlan(const nlohmann::ordered_json& oldFile, const nlohmann::ordered_json& newFile, bool& outOk);
 
 // Applies a previously-resolved plan to oldFile in place: refreshes GUIDs
-// for every rework, then inserts every new effect (creating categories as
+// for every rework (and, where the rework's name/category actually differ
+// from the update -- 1b/1c, never 1a/2a -- overwrites those and physically
+// relocates the effect to its new category, creating that category if it
+// doesn't exist yet), deletes every merged-away duplicate a 1c rework
+// folded away, then inserts every new effect (creating categories as
 // needed). Must be called with the same oldFile the plan was resolved
 // against -- see the note in merge.cpp on why interleaving resolve/apply
 // across a stale oldFile is unsafe.
