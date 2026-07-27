@@ -6,8 +6,8 @@
 // and infostr parsing. Rendering (the CollapsingHeader, the tree, the
 // toggles) stays in addon.cpp alongside every other section, same as
 // backup.cpp/report.cpp already do for their own sections.
-#include "live_log.h"
-#include "vfxd_sins_bridge.h"
+#include "core/live_log.h"
+#include "integration/vfxd_sins_bridge.h"
 #include <sstream>
 
 namespace {
@@ -16,7 +16,7 @@ AddonAPI_t* s_api        = nullptr;
 bool        s_listening  = false;
 bool        s_hideKnown  = false;
 
-// Defaults from characterizing real captured data (see HANDOFF): types 0,
+// Defaults from characterizing real captured data: types 0,
 // 1, 9, 11 start disabled (never/rarely visible, a group toggle, or a
 // near-duplicate of another group toggle -- not useful to see by default),
 // everything else starts enabled. Plain array, not persisted anywhere --
@@ -123,7 +123,7 @@ void IngestLogLine(const std::string& guid_b64, const std::string& info)
 
     // Self-only enrichment: written only when this event's caster or
     // target is "self" (exact reproduction of VfxDenoiser's own
-    // pointer-identity self-check, see HANDOFF's "Ground truth" section).
+    // pointer-identity self-check).
     // A non-self event for a guid that already has these populated leaves
     // them completely untouched -- not cleared, not overwritten.
     bool isSelfEvent = (parsed.caster == "self" || parsed.target == "self");

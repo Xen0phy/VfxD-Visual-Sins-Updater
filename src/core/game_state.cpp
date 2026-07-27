@@ -6,7 +6,7 @@
 // other consumer -- callers decide when to call these, this module just
 // answers "what is it right now."
 
-#include "game_state.h"
+#include "core/game_state.h"
 #include <cstring>
 
 namespace {

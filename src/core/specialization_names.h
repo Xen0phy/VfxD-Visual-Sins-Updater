@@ -5,8 +5,8 @@
 //
 // Unlike Mumble::EProfession/ERace (see game_state.h), which Mumble.h names
 // every value of directly, Guild Wars 2's specialization IDs are NOT
-// enumerated anywhere in Mumble.h, RTAPI.hpp, or any other header available
-// this session. They're an open-ended set defined by ArenaNet's own
+// enumerated anywhere in Mumble.h, RTAPI.hpp, or any other header
+// available. They're an open-ended set defined by ArenaNet's own
 // /v2/specializations API -- currently 81 entries (core + elite,
 // per-profession) and growing with every new elite specialization release,
 // not something baked into this addon's dependencies.
@@ -16,9 +16,7 @@
 // specialization_names.cpp. Cross-source equivalence (RTAPI's
 // EliteSpecialization and Mumble's Identity.Specialization sharing this
 // same id space) is now CONFIRMED by hand-testing: both resolve to the
-// correct name for the same live character. This was previously the one
-// open item blocking this table (see HANDOFF's "Explicitly closed"
-// section) -- no longer open.
+// correct name for the same live character.
 // ---------------------------------------------------------------------------
 
 // Returns the specialization's display name, or nullptr if `specializationId`

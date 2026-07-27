@@ -3,10 +3,8 @@
 #include <vector>
 
 // ---------------------------------------------------------------------------
-// "Report an effect back" feature -- see HANDOFF_LiveLogEnrichment.md's
-// "Report redesign -- decided plan" section for the full design this
-// implements. Reworked from the earlier single free-text-box version:
-// this is now a reporter identity line plus zero or more per-GUID blocks
+// "Report an effect back" feature. Reworked from a single free-text-box
+// version: this is now a reporter identity line plus zero or more per-GUID blocks
 // (each carrying its own Type and self-context snapshot) plus one required
 // free-text note.
 //
@@ -33,7 +31,7 @@
 // webhook_config.example.h for details). It's stored there XOR-obfuscated
 // rather than as plain text, mainly to avoid it showing up trivially in a
 // `strings` scan, and only reconstructed in memory right before each send
-// -- see report.cpp's DecodeWebhookUrl for exactly what that does and
+// -- see webhook_report.cpp's DecodeWebhookUrl for exactly what that does and
 // doesn't protect against.
 // ---------------------------------------------------------------------------
 
@@ -46,7 +44,7 @@ enum class EReportStatus
 };
 
 // One GUID block, fully rendered client-side before it's ever handed to
-// this file -- report.cpp never knows what a Type or a self-context field
+// this file -- webhook_report.cpp never knows what a Type or a self-context field
 // actually mean, it only ever sees the finished text plus the raw guid
 // (used for client-side duplicate-within-submission checking; the relay
 // separately dedups against everyone else's known-guid set). Building

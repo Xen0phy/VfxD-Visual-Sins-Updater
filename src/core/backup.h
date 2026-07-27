@@ -5,8 +5,8 @@
 
 // ---------------------------------------------------------------------------
 // Every write this addon makes (applied update, saved edit, category
-// rename/move -- see "Safety on write" in the handoff) copies its target to
-// a `.bak` first. Those `.bak` files are never touched again on their own;
+// rename/move) copies its target to a `.bak` first. Those `.bak` files
+// are never touched again on their own;
 // this module is what finally does something with them: list them, or
 // restore one.
 //

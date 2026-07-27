@@ -3,15 +3,14 @@
 // Elite/core specialization id -> display name table, populated from
 // https://api.guildwars2.com/v2/specializations?ids=all (public GW2 API,
 // no key required). See specialization_names.h for why this couldn't be
-// filled in from any header shared this session, and why it was left
+// filled in from any shared header, and why it was left
 // empty until now.
 //
 // Cross-source equivalence (RTAPI's EliteSpecialization vs Mumble's
 // Identity.Specialization sharing this same id space) is CONFIRMED by
 // hand-testing with this exact table -- both sources resolve to the
-// correct specialization name for the same live character. See
-// HANDOFF_LiveLogEnrichment.md's "Explicitly closed" section.
-#include "specialization_names.h"
+// correct specialization name for the same live character.
+#include "core/specialization_names.h"
 
 const char* SpecializationName(unsigned int specializationId)
 {

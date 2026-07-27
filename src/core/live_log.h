@@ -1,20 +1,19 @@
 #pragma once
-#include "game_state.h" // pulls in Nexus.h (AddonAPI_t) and Mumble.h (EProfession/ERace) together
+#include "core/game_state.h" // pulls in Nexus.h (AddonAPI_t) and Mumble.h (EProfession/ERace) together
 #include <string>
 #include <unordered_map>
 
 // ---------------------------------------------------------------------------
 // Live effect-log capture over the Nexus event bridge (vfxd_sins_bridge.h),
 // consumed from VfxDenoiser's log_effect once its side of the patch exists.
-// Until then, the standalone stub addon (see HANDOFF's build order) raises
+// Until then, the standalone stub addon raises
 // the same EV_VFXD_SINS_LOG events this listens for, so this module and its
 // UI can be built and tested with zero dependency on VfxDenoiser's repo.
 //
 // One entry per GUID, not one per event -- repeated events for the same
 // effect overwrite that entry's fields ("latest wins") rather than
 // appending, which is what keeps this bounded regardless of how often an
-// effect re-fires. See HANDOFF_VfxSins.md's "Live log display" section for
-// the full design writeup this implements.
+// effect re-fires.
 //
 // Same overall shape as report.h: the logic here doesn't reach into
 // addon.cpp's statics directly (s_installedJson etc.) -- the guid-to-name
@@ -34,8 +33,8 @@ struct LiveLogEntry
     bool        knownInSin = false;
     std::string displayName;    // sin effect name if knownInSin, else guid_b64
 
-    // Properly typed per log_effect's real signature (see HANDOFF's
-    // "Ground truth" section) -- duration is signed (can be negative), a4
+    // Properly typed per log_effect's real signature -- duration is
+    // signed (can be negative), a4
     // is always numeric (never "self"/"null"), and every one of these six
     // is a single whitespace-delimited token in infostr with no embedded
     // spaces, ever.

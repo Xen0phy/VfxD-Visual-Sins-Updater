@@ -16,9 +16,9 @@
 //   automatically by default, including cross-host ones, so no extra
 //   handling is needed for that -- flagging the assumption here in case a
 //   future WinHTTP policy change on the user's system disables it.
-#include "github_update.h"
-#include "sin_files.h"
-#include "merge.h"
+#include "integration/github_update.h"
+#include "core/sin_files.h"
+#include "core/merge.h"
 #include "nlohmann_json.hpp"
 #include <windows.h>
 #include <winhttp.h>

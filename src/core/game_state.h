@@ -23,7 +23,7 @@
 // addons; caches the DataLink pointers once rather than re-fetching them
 // every call.
 //
-// Source selection, per field, decided in HANDOFF_LiveLogEnrichment.md:
+// Source selection, per field:
 //   MapID          -- RTAPI if live, else Mumble.
 //   Profession     -- RTAPI if live, else Mumble. Numeric mapping confirmed
 //                     equivalent (both 0=None/Unknown, 1-9 same order).
@@ -78,8 +78,7 @@ Mumble::ERace        GameState_GetRace(); // always Mumble -- see note above
 const char* GameState_ProfessionName(Mumble::EProfession profession);
 const char* GameState_RaceName(Mumble::ERace race);
 
-// Report-time-only reads (see HANDOFF_LiveLogEnrichment.md's "Report
-// redesign" section) -- both are read fresh only when the report form
+// Report-time-only reads -- both are read fresh only when the report form
 // composes its reporter line, never cached or stored on a LiveLogEntry.
 //
 // Account name: RTAPI-only, no Mumble equivalent exists at all. Empty if

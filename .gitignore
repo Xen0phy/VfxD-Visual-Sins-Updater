@@ -1,9 +1,8 @@
-src/webhook_config.h
 .backup-excludes
 .clangd
 backup
 build
 
-# Real Discord webhook URL -- see src/webhook_config.example.h for the
+# Real Discord webhook URL -- see src/integration/webhook_config.example.h for the
 # committed template this is copied from. Never commit the real one.
-src/webhook_config.h
+webhook_config.h

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Generates src/webhook_config.h from a plain Discord webhook URL, XOR-
-obfuscated with the same fixed key report.cpp decodes with at runtime (see
-kWebhookXorKey in src/report.cpp -- keep KEY below in sync with that one if
+Generates src/integration/webhook_config.h from a plain Discord webhook URL, XOR-
+obfuscated with the same fixed key webhook_report.cpp decodes with at runtime (see
+kWebhookXorKey in src/integration/webhook_report.cpp -- keep KEY below in sync with that one if
 you ever change it).
 
 This is NOT encryption and isn't meant to be -- it only keeps the URL from
@@ -10,18 +10,18 @@ showing up as one plain readable string in a `strings`/hex-editor pass over
 the built DLL. Anyone stepping through the DLL in a debugger, or hooking
 WinHttpConnect/WinHttpSendRequest, still sees the real URL the moment
 DecodeWebhookUrl() reconstructs it in memory to make the request. See
-report.h's header comment and HANDOFF_VfxSins.md for the fuller picture of
+webhook_report.h's header comment for the fuller picture of
 what this does and doesn't protect against.
 
 Usage:
-    python3 tools/generate_webhook_config.py "https://discord.com/api/webhooks/.../..." > src/webhook_config.h
+    python3 tools/generate_webhook_config.py "https://discord.com/api/webhooks/.../..." > src/integration/webhook_config.h
 
 Run from the repo root so the redirect lands in the right place. The
-result is gitignored (src/webhook_config.h) -- never commit it.
+result is gitignored (src/integration/webhook_config.h) -- never commit it.
 """
 import sys
 
-# Must match kWebhookXorKey in src/report.cpp exactly, byte for byte.
+# Must match kWebhookXorKey in src/integration/webhook_report.cpp exactly, byte for byte.
 KEY = [0x5A, 0x3C, 0x91, 0x7E, 0x2D, 0xC8, 0x11]
 
 

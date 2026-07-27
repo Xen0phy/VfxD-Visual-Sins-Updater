@@ -16,9 +16,6 @@
 // boundary only for the duration of a synchronous callback; don't assume the
 // two sides were compiled with the same toolchain beyond "this specific
 // struct's layout matches."
-//
-// See HANDOFF_VfxSins.md, to-do item 1, for the full design writeup this
-// implements.
 // ---------------------------------------------------------------------------
 
 // Notifications (no payload), raised by VfxDSinsUpdater whenever its live-
