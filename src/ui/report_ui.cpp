@@ -81,6 +81,7 @@ struct ReportFormRow
     int                 raceIndex      = kRaceUnset;   // index into kRaceValues, or kRaceUnset
     Mumble::EProfession profession     = Mumble::EProfession::None; // None doubles as "not set"
     char                specializationText[64] = {};  // autocomplete box's live text; resolved to an id at compose time
+    bool                showSpecSuggest = false;       // visibility of the specialization suggestion window, tracked by hand (see report_ui.cpp render loop)
 };
 
 static bool                       s_reportAnonymous = false;
@@ -430,59 +431,67 @@ void RenderReportSection(const std::string& denoiserAddonDir)
         ImGui::PushItemWidth(90.0f);
         bool specTextChanged = ImGui::InputTextWithHint("##combo_specialization", "Specialization", row.specializationText, sizeof(row.specializationText));
         bool specJustActivated = ImGui::IsItemActivated();
+        bool specDeactivated   = ImGui::IsItemDeactivated();
         ImVec2 specBoxMin = ImGui::GetItemRectMin();
         ImVec2 specBoxMax = ImGui::GetItemRectMax();
         ImGui::PopItemWidth();
         ImGui::SameLine();
 
-        if (ImGui::SmallButton("Remove"))
-            removeIndex = (int)i;
-
-        // Real floating popup instead of inline Selectable()s gated on
-        // IsItemActive() -- clicking a suggestion moves focus off the
-        // input in that same frame, so an IsItemActive()-gated inline
-        // list can vanish (or shift layout underneath the click) before
-        // the click actually lands. OpenPopup here fires once, when you
-        // start typing or click into the box -- not every frame based
-        // on focus -- so the popup survives the click, and Selectable()
-        // inside a popup already closes it correctly on click.
-        const char* specPopupId = "##spec_suggest_popup";
+        // Suggestions render in a plain floating window, NOT an
+        // ImGui::OpenPopup/BeginPopup window -- deliberately.
+        // ImGui::NewFrame() unconditionally calls
+        // ClosePopupsOverWindow(g.NavWindow, false), which force-closes
+        // any open popup whose window isn't (or doesn't contain) the
+        // current NavWindow. Below we pass NoFocusOnAppearing so this
+        // window never steals keyboard focus from the input box (so
+        // typing keeps working) -- but that also means it never becomes
+        // NavWindow, so if this were a real Popup, ClosePopupsOverWindow
+        // would tear it down on the very next frame: a one-frame
+        // flicker at 60+fps, indistinguishable from "no popup at all".
+        // A plain Begin()/End() window is never pushed onto
+        // g.OpenPopupStack, so ClosePopupsOverWindow never touches it;
+        // we track its visibility with our own bool instead (set on
+        // activate/text-changed, cleared when the text is empty, a
+        // suggestion gets picked, or the input loses focus).
         if ((specJustActivated || specTextChanged) && row.specializationText[0] != '\0')
-            ImGui::OpenPopup(specPopupId);
+            row.showSpecSuggest = true;
+        if (row.specializationText[0] == '\0' || specDeactivated)
+            row.showSpecSuggest = false;
 
-        if (ImGui::IsPopupOpen(specPopupId))
+        if (row.showSpecSuggest)
         {
             ImGui::SetNextWindowPos(ImVec2(specBoxMin.x, specBoxMax.y));
             ImGui::SetNextWindowSize(ImVec2(specBoxMax.x - specBoxMin.x, 0));
-        }
-        if (ImGui::BeginPopup(specPopupId, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoFocusOnAppearing))
-        {
-            if (row.specializationText[0] == '\0')
+
+            char specSuggestWindowId[32];
+            std::snprintf(specSuggestWindowId, sizeof(specSuggestWindowId), "##spec_suggest_%d", (int)i);
+            ImGui::Begin(specSuggestWindowId, nullptr,
+                ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
+
+            std::string needle = LowerCopy(row.specializationText);
+            int shown = 0;
+            for (const auto& entry : AllSpecializations())
             {
-                ImGui::CloseCurrentPopup();
-            }
-            else
-            {
-                std::string needle = LowerCopy(row.specializationText);
-                int shown = 0;
-                for (const auto& entry : AllSpecializations())
+                if (shown >= 8)
+                    break;
+                if (LowerCopy(entry.second).find(needle) == std::string::npos)
+                    continue;
+                if (ImGui::Selectable(entry.second.c_str()))
                 {
-                    if (shown >= 8)
-                        break;
-                    if (LowerCopy(entry.second).find(needle) == std::string::npos)
-                        continue;
-                    if (ImGui::Selectable(entry.second.c_str()))
-                    {
-                        std::snprintf(row.specializationText, sizeof(row.specializationText), "%s", entry.second.c_str());
-                        ImGui::CloseCurrentPopup();
-                    }
-                    ++shown;
+                    std::snprintf(row.specializationText, sizeof(row.specializationText), "%s", entry.second.c_str());
+                    row.showSpecSuggest = false;
                 }
-                if (shown == 0)
-                    ImGui::TextDisabled("(no match -- will send as Unknown)");
+                ++shown;
             }
-            ImGui::EndPopup();
+            if (shown == 0)
+                ImGui::TextDisabled("(no match -- will send as Unknown)");
+
+            ImGui::End();
         }
+
+        if (ImGui::SmallButton("Remove"))
+            removeIndex = (int)i;
 
         ImGui::PopID();
         ImGui::Separator();
