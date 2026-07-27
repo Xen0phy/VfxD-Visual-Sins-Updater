@@ -364,6 +364,27 @@ bool BuildMergedRework(const std::vector<json*>& candidates,
 
     outRework.behaviorsConflict = isMerge && BehaviorsConflict(candidates);
 
+    // Captured now, while `candidates` still points at every matched old
+    // effect with its pre-merge name/path/behaviors intact -- this is the
+    // only point in the pipeline where that's still available. Recording
+    // it unconditionally alongside mergedAwayGuids (rather than trying to
+    // reconstruct it later from oldFile) means it survives even if
+    // StripConflictingMergedAwayGuids goes on to decide a given candidate
+    // isn't actually being deleted after all.
+    if (outRework.behaviorsConflict)
+    {
+        for (size_t i = 1; i < candidates.size(); ++i)
+        {
+            MergePlanMergeCandidate mc;
+            mc.name         = candidates[i]->value("name", std::string());
+            mc.categoryPath = PathOf(idx, *candidates[i]);
+            mc.behaviors    = (candidates[i]->contains("behaviors") && (*candidates[i])["behaviors"].is_array())
+                                  ? (*candidates[i])["behaviors"]
+                                  : json::array();
+            outRework.otherCandidates.push_back(std::move(mc));
+        }
+    }
+
     return true;
 }
 

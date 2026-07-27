@@ -142,6 +142,24 @@ struct MergePlanNewEffect
 // behaviors (settings) didn't all agree, so the survivor keeps its own
 // but the user should double-check them. Purely informational -- never
 // blocks ApplyMergePlan.
+// One OTHER matched candidate (i.e. everyone but the survivor) from a 1c
+// merge, captured at resolve time -- only ever populated when
+// `behaviorsConflict` ends up true (see below). This is what "review
+// before applying" is actually asking the user to review: `name`/
+// `categoryPath` say which effect this came from, `behaviors` is that
+// effect's own behaviors array as it stood at resolve time. Kept even for
+// a candidate that `mergedAwayGuids` later stops naming (see
+// StripConflictingMergedAwayGuids in merge.cpp) -- that candidate isn't
+// being deleted after all, it's alive under its own separate rework
+// elsewhere in this same plan, so `categoryPath` doubles as "here's where
+// to go look" instead of a value about to vanish.
+struct MergePlanMergeCandidate
+{
+    std::string               name;
+    std::vector<std::string>  categoryPath;
+    nlohmann::ordered_json    behaviors; // empty array if this candidate had none configured
+};
+
 struct MergePlanRework
 {
     std::string              oldName;
@@ -152,6 +170,9 @@ struct MergePlanRework
     std::vector<std::string> newCategoryPath;
     std::vector<std::string> mergedAwayGuids;
     bool                      behaviorsConflict = false;
+    // Every matched candidate but the survivor -- empty unless
+    // behaviorsConflict is true. See MergePlanMergeCandidate above.
+    std::vector<MergePlanMergeCandidate> otherCandidates;
 };
 
 // The full, human-displayable result of resolving newFile against oldFile.

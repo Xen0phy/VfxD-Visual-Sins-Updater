@@ -156,6 +156,43 @@ void RenderBehavior(const nlohmann::ordered_json& behavior)
     }
 }
 
+// Renders the discarded/disagreeing settings recorded on a merge conflict
+// (see MergePlanMergeCandidate in merge.h and "__vfxd_conflict_sources" in
+// installed_tree_overlay.cpp) -- one block per other matched candidate,
+// naming which effect it came from (and where it still lives in the tree,
+// for a candidate that survived under its own separate rework rather than
+// being deleted here) followed by its own behaviors. This is what "review
+// before applying" is asking the user to look at, shown right where the
+// warning already is instead of leaving them to go hunt for it.
+void RenderConflictSources(const nlohmann::ordered_json& effect)
+{
+    if (!effect.contains("__vfxd_conflict_sources") || !effect["__vfxd_conflict_sources"].is_array())
+        return;
+
+    for (const auto& src : effect["__vfxd_conflict_sources"])
+    {
+        std::string name     = src.value("name", std::string("(unnamed effect)"));
+        std::string category = src.value("category", std::string());
+
+        if (category.empty())
+            ImGui::TextColored(kDuplicateColor, "From \"%s\":", name.c_str());
+        else
+            ImGui::TextColored(kDuplicateColor, "From \"%s\" (in %s):", name.c_str(), category.c_str());
+
+        ImGui::Indent();
+        if (src.contains("behaviors") && src["behaviors"].is_array() && !src["behaviors"].empty())
+        {
+            for (const auto& behavior : src["behaviors"])
+                RenderBehavior(behavior);
+        }
+        else
+        {
+            ImGui::TextDisabled("(no behaviors configured)");
+        }
+        ImGui::Unindent();
+    }
+}
+
 // Per-sin cache for the duplicate/diff overlay trees RenderInstalledEffects
 // paints onto the installed tree (see BuildDuplicateOverlayTree/
 // BuildDiffOverlayTree below). Building either means deep-copying the
@@ -803,7 +840,7 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                                 ImGui::TextColored(effIsConflict ? kDuplicateColor : kReworkColor, "%s", msg.c_str());
                                 if (effIsConflict)
                                     ImGui::TextColored(kDuplicateColor,
-                                        "The merged effects had different settings below -- review before applying.");
+                                        "The merged effect(s) had different settings -- shown below, review before applying.");
                             }
                             else if (effIsConflict)
                             {
@@ -815,7 +852,7 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                                 // with this one's, so it's still worth a
                                 // second look.
                                 ImGui::TextColored(kDuplicateColor,
-                                    "This effect absorbed a GUID from another effect with different settings below -- review before applying.");
+                                    "This effect absorbed a GUID from another effect with different settings -- shown below, review before applying.");
                             }
                             else if (renamed || movedCat)
                             {
@@ -834,6 +871,15 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                             if (movedCat)
                                 ImGui::TextColored(kReworkColor, "Moved from \"%s\".",
                                     effect.value("__vfxd_old_category", std::string()).c_str());
+
+                            // The actual discarded/disagreeing settings a
+                            // conflict warning above is asking to be
+                            // reviewed -- named by which effect they came
+                            // from, and where that effect still lives if
+                            // it wasn't deleted here (see
+                            // RenderConflictSources's own comment).
+                            if (effIsConflict)
+                                RenderConflictSources(effect);
                         }
 
                         if (effect.contains("description") && effect["description"].is_string())
@@ -885,7 +931,8 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                                 || key == "__vfxd_hasnew" || key == "__vfxd_hasrework"
                                 || key == "__vfxd_dupe_guid" || key == "__vfxd_hasdupe"
                                 || key == "__vfxd_old_name" || key == "__vfxd_old_category"
-                                || key == "__vfxd_merged_count" || key == "__vfxd_conflict")
+                                || key == "__vfxd_merged_count" || key == "__vfxd_conflict"
+                                || key == "__vfxd_conflict_sources")
                                 continue;
                             RenderJsonValue(key, value);
                         }

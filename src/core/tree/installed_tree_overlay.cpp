@@ -279,7 +279,27 @@ nlohmann::ordered_json BuildDiffOverlayTree(const nlohmann::ordered_json& instal
         // "still has something left to delete" would silently hide a
         // genuine conflict merely because nothing physically disappears.
         if (rw.behaviorsConflict)
+        {
             (*survivor)["__vfxd_conflict"] = true;
+
+            // One entry per other matched candidate's own name/category/
+            // behaviors, so the tree view can show the user what actually
+            // disagreed instead of just flagging that something did. See
+            // MergePlanMergeCandidate's doc comment for why this stays
+            // populated even for a candidate mergedAwayGuids no longer
+            // names (it survives elsewhere under its own rework, and this
+            // is exactly what tells the user where to go look for it).
+            nlohmann::ordered_json sources = nlohmann::ordered_json::array();
+            for (const auto& c : rw.otherCandidates)
+            {
+                nlohmann::ordered_json src;
+                src["name"]      = c.name;
+                src["category"]  = JoinPath(c.categoryPath);
+                src["behaviors"] = c.behaviors;
+                sources.push_back(std::move(src));
+            }
+            (*survivor)["__vfxd_conflict_sources"] = std::move(sources);
+        }
 
         if (!rw.mergedAwayGuids.empty())
         {
