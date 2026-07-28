@@ -3,6 +3,6 @@
 backup
 build
 
-# Real Discord webhook URL -- see src/integration/webhook_config.example.h for the
+# Real webhook URL -- see src/integration/webhook_config.example.h for the
 # committed template this is copied from. Never commit the real one.
 webhook_config.h

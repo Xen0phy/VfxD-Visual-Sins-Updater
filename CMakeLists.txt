@@ -45,6 +45,12 @@ add_dependencies(VfxDSinsUpdater bump_rev)
 target_include_directories(VfxDSinsUpdater PRIVATE
     include
     src
+    src/addon
+    src/core
+    src/core/tree
+    src/integration
+    src/ui
+    src/ui/tree
 )
 
 target_link_libraries(VfxDSinsUpdater PRIVATE winhttp)

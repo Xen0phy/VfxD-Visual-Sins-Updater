@@ -1,16 +1,12 @@
+//################################################################################
 // specialization_names.cpp
-//
-// Elite/core specialization id -> display name table, populated from
-// https://api.guildwars2.com/v2/specializations?ids=all (public GW2 API,
-// no key required). See specialization_names.h for why this couldn't be
-// filled in from any shared header, and why it was left
-// empty until now.
-//
-// Cross-source equivalence (RTAPI's EliteSpecialization vs Mumble's
-// Identity.Specialization sharing this same id space) is CONFIRMED by
-// hand-testing with this exact table -- both sources resolve to the
-// correct specialization name for the same live character.
-#include "core/specialization_names.h"
+//--------------------------------------------------------------------------------
+// See specialization_names.h for the module contract, the table's
+// source, and the cross-source-equivalence note. Owns: the actual
+// id -> display-name switch, generated from the GW2 API response.
+//--------------------------------------------------------------------------------
+
+#include "specialization_names.h"
 
 const char* SpecializationName(unsigned int specializationId)
 {
@@ -99,6 +95,6 @@ const char* SpecializationName(unsigned int specializationId)
         case 81: return "Luminary";
 
         default:
-            return nullptr; // not in the table yet -- caller falls back to the raw numeric id
+            return nullptr;   //. falls back to raw id
     }
 }

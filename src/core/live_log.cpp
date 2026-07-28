@@ -1,13 +1,17 @@
+//################################################################################
 // live_log.cpp
-//
+//--------------------------------------------------------------------------------
 // See live_log.h for the module contract and vfxd_sins_bridge.h for the
 // wire format. This file owns: the subscribe/unsubscribe lifecycle, the
-// one-entry-per-guid storage map, the drop-on-arrival "hide known" filter,
-// and infostr parsing. Rendering (the CollapsingHeader, the tree, the
-// toggles) stays in addon.cpp alongside every other section, same as
+// one-entry-per-guid storage map, the drop-on-arrival "hide known"
+// filter, and infostr parsing. Rendering (the CollapsingHeader, the tree,
+// the toggles) stays in addon.cpp alongside every other section, same as
 // backup.cpp/report.cpp already do for their own sections.
-#include "core/live_log.h"
-#include "integration/vfxd_sins_bridge.h"
+//--------------------------------------------------------------------------------
+
+#include "live_log.h"
+#include "vfxd_sins_bridge.h"
+
 #include <sstream>
 
 namespace {
@@ -16,42 +20,39 @@ AddonAPI_t* s_api        = nullptr;
 bool        s_listening  = false;
 bool        s_hideKnown  = false;
 
-// Defaults from characterizing real captured data: types 0,
-// 1, 9, 11 start disabled (never/rarely visible, a group toggle, or a
-// near-duplicate of another group toggle -- not useful to see by default),
-// everything else starts enabled. Plain array, not persisted anywhere --
-// reset to these defaults every time the DLL loads, by construction of
-// being a static initializer.
+//_ Types 0, 1, 9, 11 start disabled (rarely useful by default); the rest
+// start enabled -- from characterizing real captured data. Not persisted
+// anywhere; resets to these defaults every time the DLL loads.
 bool s_typeEnabled[kLiveLogTypeCount] = {
     false, false, true, true, true, true, true, true, true, false, true, false
 };
 
-// Monotonic counter for LiveLogEntry::firstSeenSeq -- assigned once per
-// guid, on genuine first sight, so the render order can follow "received
-// order" without re-deriving it from anything else. Reset alongside
-// LiveLog_Clear() so a cleared log's next entry starts back at 0 rather
-// than continuing to climb.
+//_ Assigned once per guid on genuine first sight (see firstSeenSeq), so
+// render order can follow "received order" without re-deriving it. Reset
+// alongside LiveLog_Clear() so a cleared log's next entry starts at 0.
 int s_nextSeq = 0;
 
-std::unordered_map<std::string, LiveLogEntry> s_entries;        // guid_b64 -> entry
-std::unordered_map<std::string, std::string>  s_guidToName;     // last name map handed to us by addon.cpp
-std::unordered_map<std::string, std::string>  s_guidToBehavior; // last behavior map handed to us by addon.cpp
+std::unordered_map<std::string, LiveLogEntry> s_entries;        //. guid_b64 -> entry
+std::unordered_map<std::string, std::string>  s_guidToName;     //. name map from addon.cpp
+std::unordered_map<std::string, std::string>  s_guidToBehavior; //. behavior map from addon.cpp
 
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// ParseInfoFields
+//--------------------------------------------------------------------------------
 // infostr's shape (see log_effect): an optional leading effectDef name
-// (the one part that CAN contain spaces), then "type:" onward is a run of
-// whitespace-delimited "key:value" tokens with no fixed order requirement,
-// followed by optional trailing found_effect->name / " -> " + behavior
-// text that isn't ours to parse anymore (see live_log.h: `behavior` is
-// fully removed). Since every field value is confirmed to be a single
-// token with no embedded spaces, each one is bounded by "read to the next
-// whitespace" rather than by searching for the next key's literal text --
-// this removes the old target-is-last special case (no more " -> "
-// search) and stops depending on keys appearing in a fixed order at all.
+// (the one part that can contain spaces), then "type:" onward is a run of
+// whitespace-delimited "key:value" tokens with no fixed order
+// requirement, followed by optional trailing found_effect->name / " -> "
+// + behavior text that isn't ours to parse anymore (see live_log.h:
+// `behavior` is fully removed). Every field value is a single token with
+// no embedded spaces, so each one is bounded by "read to the next
+// whitespace" rather than by searching for the next key's literal text.
+//--------------------------------------------------------------------------------
 void ParseInfoFields(const std::string& info, LiveLogEntry& e)
 {
-    size_t pos = info.find("type:"); // skip past the optional leading effectDef name
+    size_t pos = info.find("type:");   //. skip the leading effectDef name
     if (pos == std::string::npos)
-        return; // malformed line -- nothing to parse
+        return;   //. malformed line
 
     std::istringstream tokens(info.substr(pos));
     std::string tok;
@@ -59,7 +60,7 @@ void ParseInfoFields(const std::string& info, LiveLogEntry& e)
     {
         size_t eq = tok.find(':');
         if (eq == std::string::npos)
-            break; // trailing "found_effect->name [-> behavior]" text -- ignore, not our concern anymore
+            break;   //. trailing name/behavior text
 
         std::string key = tok.substr(0, eq + 1);
         std::string val = tok.substr(eq + 1);
@@ -72,46 +73,49 @@ void ParseInfoFields(const std::string& info, LiveLogEntry& e)
             else if (key == "caster:")   e.caster   = val;
             else if (key == "a6:")       e.a6       = val;
             else if (key == "target:")   e.target   = val;
-            else break; // unrecognized token -- start of trailing name/behavior text, stop here
+            else break;   //. unrecognized token, stop here
         }
         catch (...)
         {
-            break; // malformed numeric token -- reject rather than silently truncate, same spirit as before
+            break;   //. malformed token, don't truncate
         }
     }
 }
 
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// IngestLogLine
+//--------------------------------------------------------------------------------
 // The actual ingestion path, shared by the real Events_Subscribe callback
-// below and usable directly by test code without going through Nexus at
-// all. Deliberately takes plain strings, not the raw event struct, so it
-// never has to trust the payload's lifetime past this call.
+// below and directly usable by test code without going through Nexus at
+// all. Takes plain strings, not the raw event struct, so it never has to
+// trust the payload's lifetime past this call. Drops the event, before it
+// ever becomes/updates an entry, if its type is toggled off or hideKnown
+// applies; otherwise inserts-or-updates the one entry for this guid,
+// "latest wins".
+//--------------------------------------------------------------------------------
 void IngestLogLine(const std::string& guid_b64, const std::string& info)
 {
-    // Parsed into a scratch entry first, not the real map slot, so the
-    // filter check below can use the freshly-parsed type without a
-    // separate single-field parse pass (today's ParseTypeValue is gone --
-    // the same typed value now serves both the filter check and storage).
+    //_ Parsed into a scratch entry first so the filter check below can
+    // use the freshly-parsed type without a separate parse pass.
     LiveLogEntry parsed{};
     ParseInfoFields(info, parsed);
 
     if (parsed.type >= 0 && parsed.type < kLiveLogTypeCount && !s_typeEnabled[parsed.type])
-        return; // this type is toggled off -- dropped before ever becoming/updating an entry
+        return;   //. type toggled off
 
     bool known = s_guidToName.count(guid_b64) > 0;
     if (s_hideKnown && known)
-        return; // dropped here -- never becomes/updates an entry, nothing written in the background for it
+        return;   //. hideKnown drop
 
-    LiveLogEntry& entry = s_entries[guid_b64]; // insert-or-get: repeats collapse onto the same entry
+    LiveLogEntry& entry = s_entries[guid_b64]; //. insert-or-get: repeats collapse onto the same entry
     if (entry.seenCount == 0)
-        entry.firstSeenSeq = s_nextSeq++; // only on genuine first sight of this guid -- never touched again
+        entry.firstSeenSeq = s_nextSeq++;   //. first sight only
 
     entry.guid_b64     = guid_b64;
     entry.knownInSin   = known;
     entry.displayName  = known ? s_guidToName.at(guid_b64) : guid_b64;
-    // Independent lookup, never derived from the event itself -- see
-    // live_log.h's field comment. s_guidToBehavior is built from the same
-    // installed-sin walk as s_guidToName, but guarded separately in case
-    // the two maps are ever out of sync (e.g. mid-refresh).
+    //_ Independent lookup, never derived from the event (see live_log.h)
+    // -- guarded separately from s_guidToName in case the two go out of sync.
     entry.installedBehavior = (known && s_guidToBehavior.count(guid_b64)) ? s_guidToBehavior.at(guid_b64) : "";
     entry.type     = parsed.type;
     entry.duration = parsed.duration;
@@ -121,22 +125,26 @@ void IngestLogLine(const std::string& guid_b64, const std::string& info)
     entry.target   = parsed.target;
     entry.seenCount++;
 
-    // Self-only enrichment: written only when this event's caster or
-    // target is "self" (exact reproduction of VfxDenoiser's own
-    // pointer-identity self-check).
-    // A non-self event for a guid that already has these populated leaves
-    // them completely untouched -- not cleared, not overwritten.
+    //_ Written only when this event's caster or target is "self" (exact
+    // match of VfxDenoiser's own pointer-identity check) -- see LiveLogEntry.
     bool isSelfEvent = (parsed.caster == "self" || parsed.target == "self");
     if (isSelfEvent)
     {
         entry.mapID          = GameState_GetMapID();
         entry.profession     = GameState_GetProfession();
         entry.specialization = GameState_GetSpecialization();
-        entry.race           = GameState_GetRace(); // always Mumble -- see game_state.h's "Known gap" note
+        entry.race           = GameState_GetRace();
         entry.hasSelfContext = true;
     }
 }
 
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// OnVfxdSinsLog
+//--------------------------------------------------------------------------------
+// Events_Subscribe callback for EV_VFXD_SINS_LOG. Copies the event's
+// pointers out immediately, since they're only valid for the duration of
+// this callback (see vfxd_sins_bridge.h), then hands off to IngestLogLine.
+//--------------------------------------------------------------------------------
 void OnVfxdSinsLog(void* aEventArgs)
 {
     if (!aEventArgs)
@@ -144,16 +152,14 @@ void OnVfxdSinsLog(void* aEventArgs)
 
     const auto* evt = static_cast<const VfxSinsLogEvent*>(aEventArgs);
     if (evt->struct_version != kVfxSinsLogEventVersion)
-        return; // unknown shape -- ignore rather than misread it
+        return;   //. unknown shape, ignore
 
-    // Copy out immediately: these pointers are only valid for the duration
-    // of this callback (see vfxd_sins_bridge.h).
     std::string guid_b64 = evt->guid_b64 ? evt->guid_b64 : "";
     std::string info     = evt->info     ? evt->info     : "";
     IngestLogLine(guid_b64, info);
 }
 
-} // namespace
+} //. namespace
 
 void LiveLog_Init(AddonAPI_t* aApi)
 {
@@ -177,7 +183,7 @@ void LiveLog_Shutdown(AddonAPI_t* aApi)
 void LiveLog_SetListening(AddonAPI_t* aApi, bool listening)
 {
     if (listening == s_listening)
-        return; // no real state change -- don't spam the event bus from a checkbox re-rendering every frame
+        return;   //. no real change
 
     s_listening = listening;
     if (aApi)
@@ -202,7 +208,7 @@ bool LiveLog_GetHideKnown()
 bool LiveLog_GetTypeEnabled(int type)
 {
     if (type < 0 || type >= kLiveLogTypeCount)
-        return true; // fail open -- an unrecognized type is never silently dropped
+        return true;   //. fail open
     return s_typeEnabled[type];
 }
 

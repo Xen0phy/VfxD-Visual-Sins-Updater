@@ -1,7 +1,12 @@
-#pragma once
-#include <cstdint>
 
-// ---------------------------------------------------------------------------
+//################################################################################
+// vfxd_sins_bridge.h
+//--------------------------------------------------------------------------------
+// EV_VFXD_SINS_LISTEN_START/STOP   live-capture toggle notifications (no payload)
+// EV_VFXD_SINS_LOG                 raised once per logged effect while listening
+// kVfxSinsLogEventVersion          current EV_VFXD_SINS_LOG payload version
+// VfxSinsLogEvent                  the payload struct itself
+//--------------------------------------------------------------------------------
 // Wire contract between VfxDenoiser and VfxDSinsUpdater for live effect-log
 // capture, carried over Nexus's Events_Raise/Events_Subscribe rather than a
 // network endpoint -- both addons already load through Nexus and get an
@@ -16,36 +21,47 @@
 // boundary only for the duration of a synchronous callback; don't assume the
 // two sides were compiled with the same toolchain beyond "this specific
 // struct's layout matches."
-// ---------------------------------------------------------------------------
+//--------------------------------------------------------------------------------
 
-// Notifications (no payload), raised by VfxDSinsUpdater whenever its live-
-// capture UI toggle changes state. VfxDenoiser's patched log_effect only
-// raises EV_VFXD_SINS_LOG while listening is active on our side -- this is
-// what keeps its own logged_effects list from growing unbounded while we're
-// capturing instead.
+#pragma once
+
+#include <cstdint>
+
+//_ Raised when live-capture toggles on/off; VfxDenoiser's log_effect only
+// emits EV_VFXD_SINS_LOG while listening, so its own logged_effects list
+// doesn't grow unbounded while we capture instead.
 inline constexpr const char* EV_VFXD_SINS_LISTEN_START = "EV_VFXD_SINS_LISTEN_START";
 inline constexpr const char* EV_VFXD_SINS_LISTEN_STOP  = "EV_VFXD_SINS_LISTEN_STOP";
 
-// Raised by VfxDenoiser's log_effect (or, until that patch exists, by the
-// stub addon), one per call, only while listening is active. Payload is a
-// VfxSinsLogEvent* -- valid only for the duration of the subscriber
-// callback. Copy the strings out immediately rather than holding the
-// pointer: log_effect likely runs on the game's render/update thread, so
-// Events_Raise (and this callback) fires synchronously there too.
+//_ One per logged effect, only while listening. Payload is a
+// VfxSinsLogEvent* valid only for the callback -- copy strings out
+// immediately, since log_effect fires synchronously on the render thread.
 inline constexpr const char* EV_VFXD_SINS_LOG = "EV_VFXD_SINS_LOG";
 
-// Current payload shape. Bump this if the fields below ever change, and
-// have readers on both sides ignore anything with a struct_version they
-// don't recognize rather than guessing at a layout that may not match.
+//_ Bump if the struct layout changes; readers on both sides should ignore
+// any struct_version they don't recognize rather than guess at a
+// mismatched layout.
 inline constexpr uint32_t kVfxSinsLogEventVersion = 1;
 
 extern "C" {
 
+//********************************************************************************
+// VfxSinsLogEvent
+//--------------------------------------------------------------------------------
+// struct_version   = kVfxSinsLogEventVersion for this shape
+// guid_b64         guid_to_base64(effectDef->guid) -- same encoding as
+//                   VfxDenoiser's own log.txt
+// info             the already-built infostr, verbatim, from before
+//                   log_file's own found_effect/behavior double-append
+//--------------------------------------------------------------------------------
+// The EV_VFXD_SINS_LOG payload -- see the file header above for its
+// lifetime and cross-DLL layout rules.
+//--------------------------------------------------------------------------------
 struct VfxSinsLogEvent
 {
-    uint32_t    struct_version; // = kVfxSinsLogEventVersion for this shape
-    const char* guid_b64;       // guid_to_base64(effectDef->guid) -- same encoding VfxDenoiser's own log.txt already uses
-    const char* info;           // the already-built infostr, verbatim, from before log_file's own found_effect/behavior double-append
+    uint32_t    struct_version;
+    const char* guid_b64;
+    const char* info;
 };
 
-} // extern "C"
+} //. extern "C"

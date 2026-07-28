@@ -1,67 +1,75 @@
+//################################################################################
 // addon.cpp
-//
-// The addon's actual behavior, split out from entry.cpp's bare Nexus
-// wiring (which now owns AddonLoad/AddonUnload themselves, including
-// locating VfxDenoiser and kicking off/tearing down the initial silent
-// update check): the options-panel UI (RT_OptionsRender), driven by
-// Addon_Init below handing off entry.cpp's load-time findings. All the
+//--------------------------------------------------------------------------------
+// RenderSinDiffStatus(diff)   result text under a sin's action button
+// RenderSinActionRow()        three per-sin action columns (install/check/apply)
+// OptionsRenderCallback()     top-level options-panel draw
+// Addon_Init(...)             stores aApi/dir/found handed off from entry.cpp
+//--------------------------------------------------------------------------------
+// The addon's actual behavior, split out from entry.cpp's bare Nexus wiring
+// (which owns AddonLoad/AddonUnload, including locating VfxDenoiser and the
+// initial silent update check): the options-panel UI (RT_OptionsRender),
+// driven by Addon_Init handing off entry.cpp's load-time findings. All the
 // update-check/merge logic itself lives in sin_files.*, github_update.*
 // and merge.*; this file is UI glue plus the addon's own state (which
 // folder it's pointed at, what's currently cached for display) over that.
 //
-// The addon has no floating window of its own -- everything lives inside
-// Nexus's own options panel (RT_OptionsRender), registered once and drawn
-// only while that panel is open.
-#include "addon/addon.h"
+// The addon has no floating window of its own - everything lives inside
+// Nexus's own options panel, registered once and drawn only while that
+// panel is open. The always-visible installed-effects tree (data owned by
+// installed_tree_store.*) is what RenderInstalledEffects draws below the
+// action row, and is also what the right-click-to-edit feature extends.
+//--------------------------------------------------------------------------------
+
+#include "addon.h"
+#include "backups_ui.h"
+#include "github_update.h"
 #include "imgui.h"
-#include "integration/github_update.h"
-#include "core/sin_files.h"
-#include "addon/ui_colors.h"
-#include "core/tree/installed_tree_store.h"
-#include "ui/tree/installed_tree_view.h"
-#include "ui/report_ui.h"
-#include "ui/backups_ui.h"
-#include "ui/live_log_ui.h"
-#include <string>
+#include "installed_tree_store.h"
+#include "installed_tree_view.h"
+#include "live_log_ui.h"
+#include "report_ui.h"
+#include "sin_files.h"
+#include "ui_colors.h"
+
 #include <atomic>
+#include <string>
 
 static std::string s_denoiserAddonDir;
 
-// Set once, via Addon_Init (called from entry.cpp's AddonLoad), to the same
-// AddonAPI_t pointer entry.cpp got from Nexus. Only used for aApi->Log calls
-// from this file (SaveInstalledSinFile's write-failure path) -- never
-// reassigned afterward, so reading it later is safe without a lock, same as
-// s_denoiserAddonDir below.
+//_ Set once via Addon_Init, to the AddonAPI_t pointer entry.cpp got from
+// Nexus; only used for aApi->Log here. Never reassigned, so reading it
+// later is safe without a lock, same as s_denoiserAddonDir above.
 static AddonAPI_t* s_api = nullptr;
 
-// Set once, via Addon_Init, to true only if VfxDenoiser's addon folder
-// actually exists (as determined by entry.cpp's AddonLoad) -- avoids
-// repeatedly rescanning a folder we already know isn't there.
+//_ Set once via Addon_Init to whether VfxDenoiser's folder actually
+// exists; avoids repeatedly rescanning a folder already known missing.
 static std::atomic<bool> s_denoiserFound{false};
 
-// ---------------------------------------------------------------------------
-// Always-visible read-only effect tree (separate from the update diff view
-// below it). The "what's actually installed" data itself -- the parsed
-// sin files, the loaded/generation bookkeeping -- now lives in
-// installed_tree_store.h/.cpp; see that header for the read/write API.
-// This is also the renderer the right-click-to-edit feature extends.
-// ---------------------------------------------------------------------------
-
-// Set right when the user clicks Install or Apply changes (both live in the
-// top action row's per-sin button now, see RenderSinActionRow) --
-// StartInstallSin/StartApplyUpdate already
-// serialize with each other via github_update.cpp's own single in-flight
-// guard, so at most one of these is ever meaningfully "the" pending one;
-// this just lets the right column say "Installing.../Applying..." instead
-// of every column reading the same generic busy state.
+//_ Set when the user clicks Install/Apply so the right column can say
+// Installing.../Applying... instead of a generic busy state;
+// StartInstallSin/StartApplyUpdate already serialize via
+// github_update.cpp's single in-flight guard, so at most one is pending.
 static std::string s_pendingActionSin;
 
 namespace {
 
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// RenderSinDiffStatus
+//--------------------------------------------------------------------------------
+// Renders the result text under a sin's action button once its diff state
+// has something to say (see RenderSinActionRow). NotLoaded/Loading/Error/
+// Blocked cover the check step; Ready covers the loaded plan - empty means
+// only a version bump, otherwise counts new/reworked effects (colored to
+// match the Installed Effects tree overlay) and flags any merged items
+// with conflicting settings. Blocked mirrors the duplicate-GUID gate
+// already shown in red on the Installed Effects tree, not a second,
+// independent check.
+//--------------------------------------------------------------------------------
 static void RenderSinDiffStatus(const SinDiffInfo* diff)
 {
     if (!diff || diff->status == EDiffStatus::NotLoaded)
-        return; // button above already reads "Update available"; nothing more to say yet
+        return;
 
     if (diff->status == EDiffStatus::Loading)
     {
@@ -77,41 +85,24 @@ static void RenderSinDiffStatus(const SinDiffInfo* diff)
 
     if (diff->status == EDiffStatus::Blocked)
     {
-        // Set by StartLoadDiff, which deliberately never even downloaded
-        // anything for this sin -- see its own comment. Same underlying
-        // condition RenderInstalledEffects already shows in red on the
-        // tree above; this is the same gate surfacing on the update side
-        // rather than a second, independent check.
         ImGui::TextColored(kDuplicateColor,
             "Duplicate GUID (see Installed Effects tree above) -- resolve it, then click above to retry.");
         return;
     }
 
-    // diff->status == Ready from here on.
+    //_ diff->status == Ready falls through from here.
     const MergePlan& plan = diff->plan;
 
     if (plan.IsEmpty())
     {
-        // Version bumped upstream but nothing this addon tracks actually
-        // changed (e.g. only metadata outside the merge rules changed) --
-        // still safe/useful to let the user bump the stored version.
         ImGui::TextDisabled("No effect changes -- just a version bump.");
     }
     else
     {
-        // Per-item detail (which effects, old/new guids, category
-        // placement) is shown as coloring directly in the "Installed
-        // Effects" tree below -- BuildDiffOverlayTree overlays this same
-        // plan onto it -- rather than a second, separate list here.
         ImGui::TextDisabled(
             "%d new, %d refreshed -- see Installed Effects below (green = new, orange = refreshed).",
             (int)plan.inserts.size(), (int)plan.reworks.size());
 
-        // A merge (case 1c) whose folded-together candidates had
-        // different settings is flagged here too -- purely informational,
-        // never blocks Apply, but worth calling out right under the
-        // button that would apply it rather than only as coloring several
-        // scrolls down in the tree.
         int conflictCount = 0;
         for (const auto& rw : plan.reworks)
             if (rw.behaviorsConflict)
@@ -122,25 +113,19 @@ static void RenderSinDiffStatus(const SinDiffInfo* diff)
     }
 }
 
-} // namespace
+} //. namespace
 
-// ---------------------------------------------------------------------------
-// Three always-visible columns, one per known sin (kSinNames order:
-// Gluttony, Pride, Sloth) -- the entry point for both "get this sin at all"
-// and "see/apply a pending update," entirely from up here. Deliberately
-// placed above the collapsing headers so it doesn't require expanding
-// anything, and is now the ONLY place any of this lives -- there is no
-// separate "Check now" section below anymore.
-//
-// NotInstalled calls StartInstallSin directly (a fresh file, nothing to
-// preview -- there's no local copy to diff against). UpdateAvailable's
-// button doubles as both steps of the check->apply cycle for just that one
-// sin: first click calls StartLoadDiff, and once that resolves, the same
-// button relabels to "Apply changes" and applies via StartApplyUpdate. The
-// diff's result text (RenderSinDiffStatus) renders right under that same
-// button once it has something to say, rather than in a separate section
-// elsewhere -- see that function's own comment for why.
-// ---------------------------------------------------------------------------
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// RenderSinActionRow
+//--------------------------------------------------------------------------------
+// Three always-visible per-sin columns (kSinNames order), the entry point
+// for both installing a sin and checking/applying its pending update -
+// deliberately above the collapsing headers so nothing needs expanding.
+// NotInstalled calls StartInstallSin directly. UpdateAvailable's button
+// doubles as both steps: first click calls StartLoadDiff, then relabels
+// to "Apply changes" and calls StartApplyUpdate; RenderSinDiffStatus
+// renders the result underneath.
+//--------------------------------------------------------------------------------
 static void RenderSinActionRow()
 {
     static const char* kSinDescriptions[kSinCount] = {
@@ -154,9 +139,8 @@ static void RenderSinActionRow()
     bool checking = (checkStatus == ECheckStatus::Checking);
     bool applying = (applyStatus == EApplyStatus::Applying);
 
-    // The pending-sin tag only means anything while something is actually
-    // applying -- once it settles (Done/Error/Idle) the label it was
-    // reserving is stale.
+    //_ The pending tag only matters while applying; once it settles the
+    // label it reserved is stale.
     if (!applying)
         s_pendingActionSin.clear();
 
@@ -166,9 +150,8 @@ static void RenderSinActionRow()
     std::vector<SinUpdateInfo> sinInfo = GetSinUpdateInfo();
     std::vector<SinDiffInfo>   diffs   = GetSinDiffInfo();
 
-    // imgui 1.80 doesn't have BeginDisabled/EndDisabled -- every button
-    // below follows addon.cpp's existing convention elsewhere (swap the
-    // label, ignore the click) rather than true graying-out.
+    //_ imgui 1.80 lacks BeginDisabled/EndDisabled; buttons below swap
+    // label or ignore the click instead of true graying-out.
     ImGui::Columns(kSinCount, "sin_action_columns", false);
     for (int i = 0; i < kSinCount; ++i)
     {
@@ -182,10 +165,8 @@ static void RenderSinActionRow()
         for (const auto& s : sinInfo)
             if (s.sinName == sinName) { info = &s; break; }
 
-        // No result yet at all (e.g. the very first frame or two after
-        // addon load, before the on-load check has landed) reads the same
-        // as NotInstalled for button purposes -- it'll settle within a
-        // frame or two once GetSinUpdateInfo() has something.
+        //_ No result yet (first frame or two after load) reads as
+        // NotInstalled; settles once GetSinUpdateInfo() has data.
         ESinUpdateState state = info ? info->state : ESinUpdateState::NotInstalled;
         bool pendingHere = (applying && s_pendingActionSin == sinName);
 
@@ -207,15 +188,6 @@ static void RenderSinActionRow()
         }
         else if (state == ESinUpdateState::UpdateAvailable)
         {
-            // Same button doubles as two steps: first click loads just
-            // THIS sin's diff (StartLoadDiff's per-sin filter -- doesn't
-            // touch the other two outdated sins, if any), which is also
-            // what makes RenderSinDiffStatus below have something to show
-            // and the colored Installed Effects tree overlay appear
-            // further down (both already key off GetSinDiffInfo(); no
-            // separate wiring needed for that part). Once that diff is
-            // Ready, the same button relabels to "Apply changes" and a
-            // second click applies it via StartApplyUpdate.
             const SinDiffInfo* diff = nullptr;
             for (const auto& d : diffs)
                 if (d.sinName == sinName) { diff = &d; break; }
@@ -239,10 +211,8 @@ static void RenderSinActionRow()
                 case EDiffStatus::Error:
                     label = "Error -- retry";   clickable = true; break;
                 case EDiffStatus::Blocked:
-                    // Never becomes Ready until the duplicate guid this is
-                    // warning about is resolved (see the Installed
-                    // Effects tree below) -- clicking this button again
-                    // just re-checks that.
+                    //_ Stays until the duplicate GUID is resolved (see
+                    // tree below); another click just re-checks it.
                     label = "Blocked -- see below"; clickable = true; break;
             }
 
@@ -261,7 +231,9 @@ static void RenderSinActionRow()
 
             RenderSinDiffStatus(diff);
         }
-        else // UpToDate (or Unknown, treated the same -- nothing actionable)
+        //_ UpToDate falls here (Unknown too - treated the same, nothing
+        // actionable).
+        else
         {
             ImGui::Button("Up to date");
         }
@@ -275,12 +247,9 @@ static void RenderSinActionRow()
     if (!lastMsg.empty())
         ImGui::TextWrapped("%s", lastMsg.c_str());
 
-    // An apply/install just wrote new content to disk -- drop the
-    // installed-tree cache so the next time that section is open/expanded
-    // it reloads from the just-written file rather than showing what was
-    // there before the update. Compared against the message text rather
-    // than a one-shot flag since GetLastApplyMessage() is what's already
-    // being polled every frame here.
+    //_ New content was written to disk; drop the installed-tree cache so
+    // it reloads next time expanded (compares against the message text,
+    // already polled every frame here).
     static std::string s_lastSeenApplyMsg;
     if (lastMsg != s_lastSeenApplyMsg)
     {
@@ -292,6 +261,13 @@ static void RenderSinActionRow()
     ImGui::Separator();
 }
 
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// OptionsRenderCallback
+//--------------------------------------------------------------------------------
+// Top-level options-panel draw: the sin action row, then Installed
+// Effects/Live Log/Backups/Report sections as collapsing headers. Shows a
+// disabled message instead if VfxDenoiser isn't installed.
+//--------------------------------------------------------------------------------
 void OptionsRenderCallback()
 {
     if (!s_denoiserFound.load())
@@ -300,7 +276,7 @@ void OptionsRenderCallback()
         return;
     }
 
-    // imgui 1.80 doesn't have SeparatorText (added in a later version).
+    //_ imgui 1.80 has no SeparatorText (added in a later version).
     ImGui::Text("Visual Sins Updater");
     ImGui::Separator();
 

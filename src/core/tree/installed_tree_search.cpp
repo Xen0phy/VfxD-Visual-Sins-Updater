@@ -1,10 +1,14 @@
+//################################################################################
 // installed_tree_search.cpp
-//
-// Installed-effects tree search matching/closing functions. Extracted from
-// addon.cpp -- a mechanical move, no behavior change. See
-// installed_tree_search.h for what's exposed and why.
-#include "core/tree/installed_tree_search.h"
+//--------------------------------------------------------------------------------
+// See installed_tree_search.h for the module contract. Installed-effects
+// tree search matching/closing functions, extracted from addon.cpp -- a
+// mechanical move, no behavior change.
+//--------------------------------------------------------------------------------
+
 #include "imgui.h"
+#include "installed_tree_search.h"
+
 #include <algorithm>
 #include <cctype>
 
@@ -136,7 +140,7 @@ void SilentlyCloseSubtree(const nlohmann::ordered_json& category)
     std::string name = category.value("name", std::string("(unnamed category)"));
     ImGui::GetStateStorage()->SetInt(ImGui::GetID(name.c_str()), 0);
 
-    // Mirror the ID scope TreeNode(name) would have auto-pushed for its
+    //_ Mirror the ID scope TreeNode(name) would have auto-pushed for its
     // children had it actually opened.
     ImGui::PushID(name.c_str());
     SilentlyCloseChildren(category);

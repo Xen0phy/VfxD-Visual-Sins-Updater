@@ -1,46 +1,50 @@
+//################################################################################
 // webhook_report.cpp
+//--------------------------------------------------------------------------------
+// StartSendReport()              validates and starts sending a report
+// GetReportStatus()               current EReportStatus
+// GetLastReportMessage()          most recent human-readable outcome
+// CancelInFlightReportRequest()   closes in-flight WinHTTP handles
+//--------------------------------------------------------------------------------
+// See webhook_report.h for the feature-level description. HTTP is via
+// WinHTTP, synchronous, always on a short-lived detached background
+// thread -- same shape as github_update.cpp's HttpsGetToString, but POST +
+// a JSON body instead of GET, against the report-relay Worker's host
+// instead of GitHub's -- deliberately not sharing code with
+// github_update.cpp, see webhook_report.h for why. All validation (empty
+// note, blank/duplicate guids) runs synchronously on the calling thread
+// before anything is queued; a rejected report never touches the network.
+// This file never renders a guid block's text itself -- entries[].block
+// arrives already-composed, so its only job with it is passing it through
+// into the JSON payload untouched.
 //
-// See webhook_report.h for the feature-level description. Implementation notes:
-// - HTTP via WinHTTP, synchronous, always on a short-lived detached
-//   background thread -- same shape as github_update.cpp's
-//   HttpsGetToString, but POST + a JSON body instead of GET, against the
-//   report-relay Worker's host instead of GitHub's (which itself then
-//   holds/POSTs the real Discord webhook -- see webhook_report.h). Deliberately
-//   not shared code with github_update.cpp -- see webhook_report.h's header
-//   comment for why.
-// - All validation (empty note, blank/duplicate guids within one
-//   submission) happens synchronously on the calling thread, before
-//   anything is queued -- a rejected report never touches the network at
-//   all. Deduping against guids already known (either locally or by
-//   other users) is left entirely to the relay -- see StartSendReport's
-//   doc comment in webhook_report.h for why.
-// - This file never renders a GUID block's text itself -- entries[].block
-//   arrives already-composed (see webhook_report.h), so this file's only job with
-//   it is passing it through into the JSON payload untouched.
-#include "integration/webhook_report.h"
-#include "integration/webhook_config.h"
+// Shared state: an atomic in-flight flag and status enum polled from the
+// render thread, a mutex-guarded last-result message, and the active
+// WinHTTP handles tracked so CancelInFlightReportRequest can interrupt a
+// hung call from another thread -- same split as github_update.cpp.
+//--------------------------------------------------------------------------------
+
+#pragma comment(lib, "winhttp.lib")
+
 #include "nlohmann_json.hpp"
+#include "webhook_report.h"
+#include "webhook_config.h"
+
 #include <windows.h>
 #include <winhttp.h>
+
 #include <mutex>
 #include <atomic>
 #include <thread>
 #include <unordered_set>
 #include <cctype>
 
-#pragma comment(lib, "winhttp.lib")
-
 using json = nlohmann::json;
 
-// ---------------------------------------------------------------------------
-// Shared state -- same split as github_update.cpp: an atomic in-flight
-// flag, a mutex-guarded last-result message, and a status enum polled from
-// the render thread.
-// ---------------------------------------------------------------------------
 static std::atomic<EReportStatus> s_reportStatus{EReportStatus::Idle};
 static std::atomic<bool>          s_reportInFlight{false};
 static std::mutex                 s_messageMutex;
-static std::string                s_lastReportMessage; // guarded by s_messageMutex
+static std::string                s_lastReportMessage; //. guarded by s_messageMutex
 
 static std::mutex s_activeHandlesMutex;
 static HINTERNET  s_activeSession = nullptr;
@@ -57,9 +61,15 @@ void CancelInFlightReportRequest()
 
 namespace {
 
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// Widen
+//--------------------------------------------------------------------------------
+// Assumes `s` is plain ASCII -- true of every webhook host/path this file
+// ever builds one from.
+//--------------------------------------------------------------------------------
 std::wstring Widen(const std::string& s)
 {
-    return std::wstring(s.begin(), s.end()); // webhook host/path here are plain ASCII
+    return std::wstring(s.begin(), s.end());
 }
 
 std::string Trim(const std::string& s)
@@ -70,20 +80,19 @@ std::string Trim(const std::string& s)
     return s.substr(start, end - start);
 }
 
-// Deliberately not a secret itself -- the same fixed key obfuscates
-// whatever URL tools/generate_webhook_config.py encoded into
-// webhook_config.h's kWebhookUrlXor array (see that script's own header
-// comment for how to regenerate it, and webhook_config.example.h for what
-// this obfuscation does and doesn't protect against). Keep this key in
-// sync with the KEY list in that script if it's ever changed.
+//_ Not a secret itself -- obfuscates whatever URL
+// tools/generate_webhook_config.py wrote into webhook_config.h. Keep in
+// sync with that script's KEY list if this ever changes.
 constexpr unsigned char kWebhookXorKey[] = { 0x5A, 0x3C, 0x91, 0x7E, 0x2D, 0xC8, 0x11 };
 
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// DecodeWebhookUrl
+//--------------------------------------------------------------------------------
 // Reconstructs the real relay URL from webhook_config.h's obfuscated
-// bytes (name kept as-is for continuity with webhook_config.h/
-// generate_webhook_config.py -- it decodes a URL either way). Only ever
-// called right before the POST that needs it -- the plain URL exists in
-// memory only as long as it takes WinHTTP to consume it, same as any
-// string handed to WinHttpConnect ordinarily would.
+// bytes. Only ever called right before the POST that needs it -- the
+// plain URL exists in memory only as long as it takes WinHTTP to consume
+// it, same as any string ordinarily handed to WinHttpConnect.
+//--------------------------------------------------------------------------------
 std::string DecodeWebhookUrl()
 {
     std::string out;
@@ -93,13 +102,20 @@ std::string DecodeWebhookUrl()
     return out;
 }
 
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// HttpsPostJson
+//--------------------------------------------------------------------------------
 // Synchronous HTTPS POST of a JSON body against a full URL. Same shape as
 // github_update.cpp's HttpsGetToString (crack URL, WinHttpOpen/Connect/
-// OpenRequest/SendRequest/ReceiveResponse, handles tracked in
-// s_active*/CancelInFlightReportRequest so an addon unload can interrupt a
-// hung call) but POST with a request body instead of GET, and this file's
-// own handle-tracking statics rather than shared ones -- github_update.cpp
-// and this file hit unrelated hosts and have no other reason to coordinate.
+// OpenRequest/SendRequest/ReceiveResponse, handles tracked in s_active*/
+// CancelInFlightReportRequest so an addon unload can interrupt a hung
+// call) but POST with a body instead of GET, and this file's own
+// handle-tracking statics rather than shared ones. Unlike posting
+// straight to Discord (204 empty on success), the relay always returns a
+// small JSON body -- {"droppedGuids": [...]} on success, {"error": ...}
+// plus an error code on failure -- which StartSendReport's background
+// thread parses.
+//--------------------------------------------------------------------------------
 bool HttpsPostJson(const std::wstring& url, const std::string& jsonBody, int& outStatusCode, std::string& outResponseBody)
 {
     outStatusCode = 0;
@@ -124,8 +140,8 @@ bool HttpsPostJson(const std::wstring& url, const std::string& jsonBody, int& ou
     if (!hSession) return false;
     { std::lock_guard<std::mutex> lock(s_activeHandlesMutex); s_activeSession = hSession; }
 
-    // A single small JSON message -- no need for the release-download's
-    // more generous timeouts in github_update.cpp.
+    //_ A single small JSON message -- no need for the release-download's
+    // more generous timeouts in github_update.cpp
     WinHttpSetTimeouts(hSession, 10000, 10000, 10000, 15000);
 
     HINTERNET hConnect = WinHttpConnect(hSession, hostBuf, uc.nPort, 0);
@@ -163,13 +179,6 @@ bool HttpsPostJson(const std::wstring& url, const std::string& jsonBody, int& ou
             WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &size, WINHTTP_NO_HEADER_INDEX);
         outStatusCode = (int)statusCode;
 
-        // Unlike posting straight to Discord (204 empty on success), the
-        // relay always returns a small JSON body that StartSendReport's
-        // background thread needs to parse -- either
-        // {"droppedGuids": [...]} on success (possibly empty), or
-        // {"error": ...} on failure, plus a specific error code (rate_
-        // limited, discord_failed, etc.) instead of a generic failure
-        // message.
         DWORD available = 0;
         while (WinHttpQueryDataAvailable(hRequest, &available) && available > 0)
         {
@@ -197,23 +206,22 @@ bool HttpsPostJson(const std::wstring& url, const std::string& jsonBody, int& ou
     return ok;
 }
 
-} // namespace
+} //. namespace
 
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// StartSendReport
+//--------------------------------------------------------------------------------
+// Claims s_reportInFlight via compare_exchange (not load-then-store) so
+// two near-simultaneous calls can't both pass the in-flight check and
+// both spawn a send -- same CAS-then-release-on-bail shape github_update.cpp's
+// Start* functions use. Validation runs entirely before the claim is used
+// for anything; every failure path releases it again before returning.
+//--------------------------------------------------------------------------------
 bool StartSendReport(const std::string& reporterLine,
                      const std::vector<ReportGuidBlock>& entries,
                      const std::string& note,
                      std::string& outError)
 {
-    // Claim the in-flight flag up front, atomically -- same CAS-then-
-    // release-on-bail shape github_update.cpp's Start* functions use
-    // (e.g. StartLoadDiff claiming, then releasing again if it turns out
-    // there's nothing to load). A plain load()-then-store(true) here would
-    // leave a window between the check and the claim where two
-    // near-simultaneous calls could both pass the check and both spawn a
-    // send -- narrow, and this function only ever has one call site (the
-    // Send button, on the single render thread), but there's no reason to
-    // rely on that instead of just closing the window the same way every
-    // other Start* in this addon already does.
     bool expected = false;
     if (!s_reportInFlight.compare_exchange_strong(expected, true))
     {
@@ -225,19 +233,12 @@ bool StartSendReport(const std::string& reporterLine,
     if (trimmedNote.empty())
     {
         outError = "Additional information can't be empty.";
-        s_reportInFlight.store(false); // nothing started -- release the claim
+        s_reportInFlight.store(false); //. release the claim
         return false;
     }
 
-    // Every entry needs a non-blank guid (an entry with a blank guid is a
-    // half-finished row, not a real submission), and the same guid can't
-    // appear twice in one submission (a paste mistake, not a real second
-    // report) -- blocks the whole submission rather than silently
-    // dropping just the offending row, so the user sees exactly what to
-    // fix before retrying. Dedup against guids already known -- by this
-    // user's own installed sin files, or by anyone else who's reported
-    // them before -- is left entirely to the relay's cross-user
-    // known-guid set (see webhook_report.h's doc comment on StartSendReport).
+    //_ Blocks the whole submission (not just the offending row) so the
+    // user sees exactly what to fix; cross-user dedup is the relay's job
     std::unordered_set<std::string> seenThisSubmission;
     for (const auto& entry : entries)
     {
@@ -245,27 +246,22 @@ bool StartSendReport(const std::string& reporterLine,
         if (trimmedGuid.empty())
         {
             outError = "One of the GUID rows is empty -- fill it in or remove it.";
-            s_reportInFlight.store(false); // nothing started -- release the claim
+            s_reportInFlight.store(false); //. release the claim
             return false;
         }
         if (!seenThisSubmission.insert(trimmedGuid).second)
         {
             outError = "GUID \"" + trimmedGuid + "\" is listed more than once.";
-            s_reportInFlight.store(false); // nothing started -- release the claim
+            s_reportInFlight.store(false); //. release the claim
             return false;
         }
     }
 
-    // Built here, on the calling (render) thread -- cheap, and keeps the
-    // background thread doing nothing but the network call itself, same
-    // split github_update.cpp's Start* functions use.
-    //
-    // Payload shape matches vfxd-sins-report-relay/src/index.js's expected
-    // body exactly: reporterLine and each entry's block arrive fully
-    // rendered from the caller (see webhook_report.h) -- the Worker never parses
-    // or understands them, it only ever treats each entry's guid as a
-    // dedup key and entry.block/reporterLine/note as opaque text to
-    // assemble into the final Discord message.
+    //_ Built here, on the calling thread -- cheap, keeps the background
+    // thread doing nothing but the network call, same split github_update.cpp
+    // uses. Shape matches vfxd-sins-report-relay/src/index.js: the Worker
+    // only ever treats guid as a dedup key and block/reporterLine/note as
+    // opaque text to assemble into the Discord message.
     json payload;
     payload["reporterLine"] = reporterLine;
     json jsonEntries = json::array();
@@ -282,8 +278,7 @@ bool StartSendReport(const std::string& reporterLine,
 
     const size_t submittedCount = entries.size();
 
-    // s_reportInFlight is already true -- claimed atomically at the top
-    // of this function, before validation ran.
+    //_ s_reportInFlight is already true, claimed atomically above
     s_reportStatus.store(EReportStatus::Sending);
 
     std::thread([body, submittedCount]()
@@ -292,9 +287,8 @@ bool StartSendReport(const std::string& reporterLine,
         std::string responseBody;
         bool ok = HttpsPostJson(Widen(DecodeWebhookUrl()), body, statusCode, responseBody);
 
-        // Best-effort parse -- a malformed/empty body (e.g. a connection
-        // that dies mid-response) just falls through to the generic
-        // messages below rather than throwing.
+        //_ Best-effort parse -- a malformed/empty body (e.g. a connection
+        // dying mid-response) falls through to the generic messages below
         json parsed;
         bool parsedOk = false;
         if (!responseBody.empty())
@@ -306,13 +300,8 @@ bool StartSendReport(const std::string& reporterLine,
         std::lock_guard<std::mutex> lock(s_messageMutex);
         if (ok && statusCode >= 200 && statusCode < 300)
         {
-            // Per-entry dedup, not all-or-nothing: droppedGuids lists
-            // exactly which submitted guids were already in the relay's
-            // cross-user known-guid set (and so weren't forwarded to
-            // Discord) -- everything else in the submission was sent,
-            // including the note either way. A blank-guid-only report
-            // (submittedCount == 0) has nothing to dedup, so it's always
-            // just "sent."
+            //_ Per-entry, not all-or-nothing: droppedGuids lists which
+            // submitted guids were already known (and so not forwarded)
             size_t droppedCount = 0;
             if (parsedOk && parsed.contains("droppedGuids") && parsed["droppedGuids"].is_array())
                 droppedCount = parsed["droppedGuids"].size();
@@ -335,10 +324,9 @@ bool StartSendReport(const std::string& reporterLine,
         }
         else if (ok)
         {
-            // Relay's error codes: invalid_guid/note_required/
-            // duplicate_in_submission (400, shouldn't happen -- webhook_report.cpp
-            // already validates these client-side, but the relay is the
-            // source of truth), rate_limited (429), discord_failed (502).
+            //_ Relay error codes: invalid_guid/note_required/duplicate_in_
+            // submission (400, shouldn't happen -- already validated
+            // client-side), rate_limited (429), discord_failed (502)
             std::string errCode = (parsedOk && parsed.contains("error") && parsed["error"].is_string())
                                        ? parsed["error"].get<std::string>()
                                        : "";

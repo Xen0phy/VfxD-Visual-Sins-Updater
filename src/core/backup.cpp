@@ -1,8 +1,17 @@
+//################################################################################
+// backup.cpp
+//--------------------------------------------------------------------------------
+// See backup.h for the module contract. This file owns: scanning the
+// addon dir for .bak files, and the read-then-backup-then-temp-rename
+// sequence that makes a restore crash-safe.
+//--------------------------------------------------------------------------------
+
 #include "core/backup.h"
+
 #include <filesystem>
 #include <fstream>
-#include <sstream>
 #include <regex>
+#include <sstream>
 #include <system_error>
 
 namespace fs = std::filesystem;
@@ -13,13 +22,11 @@ std::vector<BackupInfo> ScanBackups(const std::string& denoiserAddonDir)
 
     std::error_code ec;
     if (!fs::exists(denoiserAddonDir, ec) || ec)
-        return out; // VfxDenoiser isn't installed / folder doesn't exist yet -- not an error, just nothing to find
+        return out;   //. not installed, nothing to find
 
-    // Same three sin names and both separators as ScanInstalledSinFiles'
-    // own pattern, just with a trailing ".bak". A bare, unsuffixed backup
-    // ("VfxD_Gluttony.json.bak") is matched too -- version isn't tracked
-    // here since a backup is only ever restored to its own restorePath,
-    // never compared against a "latest" version like the live files are.
+    //_ Same sin-name/separator pattern as ScanInstalledSinFiles, plus a
+    // trailing ".bak" -- bare unsuffixed backups match too; version isn't
+    // tracked here since a backup is only ever restored to its own path.
     static const std::regex kPattern(R"(^VfxD_(Gluttony|Pride|Sloth)(?:[-_]v\d+)?\.json\.bak$)");
 
     for (const auto& entry : fs::directory_iterator(denoiserAddonDir, ec))
@@ -35,7 +42,7 @@ std::vector<BackupInfo> ScanBackups(const std::string& denoiserAddonDir)
         info.sinName     = m[1].str();
         info.bakPath     = entry.path().string();
         info.bakFileName = fileName;
-        info.restorePath = fs::path(entry.path()).replace_extension().string(); // strips just the ".bak"
+        info.restorePath = fs::path(entry.path()).replace_extension().string();   //. strips just the .bak
 
         std::error_code sizeEc;
         auto size = fs::file_size(entry.path(), sizeEc);
@@ -49,10 +56,8 @@ std::vector<BackupInfo> ScanBackups(const std::string& denoiserAddonDir)
 
 bool RestoreBackup(const BackupInfo& backup, const std::string& currentInstalledPath, std::string& outError)
 {
-    // 1. Read the backup's content into memory before touching anything on
-    //    disk -- restorePath and backup.bakPath can be the same underlying
-    //    file content-wise in edge cases, and this way nothing downstream
-    //    depends on the .bak file still existing/unmodified.
+    //_ Read into memory before touching anything on disk -- bakPath and
+    // restorePath can be the same file content-wise in edge cases.
     std::string content;
     {
         std::ifstream in(backup.bakPath, std::ios::binary);
@@ -73,13 +78,8 @@ bool RestoreBackup(const BackupInfo& backup, const std::string& currentInstalled
 
     const std::string& restorePath = backup.restorePath;
 
-    // 2. If something's currently sitting at restorePath, back it up first
-    //    -- onto the very .bak we just read into memory. This is the same
-    //    backup-before-write pattern every other write in this addon
-    //    follows, and it means rollback is really a swap: doing it again
-    //    would bring back what's about to be overwritten. Nothing to back
-    //    up if restorePath doesn't currently exist (e.g. rolling back an
-    //    applied update whose old-named file was removed).
+    //_ Back up whatever's currently at restorePath onto this same .bak
+    // first -- makes a restore a swap; doing it again undoes it.
     std::error_code ec;
     if (fs::exists(restorePath, ec))
     {
@@ -91,8 +91,8 @@ bool RestoreBackup(const BackupInfo& backup, const std::string& currentInstalled
         }
     }
 
-    // 3. Write to a temp file first, then rename over restorePath -- so a
-    //    crash mid-restore can't corrupt anything.
+    //_ Temp file then rename over restorePath, so a crash mid-restore
+    // can't corrupt anything.
     fs::path tmpPath = fs::path(restorePath).concat(".tmp");
     try
     {
@@ -130,12 +130,9 @@ bool RestoreBackup(const BackupInfo& backup, const std::string& currentInstalled
         return false;
     }
 
-    // 4. If the sin is currently installed under a different filename than
-    //    what was just restored (an applied update bumped the version
-    //    stamp), that file is now stale -- remove it, best-effort, same as
-    //    github_update.cpp's own cleanup of the old-named file after
-    //    applying an update. A failure here doesn't undo the restore above;
-    //    it just leaves harmless clutter.
+    //_ currentInstalledPath, if different from restorePath (e.g. after an
+    // applied update), is now stale -- remove it best-effort; failure here
+    // doesn't undo the restore above.
     if (!currentInstalledPath.empty() && fs::path(currentInstalledPath) != fs::path(restorePath))
         fs::remove(currentInstalledPath, ec);
 

@@ -1,21 +1,21 @@
+//################################################################################
 // game_state.cpp
-//
+//--------------------------------------------------------------------------------
 // See game_state.h for the module contract and source-selection rules.
 // Owns: caching the two DataLink pointers, and the per-field RTAPI/Mumble
 // selection logic. Deliberately has no knowledge of live_log.cpp or any
 // other consumer -- callers decide when to call these, this module just
 // answers "what is it right now."
+//--------------------------------------------------------------------------------
 
-#include "core/game_state.h"
+#include "game_state.h"
+
 #include <cstring>
 
 namespace {
 
-// Cached once in GameState_Init. Nexus's DataLink_Get returns a pointer to
-// shared memory that stays valid for the addon's session, so these are
-// fetched once rather than re-queried every call -- same assumption the
-// reference project's UpdateGameState() makes about its own MumbleLink/
-// RTAPIData pointers.
+//_ Cached once in GameState_Init -- DataLink_Get's pointers stay valid
+// for the addon's session, so these aren't re-queried every call.
 Mumble::Identity*    s_mumbleIdentity = nullptr;
 Mumble::Data*        s_mumbleLink     = nullptr;
 RTAPI::RealTimeData* s_rtapiData      = nullptr;
@@ -41,8 +41,6 @@ void GameState_Shutdown()
 
 bool GameState_IsRTAPILive()
 {
-    // GameBuild is documented as set to 0 when RTAPI is unloaded -- presence
-    // of the shared block alone doesn't mean it's actually live.
     return s_rtapiData != nullptr && s_rtapiData->GameBuild != 0;
 }
 
@@ -71,10 +69,8 @@ Mumble::EProfession GameState_GetProfession()
 
 unsigned int GameState_GetSpecialization()
 {
-    // Cross-source equivalence CONFIRMED by hand-testing -- see
-    // game_state.h. Whichever branch fires, the raw numeric value is
-    // returned as-is; no attempt is made here to reconcile the two beyond
-    // the fallback order itself, since both are now known to agree.
+    //_ Cross-source equivalence confirmed by hand-testing (see
+    // game_state.h). No reconciliation beyond the fallback order itself.
     if (GameState_IsRTAPILive())
         return s_rtapiData->EliteSpecialization;
     if (s_mumbleIdentity)
@@ -84,10 +80,9 @@ unsigned int GameState_GetSpecialization()
 
 Mumble::ERace GameState_GetRace()
 {
-    // Always Mumble -- RTAPI has no race field at all, not a fallback like
-    // the three above. Asura (0) is returned when identity isn't available;
-    // callers that need to tell "unknown" apart from a genuine Asura should
-    // check GameState_HasMumbleIdentity() first.
+    //_ Falls back to Asura (0) when identity isn't available -- callers
+    // needing to tell that apart from a genuine Asura should check
+    // GameState_HasMumbleIdentity() first.
     if (s_mumbleIdentity)
         return s_mumbleIdentity->Race;
     return Mumble::ERace::Asura;
@@ -95,10 +90,8 @@ Mumble::ERace GameState_GetRace()
 
 const char* GameState_ProfessionName(Mumble::EProfession profession)
 {
-    // Matches Mumble.h's EProfession exactly (None, Guardian, Warrior,
-    // Engineer, Ranger, Thief, Elementalist, Mesmer, Necromancer,
-    // Revenant) -- these are the actual in-game profession names, not
-    // guessed from the enumerator spelling.
+    //_ Matched directly against Mumble.h's EProfession, not guessed from
+    // the enumerator spelling.
     switch (profession)
     {
         case Mumble::EProfession::None:         return "None";
@@ -117,7 +110,6 @@ const char* GameState_ProfessionName(Mumble::EProfession profession)
 
 const char* GameState_RaceName(Mumble::ERace race)
 {
-    // Matches Mumble.h's ERace exactly (Asura, Charr, Human, Norn, Sylvari).
     switch (race)
     {
         case Mumble::ERace::Asura:   return "Asura";
@@ -131,21 +123,23 @@ const char* GameState_RaceName(Mumble::ERace race)
 
 namespace {
 
-// Fixed-size char arrays from Mumble.h/RTAPI.hpp are documented as
-// null-terminated in practice, but neither header guarantees it if the
-// real name ever exactly fills the buffer -- strnlen bounds the read
-// instead of trusting a terminator that isn't contractually promised.
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// FixedCharArrayToString
+//--------------------------------------------------------------------------------
+// Converts a fixed-size char array to a std::string. Mumble.h/RTAPI.hpp
+// document these as null-terminated in practice, but neither guarantees
+// it if the real value ever exactly fills the buffer -- strnlen bounds
+// the read instead of trusting an unguaranteed terminator.
+//--------------------------------------------------------------------------------
 std::string FixedCharArrayToString(const char* arr, size_t capacity)
 {
     return std::string(arr, strnlen(arr, capacity));
 }
 
-} // namespace
+} //. namespace
 
 std::string GameState_GetAccountName()
 {
-    // RTAPI-only -- Mumble has no account-name field at all, unlike every
-    // other field in this module.
     if (GameState_IsRTAPILive())
         return FixedCharArrayToString(s_rtapiData->AccountName, sizeof(s_rtapiData->AccountName));
     return std::string();
@@ -153,10 +147,6 @@ std::string GameState_GetAccountName()
 
 std::string GameState_GetCharacterName()
 {
-    // RTAPI-preferred/Mumble-fallback, same rule as MapID/Profession/
-    // Specialization above. Mumble's source is Identity.Name (char[20]),
-    // NOT Data.Name (wchar_t[256], the Mumble-Link application identifier,
-    // e.g. "Guild Wars 2" -- not a character at all).
     if (GameState_IsRTAPILive())
         return FixedCharArrayToString(s_rtapiData->CharacterName, sizeof(s_rtapiData->CharacterName));
     if (s_mumbleIdentity)

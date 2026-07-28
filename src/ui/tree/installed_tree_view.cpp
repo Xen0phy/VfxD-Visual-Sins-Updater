@@ -1,31 +1,63 @@
+//##############################################################################
 // installed_tree_view.cpp
+//------------------------------------------------------------------------------
+// RenderInstalledEffects(dir)   draws the whole Installed Effects section
+//------------------------------------------------------------------------------
+// Extracted from addon.cpp: RenderCategoryTree (the recursive tree renderer),
+// RenderInstalledEffects (the section wrapper), and their small leaf
+// renderers (GuidList/GuidDiff/JsonValue/Behavior/ConflictSources) are all
+// file-local -- RenderInstalledEffects is the only symbol this module
+// exposes. Reaches the editing/store/overlay/search modules only through
+// their own accessor headers, never through another module's statics.
 //
-// RenderCategoryTree + RenderInstalledEffects + their small render leaves,
-// plus the overlay cache and tree-search state that are specific to this
-// section. Extracted from addon.cpp -- a mechanical move, no behavior change.
-// See installed_tree_view.h for what's exposed and why.
-#include "ui/tree/installed_tree_view.h"
+// s_overlayCache holds one built (duplicate-guid- and pending-diff-tagged)
+// copy of each sin file's tree, rebuilt only when its generation or diff
+// status changes -- rebuilding it every frame instead was the direct cause
+// of a reported scrolling stall on a large tree with an overlay open.
+//
+// The tree search box drives one lowercased query (s_treeSearchQueryLower)
+// that every match/filter helper below compares against.
+// s_treeSearchQueryChanged is true for exactly one frame per query change
+// and gates every forced-open/forced-closed TreeNode call in this file --
+// doing that work every frame instead (not just on change) was a second,
+// separate cause of the same kind of stall.
+//
+// Drag-and-drop is reorder-only: an effect or category can move among its
+// current siblings, never to a different parent or sin file. Nothing that
+// only exists in a pending-update overlay (__vfxd_new/__vfxd_rework/
+// __vfxd_virtual) offers drag, edit, or delete -- there's no stable real
+// on-disk position/identity for it yet. Any edit/rename/delete/create state
+// scoped under a node that stops being drawn this frame (hidden by search,
+// or collapsed) is cancelled immediately rather than left running
+// invisibly.
+//------------------------------------------------------------------------------
+
+#include "github_update.h"
 #include "imgui.h"
-#include "addon/ui_colors.h"
-#include "core/tree/installed_tree_store.h"
-#include "core/tree/installed_tree_overlay.h"
-#include "core/tree/installed_tree_search.h"
-#include "ui/tree/installed_tree_edit.h"
-#include "integration/github_update.h"
-#include <string>
-#include <vector>
-#include <unordered_map>
-#include <unordered_set>
+#include "installed_tree_edit.h"
+#include "installed_tree_overlay.h"
+#include "installed_tree_search.h"
+#include "installed_tree_store.h"
+#include "installed_tree_view.h"
+#include "ui_colors.h"
+
 #include <algorithm>
 #include <cctype>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
+#include <vector>
 
 namespace {
 
-// `color` is optional -- pass nullptr for the default text color (used for
-// a plain guids list), or a color to tint every bullet line (used to show
-// a reworked effect's post-update GUIDs in kReworkColor, distinct from its
-// current GUIDs just above in the default color).
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// RenderGuidList
+//------------------------------------------------------------------------------
+// `color` is optional -- nullptr for the default text color (a plain guids
+// list), or a color to tint every bullet (e.g. kReworkColor, to set a
+// reworked effect's post-update GUIDs apart from its current ones).
+//------------------------------------------------------------------------------
 void RenderGuidList(const char* label, const std::vector<std::string>& guids, const ImVec4* color = nullptr)
 {
     if (guids.empty())
@@ -45,20 +77,17 @@ void RenderGuidList(const char* label, const std::vector<std::string>& guids, co
     ImGui::Unindent();
 }
 
-// For a reworked effect, shows only what a pending update would actually
-// change about its guid list, rather than the full current and full
-// post-update lists side by side. Those two lists can share almost
-// everything (a 1c merge folds dozens of untouched guids from the
-// merged-away candidates straight into the survivor's list, see
-// BuildMergedRework in merge.cpp), so printing both in full mostly
-// repeats the same lines twice. Order doesn't carry meaning for this
-// comparison -- guids are an unordered identity set as far as every merge
-// decision is concerned (see GuidDiff in merge.cpp) -- so this is a
-// straight set difference, not a positional diff. Guids present on both
-// sides are still listed individually, same as a plain guid list always
-// has been; only the genuinely added/removed ones get their own
-// highlighted section, so a single real change doesn't get lost in (or
-// require reprinting) everything that didn't change.
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// RenderGuidDiff
+//------------------------------------------------------------------------------
+// Shows only what a reworked effect's guid list would actually change to,
+// rather than the full current and post-update lists side by side -- a 1c
+// merge can fold in dozens of untouched guids (see BuildMergedRework in
+// merge.cpp), so printing both in full mostly repeats the same lines.
+// Guids are an unordered identity set (see GuidDiff in merge.cpp), so this
+// is a set difference, not a positional diff; unchanged guids still get
+// listed, only added/removed ones get their own highlighted section.
+//------------------------------------------------------------------------------
 void RenderGuidDiff(const std::vector<std::string>& oldGuids, const std::vector<std::string>& newGuids)
 {
     std::unordered_set<std::string> oldSet(oldGuids.begin(), oldGuids.end());
@@ -73,8 +102,7 @@ void RenderGuidDiff(const std::vector<std::string>& oldGuids, const std::vector<
 
     if (added.empty() && removed.empty())
     {
-        // Nothing actually changed -- just the ordinary plain list.
-        RenderGuidList("GUIDs", unchanged);
+        RenderGuidList("GUIDs", unchanged);   //. nothing changed -- plain list
         return;
     }
 
@@ -89,11 +117,14 @@ void RenderGuidDiff(const std::vector<std::string>& oldGuids, const std::vector<
 }
 
 
-// Prints one key/value pair that isn't part of the confirmed effect/
-// category schema below (name/description/guids/behaviors). This is only
-// a forward-compat fallback now -- e.g. if a future VfxDenoiser version
-// adds a new field -- rendered generically by JSON type so an unknown
-// field still shows up as *something* rather than silently vanishing.
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// RenderJsonValue
+//------------------------------------------------------------------------------
+// Prints one key/value pair outside the confirmed effect/category schema
+// (name/description/guids/behaviors) -- a forward-compat fallback, e.g. for
+// a field a future VfxDenoiser version adds, rendered generically by JSON
+// type so it shows up as *something* rather than silently vanishing.
+//------------------------------------------------------------------------------
 void RenderJsonValue(const std::string& key, const nlohmann::ordered_json& value)
 {
     switch (value.type())
@@ -117,7 +148,7 @@ void RenderJsonValue(const std::string& key, const nlohmann::ordered_json& value
         case nlohmann::ordered_json::value_t::array:
         case nlohmann::ordered_json::value_t::object:
         default:
-            // Unknown shape -- dump it compactly rather than guess a
+            //_ Unknown shape -- dump compactly rather than guess a
             // schema-specific rendering for a nested object/array.
             ImGui::Bullet();
             ImGui::TextWrapped("%s: %s", key.c_str(), value.dump().c_str());
@@ -125,11 +156,14 @@ void RenderJsonValue(const std::string& key, const nlohmann::ordered_json& value
     }
 }
 
-// Renders one entry of an effect's "behaviors" array. Confirmed real
-// shape (from a sample Collection.json): {"type": "Hide"|"Show"|
-// "SetDuration", "caster": "Self"|"Others"|"All", plus "duration"
-// (milliseconds, per VfxDenoiser's own README) only when type is
-// SetDuration}.
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// RenderBehavior
+//------------------------------------------------------------------------------
+// Renders one entry of an effect's "behaviors" array. Confirmed real shape
+// (sample Collection.json): type Hide/Show/SetDuration, caster Self/
+// Others/All, plus a "duration" (ms, per VfxDenoiser's README) only when
+// type is SetDuration.
+//------------------------------------------------------------------------------
 void RenderBehavior(const nlohmann::ordered_json& behavior)
 {
     std::string type   = behavior.value("type", std::string("?"));
@@ -144,7 +178,7 @@ void RenderBehavior(const nlohmann::ordered_json& behavior)
         ImGui::BulletText("%s for %s", type.c_str(), caster.c_str());
     }
 
-    // Anything beyond type/caster/duration is unexpected -- surface it
+    //_ Anything beyond type/caster/duration is unexpected -- surface it
     // rather than silently dropping it.
     for (const auto& [key, value] : behavior.items())
     {
@@ -156,14 +190,16 @@ void RenderBehavior(const nlohmann::ordered_json& behavior)
     }
 }
 
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// RenderConflictSources
+//------------------------------------------------------------------------------
 // Renders the discarded/disagreeing settings recorded on a merge conflict
 // (see MergePlanMergeCandidate in merge.h and "__vfxd_conflict_sources" in
 // installed_tree_overlay.cpp) -- one block per other matched candidate,
-// naming which effect it came from (and where it still lives in the tree,
-// for a candidate that survived under its own separate rework rather than
-// being deleted here) followed by its own behaviors. This is what "review
-// before applying" is asking the user to look at, shown right where the
-// warning already is instead of leaving them to go hunt for it.
+// naming which effect it came from and its own behaviors. This is what
+// "review before applying" is asking the user to look at, shown right
+// where the warning already is.
+//------------------------------------------------------------------------------
 void RenderConflictSources(const nlohmann::ordered_json& effect)
 {
     if (!effect.contains("__vfxd_conflict_sources") || !effect["__vfxd_conflict_sources"].is_array())
@@ -193,91 +229,72 @@ void RenderConflictSources(const nlohmann::ordered_json& effect)
     }
 }
 
-// Per-sin cache for the duplicate/diff overlay trees RenderInstalledEffects
-// paints onto the installed tree (see BuildDuplicateOverlayTree/
-// BuildDiffOverlayTree below). Building either means deep-copying the
-// entire installed file plus a recursive tag pass -- real work for a large
-// file (thousands of effects isn't unusual) -- and this used to happen again on every single
-// ImGui frame the tree was open, whether or not anything had actually
-// changed since the last frame. That's the direct cause of a reported bug:
-// with an overlay active and the tree tall enough to need a scrollbar, the
-// per-frame rebuild made frame time long enough that mouse-wheel scrolling
-// felt like it had stopped working outright (wheel deltas the host
-// accumulates between frames get eaten by a stalled one) -- reproducible
-// only with an overlay showing and only once there was enough content to
-// make the rebuild expensive, which matches exactly how it was reported.
-// Invalidated on GetInstalledTreeGeneration() changing (the file itself was
-// reloaded/edited) or the sin's own EDiffStatus changing (a diff only ever
-// produces one MergePlan per Ready transition -- StartLoadDiff replacing
-// it always goes through NotLoaded/Loading again first, which this catches
-// too).
+//******************************************************************************
+// OverlayCacheEntry
+//------------------------------------------------------------------------------
+// generation   tree generation this copy was built from
+// diffStatus   diff status this copy was built from
+// file         the built (dupe/diff-tagged) copy of the installed tree
+//------------------------------------------------------------------------------
+// Per-sin cache entry backing s_overlayCache -- see the file header for why
+// this cache exists. Invalidated on GetInstalledTreeGeneration() changing
+// (file reloaded/edited) or the sin's own EDiffStatus changing (a diff
+// produces one MergePlan per Ready transition; a reload always passes
+// through NotLoaded/Loading first, which this also catches).
+//------------------------------------------------------------------------------
 struct OverlayCacheEntry
 {
     int         generation = -1;
     EDiffStatus diffStatus = EDiffStatus::NotLoaded;
     nlohmann::ordered_json file;
 };
+//_ Per-sin cache of built overlay trees, keyed by sin name.
 std::unordered_map<std::string, OverlayCacheEntry> s_overlayCache;
 
-// ---------------------------------------------------------------------------
-// Installed-effects tree search box (RenderInstalledEffects). A single text
-// box filters every installed sin file's tree at once by name, category
-// name, description, or GUID substring, case-insensitively. s_treeSearchBuf
-// is the raw ImGui input buffer; s_treeSearchQueryLower is recomputed from
-// it once per frame at the top of RenderInstalledEffects and is what the
-// matching helpers below actually compare against, so nothing else in this
-// file has to lowercase repeatedly.
+//_ Raw ImGui input buffer for the installed-tree search box.
 char        s_treeSearchBuf[256] = {};
+//_ Lowercased from s_treeSearchBuf once per frame; every match/filter
+// helper below compares against this, not the raw buffer.
 std::string s_treeSearchQueryLower;
 
-// Search only actually starts once at least this many characters are
-// typed -- a 1-2 character query matches almost everything in a typical
-// tree anyway, so there's little value in it and it's needless work (both
-// the matching itself and the expansion it triggers) on every keystroke
-// along the way to a more useful query.
+//_ Search starts only once this many characters are typed -- a shorter
+// query matches too much to be useful and costs a needless per-keystroke
+// tree walk.
 constexpr size_t kMinTreeSearchLength = 3;
 
-// True only on the single frame where s_treeSearchQueryLower just changed
-// from what it was last frame (recomputed once, at the top of
-// RenderInstalledEffects). RenderCategoryTree gates its forced-open calls
-// on this rather than on "a search is active" -- forcing potentially
-// hundreds of nodes open is only meant to happen once, right when the
-// query changes, not on every single frame the search box merely still has
-// text in it. Re-forcing it every frame was expensive enough on a large
-// tree to stall the whole overlay (dropped keystrokes, unresponsive
-// scrolling) while typing.
+//_ True for exactly one frame, when s_treeSearchQueryLower just changed
+// (see file header for why this gates forced-open/closed calls).
 bool s_treeSearchQueryChanged = false;
 
-// Recursively walks one category node (read-only by default): a TreeNode
-// per category, effects listed as nested TreeNodes underneath. `category`
-// and `effects`/`categories` are exactly the same JSON shape merge.cpp
-// walks, so this stays a faithful mirror of what ResolveMergePlan sees.
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// RenderCategoryTree
+//------------------------------------------------------------------------------
+// Recursively renders one category node -- a TreeNode per category, with
+// effects and subcategories nested underneath. `category`/`effects`/
+// `categories` mirror the exact JSON shape merge.cpp walks.
 //
-// `pathSoFar` is threaded through and mutated in place (pushed before
-// descending, popped after) so any effect rendered inside knows its own
-// category's identity (root -> immediate parent, each element that
-// level's index within its parent's "categories" array) -- this is what
-// lets right-click-to-edit identify, and later re-find, a specific
-// category or effect, the same way effect identity is index-based (see
-// EditState::originalIndex's comment). `myIndex` is this category's own
-// position within its parent's "categories" array, supplied by the
-// caller (which is already iterating that array to get here) since this
-// function has no other way to know it. `sinName` identifies which
-// installed file this tree belongs to, since edit state is scoped
-// per-sin as well as per-path.
+// `pathSoFar` is pushed/popped in place so anything rendered inside knows
+// its own category's index path -- root to immediate parent, each element
+// that level's index in its parent's "categories" array -- which is how
+// right-click-to-edit identifies and later re-finds a category or effect
+// (see EditState::originalIndex's comment). `myIndex` is this category's
+// own position in its parent's array, supplied by the caller. `sinName`
+// scopes edit state per installed file. Caller must PushID a stable
+// per-sibling key before calling, so same-named siblings don't collide in
+// imgui's ID stack.
 //
-// Caller must PushID a stable per-sibling key (index is fine here, since
-// this tree is rebuilt wholesale on every reload rather than mutated in
-// place) before calling, so sibling categories that happen to share a
-// name don't collide in imgui's ID stack.
+// `forceShow` is true once an ancestor already matched the search box
+// directly, showing this whole subtree unfiltered from there down (like a
+// folder search that also shows everything inside a matched folder). Only
+// ever set by this function itself, on the recursive call for its own
+// subcategories.
 //
-// `forceShow` is true once an ancestor category has already matched the
-// tree search box directly (by its own name/description) -- from that
-// point down, the whole subtree is shown unfiltered, the same way a folder
-// search that matches a folder name shows everything inside it rather than
-// filtering further. Callers outside this function never need to pass it;
-// it's only ever set by RenderCategoryTree itself on the recursive call for
-// its own subcategories.
+// Force-open checks below run only on the frame the search query changed,
+// never gated on whether a search is currently active -- running them
+// every frame instead (a full subtree walk each time) previously stalled
+// scrolling on a large tree; skipping them once search ends would leave
+// nodes force-open forever (see file header).
+//------------------------------------------------------------------------------
 void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json& category,
                          std::vector<int>& pathSoFar, int myIndex, bool forceShow = false)
 {
@@ -286,12 +303,9 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
 
     bool searchActive = !s_treeSearchQueryLower.empty();
 
-    // Skip this category (and everything under it) entirely when a search
-    // is active and nothing in this subtree matches -- an unrelated branch
-    // just isn't drawn, rather than shown collapsed and empty-looking.
-    // Cancel any edit state scoped under here first, same reasoning as the
-    // "collapsed" branch further down: nothing inside is being drawn this
-    // frame, so nothing should be left running invisibly.
+    //_ An unmatched subtree isn't drawn at all (not even collapsed). Cancel
+    // any edit scoped under here first -- nothing should keep running
+    // invisibly (see file header).
     if (searchActive && !forceShow && !CategorySubtreeMatchesSearch(category, s_treeSearchQueryLower))
     {
         if (IsCategoryRenameUnderPath(sinName, pathSoFar))
@@ -303,12 +317,9 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
         if (IsDeleteConfirmUnderPath(sinName, pathSoFar))
             CancelDeleteConfirm();
 
-        // This category (and everything under it) isn't being visited at
-        // all this frame -- if the query just changed, anything under here
-        // that was force-opened by an earlier, different query needs its
-        // stored open state reset now, or it'll reappear already expanded
-        // the next time this category matches again. See
-        // SilentlyCloseSubtree's own comment for why.
+        //_ Not visited this frame -- on a query change, reset any
+        // force-opened state an earlier query left here (see
+        // SilentlyCloseSubtree's own comment).
         if (s_treeSearchQueryChanged)
             SilentlyCloseSubtree(category);
 
@@ -316,49 +327,16 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
         return;
     }
 
-    // Whether THIS category matched directly (as opposed to only containing
-    // a match further down) -- decides whether its own effects/subcategories
-    // get filtered individually below, or shown in full because the category
-    // itself is what the search was looking for.
+    //_ Whether THIS category matched directly, vs. only containing a match
+    // below -- decides whether its children get filtered individually or
+    // shown in full.
     bool categoryMatchesDirectly = !searchActive || forceShow ||
         ContainsCI(name, s_treeSearchQueryLower) ||
         ContainsCI(category.value("description", std::string()), s_treeSearchQueryLower);
 
-    // Only force this category open if leaving it collapsed would hide
-    // something: either its own description (only shown once open), or a
-    // match somewhere in its subtree (whose row only becomes visible once
-    // THIS node is open). A category matching only by its own name does
-    // NOT need forcing open -- that match is already visible right on its
-    // (possibly collapsed) row. This is deliberately independent of
-    // categoryMatchesDirectly/forceShow above: those control what's shown
-    // once a node IS open, not whether it needs to be forced open at all.
-    // Only computed -- and only applied -- on the frame the search query
-    // just changed. CategoryHasDescendantMatch does a full recursive walk
-    // of this category's subtree, so evaluating it unconditionally on
-    // every frame (even though the result was only ever consumed here)
-    // stacked a second full-tree walk on top of the filtering walk above,
-    // for every category, every frame, the whole time search was active --
-    // expensive enough on a large tree to stall the overlay (dropped
-    // keystrokes, unresponsive scrolling) for as long as the search box
-    // had text in it, not just on the one frame the query changed. Gating
-    // the computation itself (not just the SetNextItemOpen call) is what
-    // actually avoids that cost.
-    //
-    // Deliberately NOT gated on searchActive here (only s_treeSearchQueryChanged) --
-    // this needs to run on the way OUT of a search too, i.e. the frame the
-    // query drops back below kMinTreeSearchLength (or is cleared). That
-    // frame has searchActive == false, and if this block skipped it, every
-    // category that had been force-opened while the search was active would
-    // just stay open forever -- nothing else ever tells it to close. So
-    // this always fires on a query change; categoryNeedsForceOpen is simply
-    // false whenever there's no active search to justify it, folding the
-    // category back down the same way it was forced open. Set explicitly
-    // either way (not just when true) for the same reason: a category
-    // forced open for a shorter/different query (e.g. "war" matching
-    // "Warhorn" here) but no longer matching a narrower one (e.g.
-    // "warrior") must be forced back shut on that same frame too. Once set
-    // here, ImGui's own persisted open/closed state carries it forward on
-    // later unchanged frames, same as always.
+    //_ Forced open only if collapsing would hide a match not already
+    // visible on the row itself -- own description, or a descendant match
+    // (see function header for the query-change gating).
     if (s_treeSearchQueryChanged)
     {
         bool categoryNeedsForceOpen = searchActive &&
@@ -377,13 +355,9 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
     bool categoryHasNew      = category.value("__vfxd_hasnew", false);
     bool categoryVirtual     = category.value("__vfxd_virtual", false);
 
-    // A duplicate-guid problem, or a merge whose candidates' settings
-    // disagreed, wins the tint (red) over everything else -- both are
-    // things that need a second look before an update should even be
-    // trusted to know which effect is which underneath this category.
-    // Failing that, a rework anywhere underneath wins over a new effect
-    // (orange over green) -- a rework is the thing worth double-checking,
-    // so a category with both should still stand out.
+    //_ Priority: dupe/conflict (red) needs a second look before trusting
+    // which effect is which; failing that, rework (orange) outranks new
+    // (green) as the thing worth double-checking.
     const ImVec4* categoryTint = nullptr;
     if (categoryHasDupe || categoryHasConflict)
         categoryTint = &kDuplicateColor;
@@ -398,54 +372,30 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
     if (categoryTint)
         ImGui::PopStyleColor();
 
-    // This category's own children (effects and nested subcategories) are
-    // only ever visited further down, inside "if (categoryOpen)" -- so if
-    // this node just closed (whether search forced it shut, or it was
-    // already closed and stays that way) on the very frame the query
-    // changed, nothing will visit its descendants this frame to reset
-    // whatever force-open state an earlier, different query left on them.
-    // Same reasoning as the early search-skip branch above; see
-    // SilentlyCloseSubtree's own comment.
+    //_ Closed on the query-change frame -> descendants won't be visited to
+    // reset their own force-open state, so do it here instead (same
+    // reasoning as the search-skip branch above).
     if (!categoryOpen && s_treeSearchQueryChanged)
     {
-        // TreeNode only auto-pushes its own ID scope onto the stack when it
-        // opens (that's what lets its children compute IDs relative to it).
-        // Since it's closed here, nothing pushed that scope -- so it has to
-        // be entered manually to match the IDs the real render pass would
-        // use if this category were open.
+        //_ TreeNode only pushes its ID scope when open; enter it manually
+        // here to match the IDs the real render pass would use.
         ImGui::PushID(name.c_str());
         SilentlyCloseChildren(category);
         ImGui::PopID();
     }
 
-    // Drop target for an effect dragged from elsewhere in this same sin
-    // file (see EffectDragPayload/BeginDragDropSource below) -- attaches to
-    // the TreeNode row itself, so a category accepts a drop whether it's
-    // open or collapsed. Not offered on a pending-update overlay category
-    // ("__vfxd_virtual") for the same reason Rename isn't: it isn't in the
-    // real on-disk file yet, so there's nothing to re-find and move into
-    // once the drop is applied.
+    //_ Drop target for an effect dragged from elsewhere in this sin file --
+    // attaches to the row itself, so it accepts a drop whether open or
+    // collapsed. Not offered on a "__vfxd_virtual" overlay category, same
+    // reason as Rename: nothing real on disk yet to move into.
     if (!categoryVirtual && ImGui::BeginDragDropTarget())
     {
         if (ImGui::AcceptDragDropPayload("VFXD_EFFECT"))
         {
-            // Payload bytes are just a type marker (see EffectDragPayload's
-            // comment) -- the real source info lives in
-            // installed_tree_edit.cpp's drag-payload static, read here via
-            // GetEffectDragPayload(), which BeginEffectDrag keeps current
-            // every frame the drag is held. Since only same-sin moves are
-            // offered, guard against a payload somehow tagged with a
-            // different sin (shouldn't happen -- BeginDragDropSource below only starts a
-            // drag using this category tree's own sinName -- but cheap to
-            // check rather than assume).
-            //
-            // Unlike before this category also doubled as a reorder-to-
-            // end target, a drop here from the *same* category is now
-            // allowed -- it's how an effect reaches the last position in
-            // its own list (see this file's drag-and-drop header comment)
-            // -- except when the dragged effect is already last, which
-            // would erase-then-reinsert it in the exact same spot: a
-            // no-op that would still trigger a pointless rewrite+.bak.
+            //_ Real payload lives in GetEffectDragPayload(), not the drop
+            // bytes (see EffectDragPayload). Guard the sin match since only
+            // same-sin moves are offered; skip if already last in this
+            // category to avoid a pointless no-op rewrite+.bak.
             const EffectDragPayload& dragPayload = GetEffectDragPayload();
             bool sameCategory = dragPayload.originalPath == pathSoFar;
             bool alreadyLast  = sameCategory && category.contains("effects") && category["effects"].is_array() &&
@@ -466,17 +416,10 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
 
         if (ImGui::AcceptDragDropPayload("VFXD_CATEGORY"))
         {
-            // A dragged category can land in one of two places relative to
-            // THIS row, and nowhere else -- reorder-only, see this file's
-            // drag-and-drop header comment. If this category IS the
-            // dragged one's current parent, dropping here means "append to
-            // the end of my own children" (mirrors the effect target just
-            // above). If this category instead shares that same parent
-            // (i.e. it's a current sibling of the dragged one), dropping
-            // here means "insert immediately above me." Anything else --
-            // a category dropped onto an unrelated one under a different
-            // parent entirely -- would be reparenting, which isn't offered
-            // yet, so it's silently ignored rather than guessed at.
+            //_ Reorder-only (see file header): dropped here means "append
+            // to my children" if I'm the dragged category's parent, or
+            // "insert above me" if we share a parent; a different parent
+            // entirely would be reparenting, so it's silently ignored.
             if (GetCategoryDragSinName() == sinName && !GetCategoryDragPath().empty())
             {
                 const std::vector<int>& dragPath = GetCategoryDragPath();
@@ -488,43 +431,29 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
 
                 if (pathSoFar == draggedParentPath)
                 {
-                    // Append case -- but only a real move if the dragged
-                    // category isn't already the last child here, same
-                    // no-op reasoning as the effect target's alreadyLast.
                     bool alreadyLast = category.contains("categories") && category["categories"].is_array() &&
-                                       draggedIndex == static_cast<int>(category["categories"].size()) - 1;
+                                       draggedIndex == static_cast<int>(category["categories"].size()) - 1;   //. append case, same no-op check as effect target
                     if (!alreadyLast)
                         QueueCategoryMove(GetCategoryDragSinName(), dragPath, -1);
                 }
                 else if (myParentPath == draggedParentPath)
                 {
-                    // Sibling case -- insert immediately above this
-                    // category, skipping the same two no-op positions the
-                    // effect-row target skips: dropped on itself
-                    // (draggedIndex == myIndex), or on the sibling right
-                    // after it, which -- once the erase-shift is
-                    // accounted for in ApplyPendingCategoryMove -- would
-                    // land the dragged category right back where it
-                    // started.
+                    //_ Insert above this category; skip dropping on itself
+                    // or on the sibling right after it (post-erase-shift,
+                    // that would land it right back where it started).
                     bool noOp = (draggedIndex == myIndex) || (draggedIndex == myIndex - 1);
                     if (!noOp)
                         QueueCategoryMove(GetCategoryDragSinName(), dragPath, myIndex);
                 }
-                // else: a different parent entirely -- would be
-                // reparenting, not offered yet, so left alone.
+                //_ else: different parent = reparenting, not offered
             }
         }
 
         ImGui::EndDragDropTarget();
     }
 
-    // Drag source -- any real category (not one only existing in a
-    // pending-update overlay, see "__vfxd_virtual" above) can be picked up
-    // and dropped to reorder it among its own current siblings (see this
-    // file's drag-and-drop header comment for why reparenting into a
-    // different parent isn't offered). Gated on the same "no other edit in
-    // flight" rule as the effect drag source below, so a drag can't start
-    // while an edit/rename elsewhere is mid-flight.
+    //_ Reorder among current siblings only (see file header). Gated on
+    // AnyEditInFlight so a drag can't start mid-edit elsewhere.
     if (!categoryVirtual && !AnyEditInFlight() && ImGui::BeginDragDropSource())
     {
         BeginCategoryDrag(sinName, pathSoFar);
@@ -532,10 +461,8 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
         ImGui::EndDragDropSource();
     }
 
-    // Only offer to start a rename (or an effect edit, see below) when no
-    // other edit of either kind is already in flight anywhere, and not on
-    // a category that only exists in a pending-update overlay -- see
-    // BuildDiffOverlayTree's "__vfxd_virtual" comment.
+    //_ Only offered when no other edit is in flight anywhere, and never on
+    // a "__vfxd_virtual" overlay category (see BuildDiffOverlayTree).
     if (!categoryVirtual && !AnyEditInFlight() && ImGui::BeginPopupContextItem("category_ctx"))
     {
         if (ImGui::MenuItem("Rename"))
@@ -543,15 +470,10 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
         ImGui::EndPopup();
     }
 
-    // "-" delete / "+" add-subcategory, rendered after the context menu
-    // above so they don't steal "last item" from the TreeNode (which
-    // BeginDragDropTarget/BeginPopupContextItem both attach to). Not
-    // offered on a pending-update overlay category, same reasoning as
-    // Rename/the drop target above. Delete stays grayed out for as long
-    // as this category has any subcategory or effect inside it -- never
-    // silently deletes content. "+" only appears once the category is
-    // unfolded, since it's about adding something *inside* what you're
-    // currently looking at.
+    //_ Rendered after the context menu above so they don't steal "last
+    // item" from the TreeNode. Delete stays disabled while this category
+    // has any content -- never silently deletes it. "+" only shows once
+    // open, since it adds something *inside* what's being looked at.
     if (!categoryVirtual)
     {
         bool categoryEmpty = (!category.contains("effects") || category["effects"].empty()) &&
@@ -581,10 +503,8 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
         }
     }
 
-    // The confirm prompt sits right below this row, not nested inside the
-    // TreeNode's collapsible content -- the "-" button above is visible
-    // whether this node is open or collapsed, so the prompt it opens stays
-    // visible either way too, unlike isRenamingThis/isCreatingHere below.
+    //_ Sits right below this row, not nested inside the TreeNode's
+    // collapsible content -- visible whether the node is open or collapsed.
     if (isDeletingThisCategory)
         RenderDeleteConfirm();
 
@@ -609,12 +529,9 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
             {
                 const int effIndex = i++;
 
-                // Hidden by the tree search box: this category's own name/
-                // description didn't match, and neither does this effect
-                // (name/description/guids). Cancel any edit in flight on it
-                // first -- same "nothing invisible stays running" reasoning
-                // as the subtree-skip above -- since it won't be drawn this
-                // frame at all, not even collapsed.
+                //_ Hidden by search -- not matched by category or effect.
+                // Cancel any edit in flight (see file header) since it
+                // won't be drawn at all this frame.
                 if (searchActive && !categoryMatchesDirectly && !EffectMatchesSearch(effect, s_treeSearchQueryLower))
                 {
                     bool isEditingThisHidden = IsEffectBeingEdited(sinName, pathSoFar, effIndex);
@@ -625,11 +542,8 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                     if (isDeletingThisHidden)
                         CancelDeleteConfirm();
 
-                    // Same reasoning as the category-level resets above --
-                    // this effect isn't being visited at all this frame, so
-                    // if the query just changed, its own stored open state
-                    // needs resetting now or it reappears already expanded
-                    // once it matches some future query.
+                    //_ Not visited this frame -- on a query change, reset
+                    // this effect's own stored open state too.
                     if (s_treeSearchQueryChanged)
                     {
                         ImGui::PushID(effIndex);
@@ -643,15 +557,10 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                 ImGui::PushID(effIndex);
 
                 std::string effName = effect.value("name", std::string("(unnamed effect)"));
-                // Identity is (sinName, category path, index) -- NOT name.
-                // Sibling effects can legitimately share a name (VfxDenoiser
-                // itself doesn't require uniqueness), and matching by name
-                // here would make every same-named sibling in this category
-                // think it was the one being edited: all of them would pop
-                // open showing the same editor content, and closing any one
-                // of them (since only the actually-open one has real state)
-                // would look like it cancelled the edit that was just
-                // started on a different sibling.
+                //_ Identity is (sinName, path, index) -- NOT name. Siblings
+                // can share a name (VfxDenoiser doesn't require uniqueness);
+                // matching by name would make every same-named sibling
+                // think it was the one being edited.
                 bool isEditingThis = IsEffectBeingEdited(sinName, pathSoFar, effIndex);
                 bool isDeletingThisEffect = IsDeletingThisEffect(sinName, pathSoFar, effIndex);
 
@@ -660,10 +569,9 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                 bool effIsRework   = effect.value("__vfxd_rework", false);
                 bool effIsConflict = effect.value("__vfxd_conflict", false);
 
-                // A settings conflict from a merge is just as much a
-                // "review this before applying" situation as a duplicate
-                // guid, so it gets the same red tint and the same top
-                // priority.
+                //_ A settings conflict is just as much a "review before
+                // applying" situation as a duplicate guid -- same red tint,
+                // same top priority.
                 if (effIsDupe || effIsConflict)
                     ImGui::PushStyleColor(ImGuiCol_Text, kDuplicateColor);
                 else if (effIsNew)
@@ -671,19 +579,10 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                 else if (effIsRework)
                     ImGui::PushStyleColor(ImGuiCol_Text, kReworkColor);
 
-                // An effect's own node is only forced open if it matched
-                // through content that's actually hidden until then -- its
-                // description or a GUID. A name match alone doesn't need
-                // it: that match is already visible right on this row.
+                //_ Forced open only if it matched through hidden content
+                // (description/GUID) -- a name match is already visible on
+                // the row. Query-change gating as above (see file header).
                 bool effectNeedsForceOpen = searchActive && EffectHiddenContentMatches(effect, s_treeSearchQueryLower);
-                // Set explicitly either way, not just when true -- see the
-                // category force-open comment above for why a node that no
-                // longer needs opening has to be forced shut too. Also NOT
-                // gated on searchActive, same reasoning as that comment --
-                // this needs to fire on the way out of a search too, so an
-                // effect forced open while searching folds back down once
-                // the query is cleared/shortened, rather than staying open
-                // forever.
                 if (s_treeSearchQueryChanged)
                     ImGui::SetNextItemOpen(effectNeedsForceOpen, ImGuiCond_Always);
                 bool nodeOpen = ImGui::TreeNode("effect", "%s%s", effName.c_str(), isEditingThis ? " (editing)" : "");
@@ -691,40 +590,19 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                 if (effIsDupe || effIsNew || effIsRework || effIsConflict)
                     ImGui::PopStyleColor();
 
-                // Drop target for an effect dragged onto this effect's own
-                // row -- places the dragged effect immediately above this
-                // one (see EffectMoveJob's destinationIndex comment).
-                // Complements the category-row target above: together they
-                // reach every position in the list, so this one never
-                // needs to distinguish "above" from "below" within the
-                // row. Not offered on an effect that only exists in a
-                // pending-update overlay ("__vfxd_new") or on a
-                // rework/merge preview node ("__vfxd_rework") -- neither
-                // has a stable real on-disk position while only previewed
-                // (BuildDiffOverlayTree can relocate a rework's survivor,
-                // or shift a sibling's index by deleting a merged-away
-                // effect out of the same array), so `pathSoFar`/`effIndex`
-                // captured here could point at the wrong real effect once
-                // actually applied.
+                //_ Places a dragged effect immediately above this row --
+                // complements the category-row target above so together
+                // they reach every position. Not offered on an overlay-only
+                // effect (__vfxd_new/__vfxd_rework): no stable real on-disk
+                // position while only previewed.
                 if (!effIsNew && !effIsRework && ImGui::BeginDragDropTarget())
                 {
                     if (ImGui::AcceptDragDropPayload("VFXD_EFFECT"))
                     {
-                        // Same same-sin guard as the category-row target,
-                        // plus two no-op cases specific to landing on a
-                        // specific effect rather than appending: dropping
-                        // an effect onto itself, and dropping it onto the
-                        // effect immediately after it in the same
-                        // category. The first is obvious. The second is
-                        // subtler -- once the dragged effect is erased
-                        // from originalIndex, the effect that used to sit
-                        // at originalIndex + 1 shifts down to originalIndex,
-                        // so "insert before it" would put the dragged
-                        // effect right back where it started (see
-                        // ApplyPendingMove's index adjustment). Both are
-                        // skipped here rather than left for ApplyPendingMove
-                        // to silently no-op, so neither triggers a
-                        // pointless rewrite+.bak.
+                        //_ Same same-sin guard as the category target, plus
+                        // two no-op cases: dropped on itself, or on the
+                        // effect right after it (post-erase-shift, that
+                        // would land it back where it started).
                         const EffectDragPayload& dragPayload = GetEffectDragPayload();
                         bool sameCategory = dragPayload.originalPath == pathSoFar;
                         bool noOp = sameCategory && (dragPayload.originalIndex == effIndex ||
@@ -745,18 +623,9 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                     ImGui::EndDragDropTarget();
                 }
 
-                // Drag source -- any real effect, at its real on-disk
-                // position, can be picked up and dropped onto a different
-                // category's TreeNode row to move it there. Not offered on
-                // an effect that only exists in a pending-update overlay
-                // ("__vfxd_new") or a rework/merge preview node
-                // ("__vfxd_rework") -- see the drag-drop-target comment
-                // just above for why neither has a position worth trusting
-                // yet. Gated on the same "no other edit in flight" rule as
-                // the context-menu Edit just below, so a drag can't be
-                // started while an edit/rename elsewhere is mid-flight
-                // (see EffectMoveJob's comment for why moves are otherwise
-                // independent of that machinery).
+                //_ Not offered on an overlay-only effect, same reasoning as
+                // the drop target above. Gated on AnyEditInFlight so a drag
+                // can't start mid-edit elsewhere.
                 if (!effIsNew && !effIsRework && !AnyEditInFlight() && ImGui::BeginDragDropSource())
                 {
                     BeginEffectDrag(sinName, pathSoFar, effName, effIndex);
@@ -765,17 +634,10 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                     ImGui::EndDragDropSource();
                 }
 
-                // Only offer to start a new edit when none is already in
-                // flight anywhere -- see EditState's comment in
-                // installed_tree_edit.cpp for why --
-                // and never on an effect that only exists in a pending-
-                // update overlay ("__vfxd_new") or a rework/merge preview
-                // node ("__vfxd_rework"): the former isn't in the real
-                // file yet, and the latter's position in this overlay
-                // copy is provisional (see the drag-drop-target comment
-                // above) -- either way there's nothing at `pathSoFar`/
-                // `effIndex` in the REAL file guaranteed to be this same
-                // effect until the update is actually applied.
+                //_ Only offered when no edit is in flight anywhere, and
+                // never on an overlay-only effect -- nothing at
+                // pathSoFar/effIndex in the real file is guaranteed to be
+                // this same effect until the update is applied.
                 if (!effIsNew && !effIsRework && !AnyEditInFlight() && ImGui::BeginPopupContextItem("effect_ctx"))
                 {
                     if (ImGui::MenuItem("Edit"))
@@ -783,15 +645,9 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                     ImGui::EndPopup();
                 }
 
-                // "-" delete, rendered after the context menu above for
-                // the same "don't steal last item" reason as the
-                // category's own -/+ buttons. Never grayed out for
-                // emptiness (an effect has no "contents" to protect,
-                // unlike a category) -- only temporarily disabled while
-                // some other edit/delete/create/rename is in flight
-                // elsewhere. Not offered on a pending-update overlay or
-                // rework/merge preview effect, same reasoning as Edit
-                // just above.
+                //_ Never grayed out for emptiness (unlike a category) --
+                // only while some other edit/delete/create/rename is in
+                // flight elsewhere. Not offered on an overlay-only effect.
                 if (!effIsNew && !effIsRework)
                 {
                     bool deleteDisabled = AnyEditInFlight() && !isDeletingThisEffect;
@@ -805,10 +661,7 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                         BeginDeleteConfirm(sinName, pathSoFar, effIndex, /*isCategory=*/false, effName);
                 }
 
-                // Same reasoning as the category's own confirm prompt:
-                // this sits right below the row, which is visible whether
-                // or not `nodeOpen` is true, so the prompt stays visible
-                // either way too.
+                //_ sits below the row, visible whether nodeOpen or not
                 if (isDeletingThisEffect)
                     RenderDeleteConfirm();
 
@@ -844,13 +697,10 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                             }
                             else if (effIsConflict)
                             {
-                                // A GUID this effect absorbed used to belong
-                                // to another effect that's surviving under
-                                // its own separate update instead of being
-                                // deleted -- nothing is disappearing, but
-                                // that other effect's settings disagreed
-                                // with this one's, so it's still worth a
-                                // second look.
+                                //_ A GUID this effect absorbed used to
+                                // belong to another effect surviving under
+                                // its own separate update -- still worth a
+                                // second look even though nothing's lost.
                                 ImGui::TextColored(kDuplicateColor,
                                     "This effect absorbed a GUID from another effect with different settings -- shown below, review before applying.");
                             }
@@ -872,12 +722,7 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                                 ImGui::TextColored(kReworkColor, "Moved from \"%s\".",
                                     effect.value("__vfxd_old_category", std::string()).c_str());
 
-                            // The actual discarded/disagreeing settings a
-                            // conflict warning above is asking to be
-                            // reviewed -- named by which effect they came
-                            // from, and where that effect still lives if
-                            // it wasn't deleted here (see
-                            // RenderConflictSources's own comment).
+                            //_ what the conflict warning above asks to review
                             if (effIsConflict)
                                 RenderConflictSources(effect);
                         }
@@ -897,10 +742,9 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
 
                         if (effIsRework)
                         {
-                            // Show what's there now (default color) and
-                            // what a pending update would change it to
-                            // (kReworkColor), stacked so both are visible
-                            // at once without needing to apply first.
+                            //_ Current (default color) and pending-update
+                            // (kReworkColor) stacked, so both are visible
+                            // without needing to apply first.
                             std::vector<std::string> newGuids;
                             if (effect.contains("__vfxd_new_guids") && effect["__vfxd_new_guids"].is_array())
                                 for (const auto& g : effect["__vfxd_new_guids"])
@@ -921,9 +765,8 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                                 RenderBehavior(behavior);
                         }
 
-                        // Anything beyond the confirmed schema (name/
-                        // description/guids/behaviors) is unexpected --
-                        // surface it generically rather than drop it.
+                        //_ Anything beyond the confirmed schema is
+                        // unexpected -- surface it rather than drop it.
                         for (const auto& [key, value] : effect.items())
                         {
                             if (key == "name" || key == "description" || key == "guids" || key == "behaviors"
@@ -942,8 +785,7 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                 }
                 else if (isEditingThis)
                 {
-                    // Collapsing the node that's mid-edit cancels the edit,
-                    // same reasoning as the category case above.
+                    //_ collapsing mid-edit cancels it, same as the category case
                     CancelEdit();
                 }
 
@@ -967,18 +809,10 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
     }
     else
     {
-        // This node is collapsed -- nothing inside it (including its own
-        // rename UI, the "add subcategory" prompt, or any effect editor
-        // further down) is being drawn this frame. Cancel rather than let
-        // an edit keep running invisibly until the user reopens the node.
-        // PathHasPrefix with equal-length paths also covers "this category
-        // is the one being renamed"/"...the one a subcategory is being
-        // added to", so there's no separate isRenamingThis/isCreatingHere
-        // check needed. DeleteConfirmState is NOT included here on
-        // purpose -- see its own comment for why: the "-" button and the
-        // confirm prompt it opens sit on this row itself, which stays
-        // visible whether or not the node below it is collapsed, so
-        // there's nothing for collapsing to hide.
+        //_ Collapsed -- nothing inside (rename UI, create prompt, effect
+        // editor) is drawn this frame, so cancel rather than let it run
+        // invisibly. DeleteConfirmState is deliberately excluded -- its
+        // row sits outside the collapsible content (see its own comment).
         if (IsCategoryRenameUnderPath(sinName, pathSoFar))
             CancelCategoryEdit();
         if (IsEffectEditUnderPath(sinName, pathSoFar))
@@ -990,14 +824,17 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
     pathSoFar.pop_back();
 }
 
-} // namespace
+} //. namespace
 
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// RenderInstalledEffects
+//------------------------------------------------------------------------------
 // Draws the "Installed Effects" section: one top-level TreeNode per
-// installed sin file (Gluttony / Pride / Sloth, whichever are actually
-// present), each expanding into that file's real category tree via
-// RenderCategoryTree. Read-only browsing by default; right-clicking an
-// effect offers "Edit" (see EditState/BeginEdit/RenderEffectEditor above).
-// Independent of whether a GitHub update is available.
+// installed sin file, each expanding into that file's real category tree
+// via RenderCategoryTree. Read-only browsing by default; right-clicking an
+// effect offers "Edit". Independent of whether a GitHub update is
+// available.
+//------------------------------------------------------------------------------
 void RenderInstalledEffects(const std::string& denoiserAddonDir)
 {
     if (!IsInstalledTreeLoaded())
@@ -1010,10 +847,8 @@ void RenderInstalledEffects(const std::string& denoiserAddonDir)
                          "or onto another effect to place it just above that one. Categories can be dragged the "
                          "same way to reorder them among their own siblings.");
 
-    // Tree search box -- filters every installed sin file's tree at once by
-    // name, category name, description, or GUID, case-insensitively. Just
-    // recomputes the lowercased query used by RenderCategoryTree's matching
-    // helpers; the actual filtering/expansion happens down there.
+    //_ Recomputes the lowercased query RenderCategoryTree's matching
+    // helpers compare against; the actual filtering happens down there.
     ImGui::InputTextWithHint("##installed_tree_search", "Search name / category / description / GUID...",
                               s_treeSearchBuf, sizeof(s_treeSearchBuf));
     if (s_treeSearchBuf[0] != '\0')
@@ -1029,14 +864,10 @@ void RenderInstalledEffects(const std::string& denoiserAddonDir)
     if (!typedLower.empty() && typedLower.size() < kMinTreeSearchLength)
         ImGui::TextDisabled("Keep typing... (search starts at %zu characters)", kMinTreeSearchLength);
 
-    // Below the minimum length, treat the query as empty -- no filtering,
-    // no forced expansion, same as an empty search box.
+    //. below the minimum, treat the query as empty (no filtering/expansion)
     std::string newQueryLower = (typedLower.size() >= kMinTreeSearchLength) ? typedLower : std::string();
 
-    // Only true on this one frame if the query is different from what it
-    // was last frame -- see s_treeSearchQueryChanged's own comment for why
-    // RenderCategoryTree cares about this distinction rather than just
-    // "search box has text in it".
+    //. see s_treeSearchQueryChanged's own comment for why this matters
     s_treeSearchQueryChanged = (newQueryLower != s_treeSearchQueryLower);
     s_treeSearchQueryLower   = std::move(newQueryLower);
 
@@ -1049,10 +880,9 @@ void RenderInstalledEffects(const std::string& denoiserAddonDir)
         return;
     }
 
-    // A Ready diff plan overlays pending-update coloring onto this same
-    // tree via BuildDiffOverlayTree, rather than a separate list -- see
-    // RenderSinDiffStatus in the top action row. Sins with no plan yet (or
-    // an empty one) just render the plain on-disk tree, same as always.
+    //_ A Ready diff plan overlays pending-update coloring onto this same
+    // tree (BuildDiffOverlayTree) rather than a separate list. Sins with
+    // no plan yet just render the plain on-disk tree.
     std::vector<SinDiffInfo> diffs = GetSinDiffInfo();
     bool anyOverlayShown  = false;
     bool anyConflictShown = false;
@@ -1080,17 +910,10 @@ void RenderInstalledEffects(const std::string& denoiserAddonDir)
         auto        dupIt    = duplicateGuidsBySin.find(sin.sinName);
         bool        hasDupes = dupIt != duplicateGuidsBySin.end() && !dupIt->second.empty();
 
-        // Build up whichever overlays apply, in order: duplicate-guid
-        // tagging first (a property of the file itself), then the
-        // pending-update diff on top of that same copy -- both markers can
-        // coexist on one node (e.g. a duplicated effect that also has a
-        // pending rework), and RenderCategoryTree picks duplicate-red over
-        // rework-orange/new-green when both are present. Only ever a copy;
-        // the store's own copy is never touched by either pass.
-        //
-        // Cached in s_overlayCache rather than rebuilt every frame -- see
-        // that struct's own comment for why (this used to be the direct
-        // cause of a reported scrolling bug).
+        //_ Duplicate-guid tagging first (a property of the file itself),
+        // then the pending-update diff on the same copy -- both can
+        // coexist on one node; RenderCategoryTree picks red over
+        // orange/green. Only ever a copy -- see OverlayCacheEntry.
         const nlohmann::ordered_json* fileToRender = installedFile;
 
         if (hasDupes || hasOverlay)
@@ -1128,11 +951,8 @@ void RenderInstalledEffects(const std::string& denoiserAddonDir)
                 sin.sinName.c_str());
         }
 
-        // While a tree search is active, check up front whether this file
-        // has any match at all -- lets the root row force itself open (so a
-        // match isn't hidden behind an unexpanded file) and, further down,
-        // lets an empty result say so rather than claim there are no
-        // categories in a file that actually has plenty.
+        //_ Whether this file has any match at all -- lets the root row
+        // force itself open, and lets an empty result say so further down.
         bool searchActive   = !s_treeSearchQueryLower.empty();
         bool anyMatchInFile = false;
         if (searchActive && fileToRender->contains("categories") && (*fileToRender)["categories"].is_array())
@@ -1143,28 +963,15 @@ void RenderInstalledEffects(const std::string& denoiserAddonDir)
                     break;
                 }
 
-        // Set explicitly either way on a query change, not just when true
-        // -- a file that matched a shorter/different query but no longer
-        // has anything under a narrower one needs to be forced back shut,
-        // same reasoning as the category/effect force-open comments. Also
-        // NOT gated on searchActive, same reasoning as those -- this needs
-        // to fire on the way out of a search too (anyMatchInFile is simply
-        // false whenever there's no active search), so a root file node
-        // that got force-opened while searching folds back down once the
-        // query is cleared/shortened, instead of staying open forever.
+        //. same query-change force-open/shut gating as RenderCategoryTree
         if (s_treeSearchQueryChanged)
             ImGui::SetNextItemOpen(anyMatchInFile, ImGuiCond_Always);
 
         bool rootOpen = ImGui::TreeNode("root", "%s (%s)", sin.sinName.c_str(), sin.fileName.c_str());
 
-        // Same reasoning as RenderCategoryTree's own version of this fix --
-        // the top-level categories under this root are only ever visited
-        // inside the "if (rootOpen)" block below, so if this file's root
-        // node just closed on the frame the query changed, nothing will
-        // visit them to reset whatever force-open state an earlier,
-        // different query left further down. "root" is TreeNode's str_id
-        // here (not the displayed text), so that's what must be pushed to
-        // match the ID scope it would have used had it opened.
+        //_ Same fix as RenderCategoryTree's collapsed branch: closed on a
+        // query-change frame, so reset descendants' state here instead.
+        // "root" is TreeNode's str_id, pushed to match its real ID scope.
         if (!rootOpen && s_treeSearchQueryChanged)
         {
             ImGui::PushID("root");
@@ -1184,19 +991,11 @@ void RenderInstalledEffects(const std::string& denoiserAddonDir)
 
         if (rootOpen)
         {
-            std::vector<int> path; // this sin file's top level -- empty path, same convention as installed_tree_edit's CreateCategoryState::parentPath
+            std::vector<int> path;   //. this sin file's top level -- empty path
 
-            // Drop target for a top-level category being reordered (see
-            // RenderCategoryTree's category-row target for the nested
-            // case) -- this root row is the "shared parent's own row" a
-            // top-level category doesn't otherwise have anything to drop
-            // onto, since there's no category node above it. Reorder-only,
-            // same as RenderCategoryTree's target: only offered when the
-            // dragged category is already top-level *in this same sin
-            // file* -- a top-level category from a different sin file, or
-            // a nested category from anywhere, would both be reparenting,
-            // not offered yet (see this file's drag-and-drop header
-            // comment).
+            //_ Reorder-only (see file header): this root row is the
+            // "shared parent's own row" a top-level category doesn't
+            // otherwise have. Only offered within the same sin file.
             if (ImGui::BeginDragDropTarget())
             {
                 if (ImGui::AcceptDragDropPayload("VFXD_CATEGORY"))
@@ -1256,9 +1055,7 @@ void RenderInstalledEffects(const std::string& denoiserAddonDir)
         }
         else if (IsCreatingCategoryAt(sin.sinName, std::vector<int>()))
         {
-            // Same "collapsing cancels" reasoning as RenderCategoryTree's
-            // own collapsed branch -- the "+" button and prompt above only
-            // exist inside this TreeNode, so collapsing it hides them.
+            //. collapsing hides the "+" button and prompt, so cancel it
             CancelCreateCategory();
         }
 
@@ -1285,10 +1082,9 @@ void RenderInstalledEffects(const std::string& denoiserAddonDir)
         }
     }
 
-    // Apply any edit that was saved during this frame's tree walk above --
-    // deferred to here, after every category/effect array has finished
-    // being iterated, so nothing is ever mutated mid-walk. All six are
-    // called unconditionally.
+    //_ Deferred to here, after every category/effect array has finished
+    // iterating, so nothing is mutated mid-walk. All six called
+    // unconditionally.
     ApplyPendingEdit();
     ApplyPendingCategoryRename();
     ApplyPendingMove();

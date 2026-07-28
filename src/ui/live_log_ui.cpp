@@ -1,39 +1,45 @@
+//################################################################################
 // live_log_ui.cpp
-//
+//--------------------------------------------------------------------------------
 // "Live Log (VfxDenoiser)" options-panel section. Extracted from
-// addon.cpp -- a mechanical move, no
-// behavior change. See live_log_ui.h for what's exposed and why.
-#include "ui/live_log_ui.h"
-#include "core/live_log.h"
-#include "ui/report_ui.h"
+// addon.cpp -- a mechanical move, no behavior change. See live_log_ui.h
+// for what's exposed and why.
+//--------------------------------------------------------------------------------
+
+#include "game_state.h"
 #include "imgui.h"
-#include "core/tree/installed_tree_store.h"
-#include "core/game_state.h"
-#include "core/specialization_names.h"
+#include "installed_tree_store.h"
+#include "live_log_ui.h"
+#include "live_log.h"
+#include "report_ui.h"
+#include "specialization_names.h"
+
 #include <algorithm>
 #include <cstdio>
 #include <vector>
 
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// RenderLiveLogSection
+//--------------------------------------------------------------------------------
 // Own collapsible header, separate from Installed Effects / Backups /
 // Report an Effect -- this is live incoming data over the Nexus event
 // bridge (live_log.h/vfxd_sins_bridge.h), not anything read off disk.
+//
+// The per-type "log this at all" filters below are checked at ingestion
+// and are independent of the listen toggle and "hide known". Deliberately
+// not persisted -- they reset to built-in defaults every reload (see
+// live_log.cpp), since they're exploratory filters for characterizing
+// each numeric type, not settings meant to stick.
+//--------------------------------------------------------------------------------
 void RenderLiveLogSection(AddonAPI_t* aApi, const std::string& denoiserAddonDir)
 {
-    // Same lazy-load-if-needed pattern as RenderReportSection/
-    // RenderBackupsSection -- resolving an incoming guid to a sin effect
-    // name needs whatever's actually installed right now.
+    //_ Same lazy-load pattern as RenderReportSection/RenderBackupsSection
     if (!IsInstalledTreeLoaded())
         LoadInstalledEffectsTree(denoiserAddonDir);
     LiveLog_SetKnownGuidNames(CollectGuidNameMap());
     LiveLog_SetKnownGuidBehaviors(CollectGuidBehaviorMap());
 
-    // Per-type "log this at all" filters, checked at ingestion (drop
-    // before ever becoming/updating an entry) -- independent of the
-    // listen toggle and "hide known" below. Deliberately not persisted:
-    // resets to the built-in defaults every addon reload (see
-    // live_log.cpp), since these are exploratory filters for
-    // characterizing what each numeric type actually is, not settings
-    // meant to stick. Wrapped to two rows of 6 rather than one long row.
+    //_ Tooltip text per log type; rendered in two rows of 6 below.
     static const char* const kTypeTooltips[kLiveLogTypeCount] = {
         "Type 0: never visible, sometimes linked to sounds.",
         "Type 1: a group -- hiding this hides all the effects of that group.",
@@ -88,11 +94,8 @@ void RenderLiveLogSection(AddonAPI_t* aApi, const std::string& denoiserAddonDir)
         return;
     }
 
-    // Rendered in the order each guid was first received (LiveLogEntry::
-    // firstSeenSeq, assigned once on first sight and never touched again
-    // by later "latest wins" updates) -- deliberately not alphabetical or
-    // any other re-derived order, so the list doesn't reshuffle every time
-    // an already-seen entry's fields update.
+    //_ Sorted by firstSeenSeq (order first received), not alphabetical,
+    // so the list doesn't reshuffle as an already-seen entry updates.
     std::vector<const LiveLogEntry*> sorted;
     sorted.reserve(entries.size());
     for (const auto& [guid, entry] : entries)
@@ -107,14 +110,9 @@ void RenderLiveLogSection(AddonAPI_t* aApi, const std::string& denoiserAddonDir)
         ImGui::PushID(entry->guid_b64.c_str());
         bool open = ImGui::TreeNode(entry->displayName.c_str());
 
-        // Hidden for a GUID already in an installed sin file (knownInSin)
-        // -- unchanged existing rule. Shown next to the row regardless of
-        // whether it's expanded, since a whole-row action shouldn't
-        // require opening the tree first. No "already added to this
-        // pending report" guard needed here -- report.cpp's
-        // reject-whole-submission-on-duplicate-guid check (client-side,
-        // at send time) already covers accidentally adding the same GUID
-        // twice.
+        //_ Hidden once the guid is in an installed sin file; shown next
+        // to the row regardless of expansion. No duplicate-guid guard
+        // needed -- report.cpp rejects duplicates at submission.
         if (!entry->knownInSin)
         {
             ImGui::SameLine();
@@ -124,22 +122,21 @@ void RenderLiveLogSection(AddonAPI_t* aApi, const std::string& denoiserAddonDir)
 
         if (open)
         {
-            // Shown either way once unfolded, just secondary when a name
-            // already exists -- unknown entries already show the guid as
-            // their collapsed-row label.
+            //_ Shown regardless once unfolded (secondary if a name
+            // already exists) -- unknown entries show the guid as
+            // their collapsed-row label already.
             if (entry->knownInSin)
             {
                 ImGui::Text("GUID: %s", entry->guid_b64.c_str());
-                // Looked up independently against *this user's* installed
-                // sin JSON -- not read off the incoming event. This is the
-                // trustworthy one for a known guid; VfxDenoiser's own
-                // event-side resolution is gone entirely (see live_log.h).
+                //_ Looked up against *this user's* installed sin JSON, not
+                // the incoming event -- the trustworthy source now that
+                // VfxDenoiser's own event-side resolution is gone.
                 ImGui::Text("Configured behavior: %s",
                              entry->installedBehavior.empty() ? "(not configured)" : entry->installedBehavior.c_str());
             }
 
-            // a4/a6 stay internal-only (semantically opaque, never
-            // rendered) -- only Type/Duration/Target/Caster show here.
+            //_ a4/a6 stay internal-only (opaque, never rendered) --
+            // only Type/Duration/Target/Caster show here.
             if (ImGui::TreeNode("Data"))
             {
                 ImGui::Text("Type: %d", entry->type);
@@ -149,18 +146,9 @@ void RenderLiveLogSection(AddonAPI_t* aApi, const std::string& denoiserAddonDir)
                 ImGui::TreePop();
             }
 
-            // Only built once this GUID has ever had a self-event
-            // (hasSelfContext), not based on the *current* caster/target --
-            // "last seen" means it stays visible even if this same effect
-            // is later logged by/against someone else. mapID/race/
-            // profession/spec are only ever written on a self-event to
-            // begin with (see IngestLogLine's isSelfEvent branch) and are
-            // never cleared afterward, so once true this section always
-            // has real data to show. Race/Profession are named directly
-            // from Mumble.h's own enum (see game_state.cpp) -- always a
-            // real name. Specialization falls back to the raw numeric id
-            // until specialization_names.cpp's table is filled in (see
-            // that file for why it's still empty).
+            //_ Persists once a self-event is ever seen (see IngestLogLine);
+            // stays visible even if later logged by someone else.
+            // Specialization may show a raw id until its table fills in.
             if (entry->hasSelfContext && ImGui::TreeNode("Self (last seen)"))
             {
                 ImGui::Text("MapID: %u", entry->mapID);

@@ -1,47 +1,37 @@
+//################################################################################
 // report_ui.cpp
-//
-// "Report an Effect" options-panel section. Extracted from addon.cpp --
-// a mechanical move, no behavior change. See report_ui.h for what's
-// exposed and why.
-#include "ui/report_ui.h"
-#include "integration/webhook_report.h"
+//--------------------------------------------------------------------------------
+// "Report an Effect" options-panel section. Extracted from addon.cpp -- a
+// mechanical move, no behavior change. See report_ui.h for what's exposed
+// and why.
+//--------------------------------------------------------------------------------
+// Manual "report an effect back" form: a reporter identity line
+// (Account/Character name, or anonymous), zero or more per-GUID blocks
+// (each with its own Type and a snapshot of that GUID's self-context, if
+// it has one), and one required free-text note. Validation itself lives
+// in report.cpp's StartSendReport; this section's job is the form
+// widgets, composing each GUID's display block, and showing whatever
+// outcome comes back.
+//--------------------------------------------------------------------------------
+
+#include "game_state.h"
 #include "imgui.h"
-#include "addon/ui_colors.h"
-#include "core/tree/installed_tree_store.h"
-#include "core/game_state.h"
-#include "core/specialization_names.h"
-#include <sstream>
-#include <vector>
+#include "installed_tree_store.h"
+#include "report_ui.h"
+#include "specialization_names.h"
+#include "ui_colors.h"
+#include "webhook_report.h"
+
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <sstream>
+#include <vector>
 
-// ---------------------------------------------------------------------------
-// Manual "report an effect back" form: a
-// reporter identity line (Account/Character name, or anonymous), zero or
-// more per-GUID blocks (each with its own Type and a snapshot of that
-// GUID's self-context, if it has one), and one required free-text note.
-// Validation itself lives in report.cpp's StartSendReport; this section's
-// job is the form widgets, composing each GUID's display block, and
-// showing whatever outcome comes back.
-//
-// One row here holds everything editable about a single GUID entry,
-// including its self context -- which used to be an all-or-nothing
-// snapshot hidden entirely when absent, but is now four independently
-// editable fields, each
-// pre-filled from a live-log snapshot when "report new" was clicked and
-// that GUID had one, or left at its own "not set" default otherwise.
-// Snapshotted once at that point either way -- not re-read live -- so
-// this form doesn't change under the user's feet while they're still
-// filling it out; from there the user can edit any of it by hand.
-// ---------------------------------------------------------------------------
 namespace {
 
-// Race has no None/Unknown enumerator in Mumble.h, so -1 is this form's
-// own sentinel for "not set" -- never a real
-// ERace value. Profession, unlike Race, already has a real None (0), so
-// it doubles as both the enum's own "no profession" value AND this
-// field's placeholder -- no separate sentinel needed there.
+//_ Race has no None/Unknown in Mumble.h, so -1 is this form's own
+// sentinel for "not set" -- never a real ERace value.
 constexpr int kRaceUnset = -1;
 constexpr Mumble::ERace kRaceValues[] = {
     Mumble::ERace::Asura, Mumble::ERace::Charr, Mumble::ERace::Human,
@@ -60,28 +50,41 @@ int RaceToIndex(Mumble::ERace race)
     for (int i = 0; i < (int)std::size(kRaceValues); ++i)
         if (kRaceValues[i] == race)
             return i;
-    return kRaceUnset; // shouldn't happen -- ERace has no values outside kRaceValues
+    return kRaceUnset;   //. unreachable in practice
 }
 
-} // namespace
+} //. namespace
 
+//********************************************************************************
+// ReportFormRow
+//--------------------------------------------------------------------------------
+// guid                one GUID's identifier text
+// typeText            digits 0-11, or blank/"Not set" (see ParseReportTypeText)
+// mapID               self-context MapID; 0 doubles as "not set"
+// raceIndex           index into kRaceValues, or kRaceUnset
+// profession          self-context profession; None doubles as "not set"
+// specializationText  autocomplete box's live text, resolved to an id at
+//                     compose time
+// showSpecSuggest     visibility of the suggestion window, tracked by hand
+//--------------------------------------------------------------------------------
+// One row holds everything editable about a single GUID entry, including
+// its self context -- which used to be an all-or-nothing snapshot hidden
+// entirely when absent, but is now four independently editable fields.
+// Each is pre-filled from a live-log snapshot when "report new" was
+// clicked and that GUID had one, snapshotted once at that point (not
+// re-read live, so the form doesn't change under the user while they're
+// filling it out); otherwise it starts at its own default, still fully
+// editable by hand.
+//--------------------------------------------------------------------------------
 struct ReportFormRow
 {
-    char guid[128] = {};
-    char typeText[8] = {}; // digits (0-11) or blank/"Not set" -- see ParseReportTypeText
-
-    // Self context -- individually editable now, not gated behind a
-    // single hasSelfContext
-    // bool anymore. Each field has its own "not set" default and is
-    // pre-filled independently from a live-log snapshot when one
-    // exists; a manually-added row (or one for a GUID that never took
-    // the isSelfEvent branch) simply starts every field at its default,
-    // still fully editable by hand.
-    int                 mapID          = 0;           // 0 doubles as "not set" -- MapID stays a raw number either way
-    int                 raceIndex      = kRaceUnset;   // index into kRaceValues, or kRaceUnset
-    Mumble::EProfession profession     = Mumble::EProfession::None; // None doubles as "not set"
-    char                specializationText[64] = {};  // autocomplete box's live text; resolved to an id at compose time
-    bool                showSpecSuggest = false;       // visibility of the specialization suggestion window, tracked by hand (see report_ui.cpp render loop)
+    char                 guid[128] = {};
+    char                 typeText[8] = {};
+    int                  mapID = 0;
+    int                  raceIndex = kRaceUnset;
+    Mumble::EProfession  profession = Mumble::EProfession::None;
+    char                 specializationText[64] = {};
+    bool                 showSpecSuggest = false;
 };
 
 static bool                       s_reportAnonymous = false;
@@ -89,19 +92,23 @@ static char                       s_reportAccountNameBuf[128]   = {};
 static char                       s_reportCharacterNameBuf[128] = {};
 static std::vector<ReportFormRow> s_reportRows;
 static char                       s_reportNoteBuf[1024] = {};
-static std::string                s_reportFormError; // validation error shown until the next attempt, cleared on success
 
+//_ Validation error shown until the next attempt, cleared on success.
+static std::string                s_reportFormError;
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// RefreshReportNameFieldsFromGameState
+//--------------------------------------------------------------------------------
 // Re-reads Account/Character Name from GameState and overwrites the
-// report form's name buffers with whatever's live right now. Called
-// only from AddReportRowFromLiveLogEntry (i.e. every "report new"
-// click) -- NOT on section render/addon load, and NOT for a manually-
-// added row. Auto-fill (and
-// re-fill on a later click, if the account/character has since changed
-// -- e.g. switched characters between two "report new" clicks) is tied
-// to the button, not to opening the Report tab. Unconditional overwrite
-// rather than "only if still blank" -- a later click is meant to
-// re-sync with whoever's actually playing right now, even if the user
-// had typed something else into the boxes in the meantime.
+// report form's name buffers with whatever's live right now. Called only
+// from AddReportRowFromLiveLogEntry (every "report new" click) -- not on
+// section render/addon load, and not for a manually-added row.
+//
+// Overwrite is unconditional, not "only if still blank" -- a later click
+// re-syncs with whoever's actually playing now, even if the user had
+// typed something else into the boxes since (e.g. switched characters
+// between two clicks).
+//--------------------------------------------------------------------------------
 void RefreshReportNameFieldsFromGameState()
 {
     std::string acct = GameState_GetAccountName();
@@ -110,13 +117,13 @@ void RefreshReportNameFieldsFromGameState()
     std::snprintf(s_reportCharacterNameBuf, sizeof(s_reportCharacterNameBuf), "%s", chr.c_str());
 }
 
-// Appends a row auto-filled from a live-log entry -- this is what the
-// live log's per-entry "report new" button (RenderLiveLogSection, now in
-// live_log_ui.cpp) calls. Also (re-)syncs the reporter-identity name
-// fields from GameState right here -- see
-// RefreshReportNameFieldsFromGameState's comment for why that's tied to
-// this call specifically. Declared in report_ui.h (not static) so that
-// separate translation unit can reach it.
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// AddReportRowFromLiveLogEntry
+//--------------------------------------------------------------------------------
+// See report_ui.h for the contract. Refreshes the name fields here rather
+// than on render -- see RefreshReportNameFieldsFromGameState's comment
+// for why that's tied to this call specifically.
+//--------------------------------------------------------------------------------
 void AddReportRowFromLiveLogEntry(const LiveLogEntry& entry)
 {
     RefreshReportNameFieldsFromGameState();
@@ -138,16 +145,19 @@ void AddReportRowFromLiveLogEntry(const LiveLogEntry& entry)
                 std::snprintf(row.specializationText, sizeof(row.specializationText), "%u", entry.specialization);
         }
     }
-    // else: leave every field at its default -- nothing was ever
+    //_ else: leave every field at its default -- nothing was ever
     // observed for this GUID, same as before, just no longer hidden.
     s_reportRows.push_back(row);
 }
 
 namespace {
 
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// TrimReportText
+//--------------------------------------------------------------------------------
 // Local to this file's report-form code -- report.cpp has its own Trim
-// for the same purpose, but it's private to that translation unit, and
-// this is the one spot that needs it (user-typed name fields, below).
+// for the same purpose, private to that translation unit.
+//--------------------------------------------------------------------------------
 std::string TrimReportText(const std::string& s)
 {
     size_t start = 0, end = s.size();
@@ -156,11 +166,13 @@ std::string TrimReportText(const std::string& s)
     return s.substr(start, end - start);
 }
 
-// "Not set" tri-state: Type gets its own independent "Not set" state --
-// blank (or, case-insensitively, the literal
-// text "not set") means unset; otherwise must parse as 0-11. Returns
-// false (with outError set) for anything else, e.g. stray text or a
-// number outside that range.
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// ParseReportTypeText
+//--------------------------------------------------------------------------------
+// "Not set" tri-state: blank, or case-insensitively "not set", means
+// unset; otherwise must parse as 0-11. Returns false (with outError set)
+// for anything else, e.g. stray text or a number outside that range.
+//--------------------------------------------------------------------------------
 bool ParseReportTypeText(const std::string& text, bool& outIsSet, int& outValue, std::string& outError)
 {
     std::string trimmed = text;
@@ -199,13 +211,16 @@ bool ParseReportTypeText(const std::string& text, bool& outIsSet, int& outValue,
     }
 }
 
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// AllSpecializations
+//--------------------------------------------------------------------------------
 // Every known (id, name) pair, built once by probing SpecializationName()
-// across an id range comfortably past today's 81-entry table (see
-// specialization_names.h) -- so a newly-added elite spec shows up in the
-// autocomplete list automatically the next time that table's updated,
-// without touching this loop again. Kept as strings (not const char*)
-// since SpecializationName() only promises its return value is valid for
-// the call's duration, not for the lifetime of this cache.
+// across an id range comfortably past today's 81-entry table -- so a
+// newly-added elite spec shows up automatically once that table is
+// updated, without touching this loop. Kept as strings (not const char*)
+// since SpecializationName() only promises its return value for the
+// call's duration, not this cache's lifetime.
+//--------------------------------------------------------------------------------
 const std::vector<std::pair<unsigned int, std::string>>& AllSpecializations()
 {
     static const std::vector<std::pair<unsigned int, std::string>> all = []
@@ -226,14 +241,16 @@ std::string LowerCopy(const std::string& s)
     return out;
 }
 
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// ResolveSpecializationId
+//--------------------------------------------------------------------------------
 // Resolves the autocomplete box's free-typed text to a specialization id:
 // blank -> 0 ("not set"); an all-digits string -> that raw id, taken as
-// typed (still allowed, same as the old hasSelfContext-snapshot path --
-// e.g. a future elite spec not yet in this table); otherwise an exact
-// case-insensitive name match against AllSpecializations(). Anything
-// else (a typo, a partial word) resolves to 0/"not set" rather than
-// rejecting the whole submission -- this field is a convenience, not a
-// validated one, same spirit as leaving a GUID row's Type blank.
+// typed (still allowed, e.g. a future elite spec not yet in this table);
+// otherwise an exact case-insensitive name match. Anything else (a typo,
+// a partial word) resolves to 0/"not set" rather than rejecting the
+// submission -- a convenience field, not a validated one.
+//--------------------------------------------------------------------------------
 unsigned int ResolveSpecializationId(const std::string& text)
 {
     std::string trimmed = TrimReportText(text);
@@ -253,22 +270,19 @@ unsigned int ResolveSpecializationId(const std::string& text)
     return 0;
 }
 
-// Renders the per-GUID block template used for the payload sent to the
-// relay. This is the one place that turns raw
-// enum/numeric self-context values into the human-readable names the
-// live log's own tree already uses (GameState_RaceName/ProfessionName,
-// SpecializationName) -- report.cpp never sees anything but this
-// finished string.
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// ComposeReportGuidBlock
+//--------------------------------------------------------------------------------
+// Renders the per-GUID block template for the relay payload -- the one
+// place that turns raw enum/numeric self-context values into the
+// human-readable names the live log's tree already uses; report.cpp
+// never sees anything but this finished string.
 //
-// Self context used to be all-or-nothing for the *live-capture* path
-// (unaffected by this change): one bundled block, written or not. This
-// form now lets the user adjust any of the four
-// fields independently, so the composed text follows suit: only when
-// every field is still at its own default does this print the original
-// "Not observed" line; otherwise it prints all four, substituting
-// "Unknown" for whichever ones are still unset -- the same word
-// GameState_RaceName/ProfessionName already fall back to for an
-// out-of-range value, reused here for "not filled in" instead.
+// Self context now has four independently-editable fields rather than
+// one all-or-nothing snapshot: only when every field is still at its
+// default does this print "Not observed", otherwise it prints all four,
+// substituting "Unknown" for whichever are still unset.
+//--------------------------------------------------------------------------------
 std::string ComposeReportGuidBlock(const std::string& guid, bool typeIsSet, int typeValue, const ReportFormRow& row)
 {
     std::ostringstream out;
@@ -304,15 +318,22 @@ std::string ComposeReportGuidBlock(const std::string& guid, bool typeIsSet, int 
     return out.str();
 }
 
-} // namespace
+} //. namespace
 
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// RenderReportSection
+//--------------------------------------------------------------------------------
+// Lazily loads the installed-effects tree (same pattern as
+// RenderInstalledEffects) so per-GUID display names have something to
+// check against even if opened before "Installed Effects".
+//
+// Reporter-identity fields are only auto-filled/re-synced by "report new"
+// (see RefreshReportNameFieldsFromGameState); this function just displays
+// and edits whatever's currently in the buffers, starting blank each
+// session until the first click.
+//--------------------------------------------------------------------------------
 void RenderReportSection(const std::string& denoiserAddonDir)
 {
-    // The tree isn't necessarily loaded yet if the user opens this header
-    // before ever expanding "Installed Effects" -- load it here too so
-    // per-GUID display names elsewhere in this addon have something to
-    // check against, same lazy-load-on-first-open pattern
-    // RenderInstalledEffects already uses.
     if (!IsInstalledTreeLoaded())
         LoadInstalledEffectsTree(denoiserAddonDir);
 
@@ -320,22 +341,11 @@ void RenderReportSection(const std::string& denoiserAddonDir)
     EReportStatus reportStatus = GetReportStatus();
     bool sending = (reportStatus == EReportStatus::Sending);
 
-    // --- Reporter identity -----------------------------------------
-    // Auto-filled (and re-synced) only by "report new" -- see
-    // RefreshReportNameFieldsFromGameState/AddReportRowFromLiveLogEntry
-    // above -- NOT here on render/section-open, and NOT re-read every
-    // frame either way. This section just displays/edits whatever's
-    // currently in the buffers; it never populates them itself. Until
-    // the first "report new" click of the session, both boxes simply
-    // start blank (showing their hint text) -- there's nothing to
-    // auto-fill from yet.
     ImGui::PushItemWidth(kFieldWidth);
     if (s_reportAnonymous)
     {
-        // Anonymous wins outright while checked: show fixed text, not an
-        // editable box the user could half-clear and retype into,
-        // which would defeat "anonymous". Whatever's in the buffers is
-        // preserved underneath and reappears if the box is unchecked.
+        //_ Show fixed text rather than an editable box the user could
+        // half-clear and retype into, which would defeat "anonymous".
         ImGui::TextDisabled("Account Name (RTAPI only):");
         ImGui::TextDisabled("(anonymous)");
         ImGui::TextDisabled("Character Name:");
@@ -355,7 +365,6 @@ void RenderReportSection(const std::string& denoiserAddonDir)
     ImGui::Checkbox("Send anonymously", &s_reportAnonymous);
     ImGui::Separator();
 
-    // --- Per-GUID blocks --------------------------------------------
     ImGui::TextWrapped(
         "Attach zero or more GUIDs -- click \"report new\" next to an entry in the "
         "Live Log, or add one by hand below.");
@@ -374,15 +383,12 @@ void RenderReportSection(const std::string& denoiserAddonDir)
         ImGui::InputText("Type", row.typeText, sizeof(row.typeText));
         ImGui::PopItemWidth();
 
-        // --- Self context -- always shown now, never hidden, and every
-        // field below is independently editable. Each is pre-filled from a live-log
-        // snapshot when "report new" populated this row and that GUID
-        // had one; otherwise it just starts at its own "not set"
-        // default, same as a manually-added row -- either way, nothing
-        // here is read-only. All four sit on this same line by design,
-        // so a report with self context reads as one unit at a glance.
+        //_ Self context is always shown now (never hidden) and every
+        // field is independently editable; all four sit on one line
+        // by design, so a report with self context reads as one unit.
         ImGui::PushItemWidth(40.0f);
-        ImGui::InputInt("MapID", &row.mapID, 0, 0); // no +/- step buttons -- a raw id, not a counter
+        //_ No +/- step buttons -- a raw id, not a counter.
+        ImGui::InputInt("MapID", &row.mapID, 0, 0);
         ImGui::PopItemWidth();
         ImGui::SameLine();
 
@@ -421,13 +427,8 @@ void RenderReportSection(const std::string& denoiserAddonDir)
         ImGui::PopItemWidth();
         ImGui::SameLine();
 
-        // Specialization: a free-text box with live autocomplete rather
-        // than a dropdown -- easier to search 80+ names by typing than
-        // by scrolling. Suggestions render as
-        // plain Selectable() rows right below this same input (not a
-        // popup) specifically so the input keeps keyboard focus while
-        // the user keeps typing; a real popup would steal focus away
-        // from it every frame.
+        //_ Free-text box with live autocomplete rather than a dropdown --
+        // easier to search 80+ names by typing than by scrolling.
         ImGui::PushItemWidth(90.0f);
         bool specTextChanged = ImGui::InputTextWithHint("##combo_specialization", "Specialization", row.specializationText, sizeof(row.specializationText));
         bool specJustActivated = ImGui::IsItemActivated();
@@ -437,22 +438,9 @@ void RenderReportSection(const std::string& denoiserAddonDir)
         ImGui::PopItemWidth();
         ImGui::SameLine();
 
-        // Suggestions render in a plain floating window, NOT an
-        // ImGui::OpenPopup/BeginPopup window -- deliberately.
-        // ImGui::NewFrame() unconditionally calls
-        // ClosePopupsOverWindow(g.NavWindow, false), which force-closes
-        // any open popup whose window isn't (or doesn't contain) the
-        // current NavWindow. Below we pass NoFocusOnAppearing so this
-        // window never steals keyboard focus from the input box (so
-        // typing keeps working) -- but that also means it never becomes
-        // NavWindow, so if this were a real Popup, ClosePopupsOverWindow
-        // would tear it down on the very next frame: a one-frame
-        // flicker at 60+fps, indistinguishable from "no popup at all".
-        // A plain Begin()/End() window is never pushed onto
-        // g.OpenPopupStack, so ClosePopupsOverWindow never touches it;
-        // we track its visibility with our own bool instead (set on
-        // activate/text-changed, cleared when the text is empty, a
-        // suggestion gets picked, or the input loses focus).
+        //_ Plain Begin()/End() window, not a real Popup -- NoFocusOnAppearing
+        // keeps input focus, but a real Popup would get torn down every
+        // frame by ClosePopupsOverWindow; visibility is tracked by hand.
         if ((specJustActivated || specTextChanged) && row.specializationText[0] != '\0')
             row.showSpecSuggest = true;
         if (row.specializationText[0] == '\0' || specDeactivated)
@@ -506,9 +494,9 @@ void RenderReportSection(const std::string& denoiserAddonDir)
     ImGui::TextDisabled("Additional information (required):");
     ImGui::InputTextMultiline("##report_note", s_reportNoteBuf, sizeof(s_reportNoteBuf), ImVec2(kFieldWidth, 80));
 
-    // imgui 1.80 doesn't have BeginDisabled/EndDisabled -- swap the label
+    //_ imgui 1.80 doesn't have BeginDisabled/EndDisabled -- swap the label
     // and ignore clicks while busy instead, same workaround used elsewhere
-    // in this file (e.g. "Check now"/"Apply this update").
+    // in this addon (e.g. "Check now"/"Apply this update").
     if (ImGui::Button(sending ? "Sending..." : "Send") && !sending)
     {
         std::string error;
@@ -545,9 +533,9 @@ void RenderReportSection(const std::string& denoiserAddonDir)
             }
             else
             {
-                // Use whatever's actually in the boxes now -- may be the
-                // auto-filled value untouched, edited, or (if
-                // auto-fill had nothing to offer) typed from scratch.
+                //_ Use whatever's actually in the boxes now -- may be the
+                // auto-filled value untouched, edited, or (if auto-fill
+                // had nothing to offer) typed from scratch.
                 std::string acct = TrimReportText(s_reportAccountNameBuf);
                 std::string chr  = TrimReportText(s_reportCharacterNameBuf);
                 if (acct.empty()) acct = "(unknown)";

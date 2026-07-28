@@ -1,65 +1,80 @@
+//################################################################################
 // entry.cpp
-//
-// Nexus wiring: GetAddonDef (the sole DLL export Nexus looks for), the
-// AddonLoad/AddonUnload functions actually assigned into AddonDefinition_t
-// -- including everything that happens on load/unload itself (locating
-// VfxDenoiser, wiring up the game-state/live-log/update-check subsystems,
-// registering the options-panel callback, and tearing all of that down
-// again) -- and the DllMain every Windows DLL needs. addon.cpp only owns
-// what happens *after* load: the options-panel UI (OptionsRenderCallback)
-// and the addon state (Addon_Init) that UI reads. Kept separate on
-// purpose: this file is "what Nexus expects from an addon, and what
-// happens at those two moments", addon.cpp is "what the addon looks like
-// the rest of the time".
-#include "Nexus.h"
-#include "addon/addon.h"
-#include "addon/version.h"
+//--------------------------------------------------------------------------------
+// AddonLoad(aApi)   Nexus load callback: locates VfxDenoiser, wires subsystems
+// AddonUnload()     Nexus unload callback: tears the above back down
+// GetAddonDef()     sole DLL export Nexus looks for
+// DllMain           standard Windows DLL entry point
+//--------------------------------------------------------------------------------
+// Nexus wiring: the AddonLoad/AddonUnload functions assigned into
+// AddonDefinition_t (including everything that happens on load/unload
+// itself - locating VfxDenoiser, wiring up the game-state/live-log/
+// update-check subsystems, registering the options-panel callback, and
+// tearing all of that down again), plus GetAddonDef and DllMain. addon.cpp
+// only owns what happens after load: the options-panel UI
+// (OptionsRenderCallback) and the addon state (Addon_Init) that UI reads.
+// Kept separate on purpose: this file is "what Nexus expects from an
+// addon, and what happens at those two moments", addon.cpp is "what the
+// addon looks like the rest of the time".
+//--------------------------------------------------------------------------------
+
+#include "addon.h"
+#include "game_state.h"
+#include "github_update.h"
 #include "imgui.h"
-#include "integration/github_update.h"
-#include "integration/webhook_report.h"
-#include "core/live_log.h"
-#include "core/game_state.h"
+#include "live_log.h"
+#include "Nexus.h"
+#include "version.h"
+#include "webhook_report.h"
+
 #include <chrono>
-#include <thread>
 #include <filesystem>
 #include <system_error>
+#include <thread>
 
 namespace fs = std::filesystem;
 
 static AddonDefinition_t s_addonDef{};
 static AddonAPI_t*       s_api = nullptr;
 
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// AddonLoad / AddonUnload
+//--------------------------------------------------------------------------------
+// Nexus load/unload callbacks assigned into AddonDefinition_t (see
+// GetAddonDef). The load-time update check is version numbers only, no
+// downloading (see StartUpdateCheck's alsoLoadDiff parameter) - it just
+// leaves a note in the options panel; the "Check now" button is what
+// actually downloads and diffs anything. On unload, background WinHTTP
+// calls are cancelled and given a brief best-effort window to exit before
+// the DLL may get unloaded out from under them; this is a minimal safety
+// net, not a guarantee.
+//--------------------------------------------------------------------------------
 void AddonLoad(AddonAPI_t* aApi)
 {
     s_api = aApi;
 
     ImGui::SetCurrentContext((ImGuiContext*)aApi->ImguiContext);
 
-    SetUpdaterLogger(aApi); // so github_update.cpp's background-thread failures can also reach Nexus's log
-    GameState_Init(aApi);   // caches DL_MUMBLE_LINK/_IDENTITY and DL_RTAPI pointers -- see game_state.h
-    LiveLog_Init(aApi);     // subscribes EV_VFXD_SINS_LOG -- see live_log.h/vfxd_sins_bridge.h
+    //_ Lets github_update.cpp's background-thread failures reach Nexus's
+    //_ log too.
+    SetUpdaterLogger(aApi);
+    GameState_Init(aApi);   //. caches DataLink pointers, see game_state.h
+    LiveLog_Init(aApi);     //. subscribes EV_VFXD_SINS_LOG
 
-    // "<GW2>/addons/VfxDenoiser" -- Paths_GetAddonDirectory only ever
-    // *constructs* this path string (see its doc comment in Nexus.h); it
-    // doesn't check whether the folder is actually there. Checking
-    // fs::is_directory ourselves is what makes `found` mean what it says.
+    //_ Paths_GetAddonDirectory only constructs the path string; checking
+    //_ fs::is_directory here is what makes `found` mean what it says.
     std::string denoiserAddonDir = aApi->Paths_GetAddonDirectory("VfxDenoiser");
     std::error_code ec;
     bool found = !denoiserAddonDir.empty() && fs::is_directory(denoiserAddonDir, ec) && !ec;
 
-    // Hands addon.cpp the api pointer and this load-time result -- both
-    // are referenced throughout the options-panel rendering, not just here.
+    //_ Hands addon.cpp the api pointer and this load-time result; both are
+    //_ referenced throughout the options-panel rendering, not just here.
     Addon_Init(aApi, denoiserAddonDir, found);
 
     aApi->GUI_Register(RT_OptionsRender, OptionsRenderCallback);
 
     if (found)
     {
-        // One check on load -- version numbers only, no downloading (see
-        // StartUpdateCheck's alsoLoadDiff parameter). If this finds an
-        // update it just shows as a note in the options panel; the
-        // "Check now" button is what actually downloads and diffs
-        // anything, so nothing gets fetched until the user asks for it.
         StartUpdateCheck(denoiserAddonDir);
     }
     else
@@ -73,40 +88,43 @@ void AddonUnload()
     if (s_api)
         s_api->GUI_Deregister(OptionsRenderCallback);
 
-    LiveLog_Shutdown(s_api); // unsubscribes, and raises LISTEN_STOP if capture was still on (no-op if s_api is null)
-    GameState_Shutdown();    // clears cached DataLink pointers -- safe even if GameState_Init was never reached
+    LiveLog_Shutdown(s_api); //. unsubscribes, stops capture if on
+    GameState_Shutdown();    //. clears cached DataLink pointers
 
-    // Unblock any WinHTTP call currently parked mid-request so the
-    // background thread can exit promptly.
     CancelInFlightUpdateRequest();
     CancelInFlightReportRequest();
 
-    // Best-effort: give any in-flight background thread a brief window to
-    // notice the cancellation and exit before the DLL potentially gets
-    // unloaded out from under it. This is a minimal safety net, not a
-    // guarantee -- a production version of this should track its threads
-    // explicitly (e.g. the reference project's WaitForBackgroundThreads)
-    // rather than relying on a fixed sleep.
     std::this_thread::sleep_for(std::chrono::milliseconds(250));
 }
 
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// GetAddonDef
+//--------------------------------------------------------------------------------
+// Assembles the AddonDefinition_t Nexus reads on load, including the
+// Load/Unload callbacks pointing at AddonLoad/AddonUnload above.
+//--------------------------------------------------------------------------------
 extern "C" __declspec(dllexport) AddonDefinition_t* GetAddonDef()
 {
-    s_addonDef.Signature   = 0x56465344; // 'VFSD'
+    s_addonDef.Signature   = 0x56465344; //. 'VFSD'
     s_addonDef.APIVersion  = NEXUS_API_VERSION;
-    s_addonDef.Name        = "Visual Sins Updater";
+    s_addonDef.Name        = "VfxD Visual Sins Updater";
     s_addonDef.Version     = { Maj, Min, Bld, Rev };
-    s_addonDef.Author      = "You";
-    s_addonDef.Description = "Checks installed Visual Sins effect files for updates and merges new effects without touching your settings.";
+    s_addonDef.Author      = "Xenophy.2716";
+    s_addonDef.Description = "Requires VfxDenoiser. An installer/updater/editor for the VfxD Visual Sins effect collection.";
     s_addonDef.Load        = AddonLoad;
     s_addonDef.Unload      = AddonUnload;
     s_addonDef.Flags       = AF_None;
-    s_addonDef.Provider    = UP_None; // this addon isn't itself distributed via auto-update in this minimal version
-    s_addonDef.UpdateLink  = nullptr;
+    s_addonDef.Provider    = UP_GitHub;
+    s_addonDef.UpdateLink  = "https://github.com/Xen0phy/VfxD-Visual-Sins-Updater";
 
     return &s_addonDef;
 }
 
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// DllMain
+//--------------------------------------------------------------------------------
+// Standard Windows DLL entry point.
+//--------------------------------------------------------------------------------
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID)
 {
     switch (reason)

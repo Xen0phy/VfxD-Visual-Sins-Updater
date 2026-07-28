@@ -1,35 +1,44 @@
+//################################################################################
 // installed_tree_store.cpp
-#include "core/tree/installed_tree_store.h"
-#include <fstream>
+//--------------------------------------------------------------------------------
+// See installed_tree_store.h for the module contract.
+//--------------------------------------------------------------------------------
+
+#include "installed_tree_store.h"
+
 #include <filesystem>
+#include <fstream>
 
 namespace fs = std::filesystem;
 
 namespace
 {
-    bool                                                            s_installedTreeLoaded = false;
-    std::vector<InstalledSinFile>                                   s_installedSins;
-    std::unordered_map<std::string, nlohmann::ordered_json>         s_installedJson; // sinName -> parsed file, only present if it parsed OK
+    bool                           s_installedTreeLoaded = false;
+    std::vector<InstalledSinFile>  s_installedSins;
 
-    // Bumped every time s_installedJson is (re)loaded from disk -- see
+    //_ sinName -> parsed file, only present if it parsed OK.
+    std::unordered_map<std::string, nlohmann::ordered_json> s_installedJson;
+
+    //_ Bumped every time s_installedJson is (re)loaded -- see
     // GetInstalledTreeGeneration's doc comment in the header for why.
     int s_installedTreeGeneration = 0;
 
-    // Set once, via InstalledTreeStore_SetApi (called from Addon_Init), to
-    // the same AddonAPI_t pointer entry.cpp got from Nexus. Only used for
-    // aApi->Log calls from SaveInstalledSinFile's write-failure path --
-    // never reassigned afterward, so reading it later is safe without a
-    // lock.
+    //_ Set once via InstalledTreeStore_SetApi (from Addon_Init), to the
+    // same AddonAPI_t entry.cpp got from Nexus -- only used for aApi->Log
+    // on SaveInstalledSinFile's write-failure path.
     AddonAPI_t* s_api = nullptr;
 
     std::unordered_map<std::string, std::vector<std::string>> s_duplicateGuidsBySin;
 
-    // nlohmann::json::dump() always emits bare '\n' line endings, but every
-    // VfxDenoiser file shipped/edited in the wild uses CRLF. Converting
-    // here (rather than leaving dump()'s output as-is) keeps a saved
-    // file's line endings consistent with what it had on disk before the
-    // edit, instead of silently flipping the whole file to LF the first
-    // time someone edits a single effect.
+    //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    // ToCrlf
+    //--------------------------------------------------------------------------------
+    // nlohmann::json::dump() always emits bare '\n', but every VfxDenoiser
+    // file shipped/edited in the wild uses CRLF. Converting here keeps a
+    // saved file's line endings consistent with what it had on disk before
+    // the edit, instead of silently flipping the whole file to LF the
+    // first time someone edits a single effect.
+    //--------------------------------------------------------------------------------
     std::string ToCrlf(const std::string& lfText)
     {
         std::string out;
@@ -43,8 +52,12 @@ namespace
         return out;
     }
 
+    //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    // CollectGuidNamesRecursive
+    //--------------------------------------------------------------------------------
     // Recursively walks every effect anywhere under `category`, keeping
     // each effect's name alongside its guids -- see CollectGuidNameMap.
+    //--------------------------------------------------------------------------------
     void CollectGuidNamesRecursive(const nlohmann::ordered_json& category,
                                     std::unordered_map<std::string, std::string>& out)
     {
@@ -68,10 +81,14 @@ namespace
                 CollectGuidNamesRecursive(sub, out);
     }
 
-    // Flattens one effect's "behaviors" array into a single display string.
-    // An effect can legitimately carry more than one behavior at once
-    // (e.g. Hide for Others + Show for Self), so entries are joined with
-    // "; " rather than assuming exactly one.
+    //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    // FormatBehaviors
+    //--------------------------------------------------------------------------------
+    // Flattens one effect's "behaviors" array into a single display
+    // string. An effect can legitimately carry more than one behavior at
+    // once (e.g. Hide for Others + Show for Self), so entries are joined
+    // with "; " rather than assuming exactly one.
+    //--------------------------------------------------------------------------------
     std::string FormatBehaviors(const nlohmann::ordered_json& behaviors)
     {
         std::string out;
@@ -93,11 +110,15 @@ namespace
         return out;
     }
 
+    //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    // CollectGuidBehaviorsRecursive
+    //--------------------------------------------------------------------------------
     // Same recursive walk as CollectGuidNamesRecursive, but keeping each
     // effect's own formatted "behaviors" summary instead of its name --
     // see CollectGuidBehaviorMap. An effect with no "behaviors" array
     // still gets an (empty-string) entry, so a known guid is
     // distinguishable from one that's merely unconfigured.
+    //--------------------------------------------------------------------------------
     void CollectGuidBehaviorsRecursive(const nlohmann::ordered_json& category,
                                         std::unordered_map<std::string, std::string>& out)
     {
@@ -122,7 +143,7 @@ namespace
             for (const auto& sub : category["categories"])
                 CollectGuidBehaviorsRecursive(sub, out);
     }
-} // namespace
+} //. namespace
 
 void InstalledTreeStore_SetApi(AddonAPI_t* aApi)
 {
@@ -148,17 +169,13 @@ void LoadInstalledEffectsTree(const std::string& denoiserAddonDir)
         }
         catch (const nlohmann::ordered_json::exception&)
         {
-            continue; // malformed file on disk -- leave it out of the map, not fatal
+            //_ Malformed file on disk -- leave it out of the map, not fatal.
+            continue;
         }
 
-        // Checked once here, against the real on-disk file, independent of
-        // whether an update is even available -- this is a property of
-        // this file in isolation (see merge.h's FindDuplicateGuids doc
-        // comment), not something StartLoadDiff/ResolveMergePlan need to
-        // discover on their own. github_update.cpp's StartLoadDiff runs
-        // this same check again on its own read of the file before
-        // touching the network, so a duplicate found here and one found
-        // there are consistent -- neither trusts the other's cache.
+        //_ Checked once here, against the real on-disk file -- StartLoadDiff
+        // in github_update.cpp runs this same check again on its own
+        // read, so neither trusts the other's cache.
         s_duplicateGuidsBySin[sin.sinName] = FindDuplicateGuids(parsed);
 
         s_installedJson[sin.sinName] = std::move(parsed);
@@ -234,13 +251,9 @@ std::unordered_map<std::string, std::string> CollectGuidBehaviorMap()
     return out;
 }
 
-// Writes s_installedJson[sinName] back to the file it was loaded from,
-// using the same backup-then-tmp-then-rename safety pattern as
-// github_update.cpp's StartApplyUpdate: never touch the real file
-// directly, so a crash or failed write can't corrupt or lose the user's
-// data. Unlike an applied GitHub update, an edit never changes the
-// filename (no version bump), so this always writes back to the exact
-// path it read from.
+//_ Same backup-then-tmp-then-rename pattern as github_update.cpp's
+// StartApplyUpdate. Unlike an applied update, an edit never changes the
+// filename (no version bump), so this writes back to the exact path read.
 bool SaveInstalledSinFile(const std::string& sinName, std::string& outError)
 {
     auto jsonIt = s_installedJson.find(sinName);
@@ -285,9 +298,7 @@ bool SaveInstalledSinFile(const std::string& sinName, std::string& outError)
             return false;
         }
 
-        // dump() always emits bare '\n'; VfxDenoiser's own files are CRLF,
-        // so convert here rather than silently flipping every line ending
-        // to LF the moment a file gets edited and saved.
+        //_ See ToCrlf's own comment for why this conversion happens.
         out << ToCrlf(jsonIt->second.dump(1, '\t'));
         if (!out)
         {
