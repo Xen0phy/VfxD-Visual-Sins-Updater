@@ -13,11 +13,12 @@
 // a JSON body instead of GET, against the report-relay Worker's host
 // instead of GitHub's -- deliberately not sharing code with
 // github_update.cpp, see webhook_report.h for why. All validation (empty
-// note, blank/duplicate guids) runs synchronously on the calling thread
-// before anything is queued; a rejected report never touches the network.
-// This file never renders a guid block's text itself -- entries[].block
-// arrives already-composed, so its only job with it is passing it through
-// into the JSON payload untouched.
+// note, blank/duplicate guids, rendered-length) runs synchronously on the
+// calling thread before anything is queued; a rejected report never
+// touches the network. This file never renders a guid block's text
+// itself -- entries[].block arrives already-composed, so its only job
+// with it is passing it through into the JSON payload untouched, and (for
+// the length check) measuring it rather than reading it.
 //
 // Shared state: an atomic in-flight flag and status enum polled from the
 // render thread, a mutex-guarded last-result message, and the active
@@ -34,6 +35,7 @@
 #include <windows.h>
 #include <winhttp.h>
 
+#include <algorithm>
 #include <mutex>
 #include <atomic>
 #include <thread>
@@ -80,6 +82,41 @@ std::string Trim(const std::string& s)
     while (start < end && std::isspace((unsigned char)s[start])) ++start;
     while (end > start && std::isspace((unsigned char)s[end - 1])) --end;
     return s.substr(start, end - start);
+}
+
+//_ Discord's real webhook message-content limit -- see
+// EstimateDiscordContentLength, the actual check this backs.
+constexpr size_t kDiscordContentLimit = 2000;
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// EstimateDiscordContentLength
+//--------------------------------------------------------------------------------
+// Mirrors vfxd-sins-report-relay/src/index.js's exact assembly:
+// `${reporterLine}\n\n${bodyParts.join("\n")}`, where bodyParts is every
+// surviving entry's block plus the note under an "Additional" heading,
+// blockquoted one "> " per line.
+//
+// Always assumes zero omitted guids -- the real worst case, since an
+// omitted guid drops its full block for just its bare 24-char text in
+// the omission list, only ever shrinking the message. Note is measured
+// after trimming (what's actually sent); blocks are measured as-is.
+//--------------------------------------------------------------------------------
+size_t EstimateDiscordContentLength(const std::string& reporterLine,
+                                    const std::vector<ReportGuidBlock>& entries,
+                                    const std::string& trimmedNote)
+{
+    size_t total = reporterLine.size() + 2; //. reporterLine + blank line ("\n\n")
+
+    for (const auto& entry : entries)
+        total += entry.block.size() + 1; //. block + its join("\n") separator
+
+    //_ "Additional\n" header (11 chars) + the note, blockquoted -- join
+    // preserves the note's own newline count, so only the "> " prefixes
+    // (2 chars per line) add length on top of trimmedNote.size() itself
+    size_t noteLines = 1 + std::count(trimmedNote.begin(), trimmedNote.end(), '\n');
+    total += 11 + trimmedNote.size() + 2 * noteLines;
+
+    return total;
 }
 
 //_ Not a secret itself -- obfuscates whatever URL
@@ -239,10 +276,9 @@ bool StartSendReport(const std::string& reporterLine,
         return false;
     }
 
-    //_ Real enforcement of kMaxReportGuids (see its own comment) -- the
-    // form in report_ui.cpp already stops a user adding a 6th row, this
-    // is what actually guarantees the relay never gets asked to compose
-    // a too-long Discord message.
+    //_ Real enforcement of kMaxReportGuids -- a row-count bound only, not
+    // a length guarantee. See the EstimateDiscordContentLength check
+    // further down below for that.
     if (entries.size() > kMaxReportGuids)
     {
         outError = "Reports are capped at " + std::to_string(kMaxReportGuids) +
@@ -269,6 +305,16 @@ bool StartSendReport(const std::string& reporterLine,
             s_reportInFlight.store(false); //. release the claim
             return false;
         }
+    }
+
+    //_ Real enforcement of Discord's 2000-char content limit, computed
+    // from the actual reporterLine/blocks/note -- see
+    // EstimateDiscordContentLength's own comment for the worst-case logic.
+    if (EstimateDiscordContentLength(reporterLine, entries, trimmedNote) > kDiscordContentLimit)
+    {
+        outError = "Report is too long -- shorten the note or remove a GUID.";
+        s_reportInFlight.store(false); //. release the claim
+        return false;
     }
 
     //_ Built here, on the calling thread -- cheap, keeps the background
@@ -350,9 +396,9 @@ bool StartSendReport(const std::string& reporterLine,
         }
         else if (ok)
         {
-            //_ Relay error codes: invalid_guid/note_required/duplicate_in_
-            // submission (400, shouldn't happen -- already validated
-            // client-side), rate_limited (429), discord_failed (502)
+            //_ 400s (invalid_guid/note_required/too_many_entries/
+            // note_too_long/content_too_long) shouldn't happen -- already
+            // validated client-side. rate_limited (429), discord_failed (502).
             std::string errCode = (parsedOk && parsed.contains("error") && parsed["error"].is_string())
                                        ? parsed["error"].get<std::string>()
                                        : "";

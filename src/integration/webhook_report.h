@@ -67,14 +67,9 @@ enum class EReportOutcome
     NoneSent,      //. every submitted guid was already known -- nothing forwarded
 };
 
-//_ Discord's webhook message-content limit is 2000 characters. The relay
-// (not this file -- see below) is what actually concatenates reporterLine
-// + every entry's block + note into the message it posts, so this is a
-// client-side guardrail rather than a byte-exact guarantee: five rendered
-// GUID blocks comfortably stays under 2000 without this file needing to
-// count characters itself. Enforced twice -- as the real safety net in
-// StartSendReport below, and again in report_ui.cpp so the form doesn't
-// let a user get this far in the first place.
+//_ A soft cap on row count, not the real length guarantee -- see
+// EstimateDiscordContentLength in webhook_report.cpp for the actual
+// character-counting check StartSendReport runs before every send.
 constexpr size_t kMaxReportGuids = 5;
 
 //********************************************************************************

@@ -96,6 +96,13 @@ static char                       s_reportNoteBuf[1024] = {};
 //_ Validation error shown until the next attempt, cleared on success.
 static std::string                s_reportFormError;
 
+//_ Set true right after a successful StartSendReport call, false once
+// this file has reacted to that send's Done/Error result exactly once --
+// see the comment where it's consumed in RenderReportSection for why a
+// one-shot flag is needed (GetReportStatus() keeps returning Done for
+// many frames after the fact).
+static bool                       s_reportAwaitingResult = false;
+
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // RefreshReportNameFieldsFromGameState
 //--------------------------------------------------------------------------------
@@ -358,6 +365,21 @@ void RenderReportSection(const std::string& denoiserAddonDir)
     EReportStatus reportStatus = GetReportStatus();
     bool sending = (reportStatus == EReportStatus::Sending);
 
+    //_ React to a just-finished send exactly once (not every frame Done
+    // stays true): only a genuinely full send clears the form. A
+    // partial/none-sent result -- or an outright error -- leaves the rows
+    // and note in place, since the person may want to see which guid was
+    // the duplicate or resend after fixing something.
+    if (s_reportAwaitingResult && reportStatus != EReportStatus::Sending)
+    {
+        if (reportStatus == EReportStatus::Done && GetLastReportOutcome() == EReportOutcome::AllSent)
+        {
+            s_reportRows.clear();
+            s_reportNoteBuf[0] = '\0';
+        }
+        s_reportAwaitingResult = false;
+    }
+
     ImGui::PushItemWidth(kFieldWidth);
     if (s_reportAnonymous)
     {
@@ -569,8 +591,7 @@ void RenderReportSection(const std::string& denoiserAddonDir)
             if (StartSendReport(reporterLine, payloadEntries, s_reportNoteBuf, error))
             {
                 s_reportFormError.clear();
-                s_reportRows.clear();
-                s_reportNoteBuf[0] = '\0';
+                s_reportAwaitingResult = true;
             }
             else
             {
