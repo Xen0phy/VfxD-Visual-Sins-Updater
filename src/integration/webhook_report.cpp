@@ -3,6 +3,7 @@
 //--------------------------------------------------------------------------------
 // StartSendReport()              validates and starts sending a report
 // GetReportStatus()               current EReportStatus
+// GetLastReportOutcome()          EReportOutcome for the last Done/Error result
 // GetLastReportMessage()          most recent human-readable outcome
 // CancelInFlightReportRequest()   closes in-flight WinHTTP handles
 //--------------------------------------------------------------------------------
@@ -41,8 +42,9 @@
 
 using json = nlohmann::json;
 
-static std::atomic<EReportStatus> s_reportStatus{EReportStatus::Idle};
-static std::atomic<bool>          s_reportInFlight{false};
+static std::atomic<EReportStatus>  s_reportStatus{EReportStatus::Idle};
+static std::atomic<EReportOutcome> s_reportOutcome{EReportOutcome::None};
+static std::atomic<bool>           s_reportInFlight{false};
 static std::mutex                 s_messageMutex;
 static std::string                s_lastReportMessage; //. guarded by s_messageMutex
 
@@ -112,9 +114,9 @@ std::string DecodeWebhookUrl()
 // call) but POST with a body instead of GET, and this file's own
 // handle-tracking statics rather than shared ones. Unlike posting
 // straight to Discord (204 empty on success), the relay always returns a
-// small JSON body -- {"droppedGuids": [...]} on success, {"error": ...}
-// plus an error code on failure -- which StartSendReport's background
-// thread parses.
+// small JSON body -- {"status": "sent"|"partial"|"duplicate", "sent":
+// [...], "omitted": [...]} on success, {"error": ...} plus an error code
+// on failure -- which StartSendReport's background thread parses.
 //--------------------------------------------------------------------------------
 bool HttpsPostJson(const std::wstring& url, const std::string& jsonBody, int& outStatusCode, std::string& outResponseBody)
 {
@@ -312,25 +314,37 @@ bool StartSendReport(const std::string& reporterLine,
         std::lock_guard<std::mutex> lock(s_messageMutex);
         if (ok && statusCode >= 200 && statusCode < 300)
         {
-            //_ Per-entry, not all-or-nothing: droppedGuids lists which
-            // submitted guids were already known (and so not forwarded)
-            size_t droppedCount = 0;
-            if (parsedOk && parsed.contains("droppedGuids") && parsed["droppedGuids"].is_array())
-                droppedCount = parsed["droppedGuids"].size();
+            //_ Per-entry, not all-or-nothing: "sent"/"omitted" list which
+            // submitted guids were actually forwarded vs. already known.
+            // "status" drives the wording/outcome directly rather than
+            // being re-derived from the counts, so it stays in sync with
+            // whatever the relay decided (see index.js's response doc).
+            std::string status = (parsedOk && parsed.contains("status") && parsed["status"].is_string())
+                                      ? parsed["status"].get<std::string>()
+                                      : "";
+            size_t sentCount = (parsedOk && parsed.contains("sent") && parsed["sent"].is_array())
+                                    ? parsed["sent"].size() : 0;
+            size_t omittedCount = (parsedOk && parsed.contains("omitted") && parsed["omitted"].is_array())
+                                    ? parsed["omitted"].size() : 0;
 
-            if (submittedCount == 0 || droppedCount == 0)
-            {
-                s_lastReportMessage = "Report sent -- thank you!";
-            }
-            else if (droppedCount >= submittedCount)
+            if (status == "duplicate")
             {
                 s_lastReportMessage = "All submitted GUIDs were already known -- nothing new to send, thanks anyway!";
+                s_reportOutcome.store(EReportOutcome::NoneSent);
+            }
+            else if (status == "partial")
+            {
+                s_lastReportMessage = std::to_string(omittedCount) + " of " + std::to_string(submittedCount) +
+                                       " GUID(s) already known -- " + std::to_string(sentCount) + " sent, thanks!";
+                s_reportOutcome.store(EReportOutcome::PartiallySent);
             }
             else
             {
-                size_t sentCount = submittedCount - droppedCount;
-                s_lastReportMessage = std::to_string(droppedCount) + " of " + std::to_string(submittedCount) +
-                                       " GUID(s) already known -- " + std::to_string(sentCount) + " sent, thanks!";
+                //_ "sent", or an unrecognized/missing status -- treat as
+                // the ordinary success case rather than silently doing
+                // nothing, same fallback spirit as the errCode handling below
+                s_lastReportMessage = "Report sent -- thank you!";
+                s_reportOutcome.store(EReportOutcome::AllSent);
             }
             s_reportStatus.store(EReportStatus::Done);
         }
@@ -350,11 +364,13 @@ bool StartSendReport(const std::string& reporterLine,
                 s_lastReportMessage = "Report rejected: " + errCode;
             else
                 s_lastReportMessage = "Report rejected (HTTP " + std::to_string(statusCode) + ").";
+            s_reportOutcome.store(EReportOutcome::None);
             s_reportStatus.store(EReportStatus::Error);
         }
         else
         {
             s_lastReportMessage = "Couldn't reach the report relay -- check your connection and try again.";
+            s_reportOutcome.store(EReportOutcome::None);
             s_reportStatus.store(EReportStatus::Error);
         }
         s_reportInFlight.store(false);
@@ -366,6 +382,11 @@ bool StartSendReport(const std::string& reporterLine,
 EReportStatus GetReportStatus()
 {
     return s_reportStatus.load();
+}
+
+EReportOutcome GetLastReportOutcome()
+{
+    return s_reportOutcome.load();
 }
 
 std::string GetLastReportMessage()

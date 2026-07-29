@@ -974,10 +974,11 @@ void RenderInstalledEffects(const std::string& denoiserAddonDir)
     if (IsDeleteEmptyConfirmActive())
         RenderDeleteEmptyConfirm();
 
-    ImGui::TextDisabled("Drag an effect onto a category to move it there (or to the end of its own category), "
-                         "or onto another effect to place it just above that one. Categories can be dragged the "
-                         "same way to reorder them among their own siblings. Drag a GUID onto another effect "
-                         "to move it there instead.");
+    ImGui::TextDisabled("Drag an effect onto a category to move it to the end of that category,\n"
+                         "or onto another effect to place it just above that one.\n"
+                         "Categories can be dragged only to reorder them in the same parent category.\n"
+                         "GUIDs can be dragged onto other effects.\n"
+                         "Right-click unfolded effects or categories to edit them.");
 
     //_ Recomputes the lowercased query RenderCategoryTree's matching
     // helpers compare against; the actual filtering happens down there.

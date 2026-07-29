@@ -2,9 +2,11 @@
 // webhook_report.h
 //--------------------------------------------------------------------------------
 // EReportStatus                  polling status for an in-flight/just-sent report
+// EReportOutcome                 which of sent/partially-sent/none-sent a Done report was
 // ReportGuidBlock                one pre-rendered per-guid block
 // StartSendReport()              validates and starts sending a report
 // GetReportStatus()               current EReportStatus
+// GetLastReportOutcome()          outcome kind for GetLastReportMessage()'s text
 // GetLastReportMessage()          most recent human-readable outcome
 // CancelInFlightReportRequest()   closes in-flight WinHTTP handles
 //--------------------------------------------------------------------------------
@@ -47,6 +49,24 @@ enum class EReportStatus
     Error,
 };
 
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// EReportOutcome
+//--------------------------------------------------------------------------------
+// Only meaningful once GetReportStatus() == Done -- distinguishes the
+// relay's three possible per-entry outcomes for a successful submission
+// (None outside that: not yet sent, or the last attempt errored) so
+// report_ui.cpp can color/word the outcome without re-deriving it from
+// raw guid counts itself. Mirrors the relay's "status" response field --
+// see vfxd-sins-report-relay/src/index.js's top-of-file response doc.
+//--------------------------------------------------------------------------------
+enum class EReportOutcome
+{
+    None,          //. no report done yet this session, or the last one errored
+    AllSent,       //. every submitted guid was new (or there were no guids at all)
+    PartiallySent, //. some guids were already known, the rest still went through
+    NoneSent,      //. every submitted guid was already known -- nothing forwarded
+};
+
 //_ Discord's webhook message-content limit is 2000 characters. The relay
 // (not this file -- see below) is what actually concatenates reporterLine
 // + every entry's block + note into the message it posts, so this is a
@@ -62,8 +82,9 @@ constexpr size_t kMaxReportGuids = 5;
 //--------------------------------------------------------------------------------
 // guid    raw guid text, exactly as entered/auto-filled -- used for the
 //         within-submission duplicate check
-// block   fully pre-rendered display text for this guid (the "GUID: ... /
-//         Type: ... / Self context: ..." lines)
+// block   fully pre-rendered display text for this guid: a "GUID:
+//         `<guid>`" line followed by a fenced code block with its Type
+//         and self-context lines
 //--------------------------------------------------------------------------------
 // One guid block, fully rendered client-side before it's ever handed to
 // this file -- webhook_report.cpp never knows what a Type or a
@@ -105,11 +126,21 @@ bool StartSendReport(const std::string& reporterLine,
 EReportStatus GetReportStatus();
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// GetLastReportOutcome
+//--------------------------------------------------------------------------------
+// EReportOutcome for the same result GetLastReportMessage() describes in
+// prose -- None until a report has actually completed Done, and again
+// after any Error.
+//--------------------------------------------------------------------------------
+EReportOutcome GetLastReportOutcome();
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // GetLastReportMessage
 //--------------------------------------------------------------------------------
 // Most recent one-line human-readable outcome, e.g. "Report sent -- thank
-// you!", "2 of 3 already known -- 1 sent, thanks!", or an error. Empty if
-// nothing's been sent yet this session.
+// you!", "2 of 3 GUID(s) already known -- 1 sent, thanks!", "All submitted
+// GUIDs were already known -- nothing new to send, thanks anyway!", or an
+// error. Empty if nothing's been sent yet this session.
 //--------------------------------------------------------------------------------
 std::string GetLastReportMessage();
 

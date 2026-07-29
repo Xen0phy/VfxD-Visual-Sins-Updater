@@ -40,10 +40,7 @@ void RenderBackupsSection(const std::string& denoiserAddonDir)
     }
 
     ImGui::TextWrapped(
-        "Every applied update, saved edit, or category rename leaves a "
-        "\".bak\" of what was there just before. Rolling one back swaps it "
-        "back in -- pressing \"Roll back\" again on the same entry undoes "
-        "that swap, since only one backup generation is ever kept.");
+        "Every change is backed up once as \".bak\", so you can undo/redo just one step.");
 
     ImGui::Separator();
 

@@ -287,6 +287,12 @@ unsigned int ResolveSpecializationId(const std::string& text)
 // human-readable names the live log's tree already uses; report.cpp
 // never sees anything but this finished string.
 //
+// Rendered as a "GUID: `<guid>`" line (backtick-wrapped so it reads as
+// an inline code span in Discord) followed by a fenced code block
+// holding the Type/Self context lines -- see
+// vfxd-sins-report-relay/src/index.js for how this sits alongside the
+// other entries, the omission block, and the note in the final message.
+//
 // Self context now has four independently-editable fields rather than
 // one all-or-nothing snapshot: only when every field is still at its
 // default does this print "Not observed", otherwise it prints all four,
@@ -295,8 +301,9 @@ unsigned int ResolveSpecializationId(const std::string& text)
 std::string ComposeReportGuidBlock(const std::string& guid, bool typeIsSet, int typeValue, const ReportFormRow& row)
 {
     std::ostringstream out;
-    out << "GUID: " << guid << "\n";
-    out << "  Type: " << (typeIsSet ? std::to_string(typeValue) : std::string("Not set")) << "\n";
+    out << "GUID: `" << guid << "`\n";
+    out << "```\n";
+    out << "Type: " << (typeIsSet ? std::to_string(typeValue) : std::string("Not set")) << "\n";
 
     unsigned int specId  = ResolveSpecializationId(row.specializationText);
     bool         raceSet = (row.raceIndex != kRaceUnset);
@@ -306,7 +313,7 @@ std::string ComposeReportGuidBlock(const std::string& guid, bool typeIsSet, int 
 
     if (!mapSet && !raceSet && !profSet && !specSet)
     {
-        out << "  Self context: Not observed\n";
+        out << "Self context: Not observed\n";
     }
     else
     {
@@ -319,11 +326,12 @@ std::string ComposeReportGuidBlock(const std::string& guid, bool typeIsSet, int 
                 specName = std::to_string(specId);
         }
 
-        out << "  Self context: MapID " << row.mapID << ", "
+        out << "Self context: MapID " << row.mapID << ", "
             << (raceSet ? GameState_RaceName(kRaceValues[row.raceIndex]) : "Unknown") << ", "
             << (profSet ? GameState_ProfessionName(row.profession) : "Unknown") << ", "
             << specName << "\n";
     }
+    out << "```";
     return out.str();
 }
 
@@ -375,7 +383,7 @@ void RenderReportSection(const std::string& denoiserAddonDir)
     ImGui::Separator();
 
     ImGui::TextWrapped(
-        "Attach zero or more GUIDs (up to %d) -- click \"report\" next to an "
+        "Attach up to %d GUIDs -- click \"report\" next to an "
         "entry in the Live Log, or add one by hand below.", (int)kMaxReportGuids);
 
     int removeIndex = -1;
@@ -542,18 +550,20 @@ void RenderReportSection(const std::string& denoiserAddonDir)
             std::string reporterLine;
             if (s_reportAnonymous)
             {
-                reporterLine = "Reporter: (anonymous)";
+                reporterLine = "Reporter: `(anonymous)`";
             }
             else
             {
                 //_ Use whatever's actually in the boxes now -- may be the
                 // auto-filled value untouched, edited, or (if auto-fill
-                // had nothing to offer) typed from scratch.
+                // had nothing to offer) typed from scratch. Backtick-wrapped
+                // so each name renders as its own inline code span in
+                // Discord, same treatment as every guid in ComposeReportGuidBlock.
                 std::string acct = TrimReportText(s_reportAccountNameBuf);
                 std::string chr  = TrimReportText(s_reportCharacterNameBuf);
                 if (acct.empty()) acct = "(unknown)";
                 if (chr.empty())  chr  = "(unknown)";
-                reporterLine = "Reporter: " + acct + " / " + chr;
+                reporterLine = "Reporter: `" + acct + "` / `" + chr + "`";
             }
 
             if (StartSendReport(reporterLine, payloadEntries, s_reportNoteBuf, error))
@@ -569,13 +579,36 @@ void RenderReportSection(const std::string& denoiserAddonDir)
         }
     }
 
+    ImGui::SameLine();
     if (!s_reportFormError.empty())
         ImGui::TextColored(kDuplicateColor, "%s", s_reportFormError.c_str());
 
     std::string lastMsg = GetLastReportMessage();
     if (!lastMsg.empty())
     {
-        const ImVec4* color = (reportStatus == EReportStatus::Error) ? &kDuplicateColor : nullptr;
+        //_ Color follows the outcome, not just success/failure: a full
+        // send reads as good news (green, same as a brand-new effect in
+        // the installed-tree overlay), a partial send as worth a second
+        // look (orange, same as a rework), and both an outright error and
+        // an all-already-known "none sent" result as red -- reusing
+        // ui_colors.h's existing new/rework/duplicate palette rather than
+        // introducing report-specific colors.
+        const ImVec4* color = nullptr;
+        if (reportStatus == EReportStatus::Error)
+        {
+            color = &kDuplicateColor;
+        }
+        else if (reportStatus == EReportStatus::Done)
+        {
+            switch (GetLastReportOutcome())
+            {
+                case EReportOutcome::AllSent:       color = &kNewColor;       break;
+                case EReportOutcome::PartiallySent: color = &kReworkColor;    break;
+                case EReportOutcome::NoneSent:      color = &kDuplicateColor; break;
+                default: break;
+            }
+        }
+
         if (color)
             ImGui::TextColored(*color, "%s", lastMsg.c_str());
         else

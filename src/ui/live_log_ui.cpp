@@ -85,7 +85,7 @@ void RenderLiveLogSection(AddonAPI_t* aApi, const std::string& denoiserAddonDir)
         LiveLog_Clear();
 
     if (!listening)
-        ImGui::TextDisabled("Not capturing -- toggle \"Capture live\" above while VfxDenoiser's patch (or the test stub) is running.");
+        ImGui::TextDisabled("Not capturing -- toggle \"Capture live\" above while VfxDenoiser is running.");
 
     const auto& entries = LiveLog_GetEntries();
     if (entries.empty())
