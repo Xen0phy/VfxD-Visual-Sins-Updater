@@ -50,6 +50,15 @@ std::unordered_map<std::string, std::string>  s_guidToBehavior; //. behavior map
 //--------------------------------------------------------------------------------
 void ParseInfoFields(const std::string& info, LiveLogEntry& e)
 {
+    //_ Overrides LiveLogEntry's own default (0, a real, filterable type) --
+    // -1 is never a genuine infostr value, so a "type:" that's missing or
+    // fails to parse below falls through IngestLogLine's
+    // "parsed.type >= 0 && parsed.type < kLiveLogTypeCount" bounds check
+    // exactly like an out-of-table type >=12 already does (shown,
+    // unfiltered), rather than silently aliasing to type 0 -- which starts
+    // disabled and would otherwise vanish the entry without a trace.
+    e.type = -1;
+
     size_t pos = info.find("type:");   //. skip the leading effectDef name
     if (pos == std::string::npos)
         return;   //. malformed line

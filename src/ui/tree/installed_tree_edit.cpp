@@ -100,6 +100,73 @@ std::string JoinCategoryPathNames(const nlohmann::ordered_json& root, const std:
     return JoinPath(names);
 }
 
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// FindEffectByPath
+//--------------------------------------------------------------------------------
+// Resolves an effect by (containing category's path, index within that
+// category's "effects" array, expected name) -- the identity/sanity check
+// every ApplyPending* below repeats: same reasoning as FindCategoryByPath,
+// one level deeper. Returns nullptr on any failure (category gone,
+// "effects" missing/not-an-array, index out of range, or the name at that
+// index no longer matches -- something else moved into the slot). On
+// failure, if errorOut is non-null, fills it with a ready-to-display
+// "<label> is no longer there." message; callers prepend their own
+// "Edit failed: "/"Move failed: "/etc. Not exported -- only used within
+// this file.
+//--------------------------------------------------------------------------------
+nlohmann::ordered_json* FindEffectByPath(nlohmann::ordered_json& root, const std::vector<int>& path,
+                                          int index, const std::string& expectedName,
+                                          const std::string& label, std::string* errorOut)
+{
+    nlohmann::ordered_json* category = FindCategoryByPath(root, path);
+    if (!category || !category->contains("effects") || !(*category)["effects"].is_array())
+    {
+        if (errorOut)
+            *errorOut = "\"" + label + "\" is no longer there.";
+        return nullptr;
+    }
+    auto& effects = (*category)["effects"];
+    if (index < 0 || static_cast<size_t>(index) >= effects.size())
+    {
+        if (errorOut)
+            *errorOut = "\"" + label + "\" is no longer there.";
+        return nullptr;
+    }
+    auto it = effects.begin() + index;
+    if (!it->contains("name") || (*it)["name"] != expectedName)
+    {
+        if (errorOut)
+            *errorOut = "\"" + label + "\" is no longer there.";
+        return nullptr;
+    }
+    return &(*it);
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// TrySaveOrReport
+//--------------------------------------------------------------------------------
+// Shared tail of every ApplyPending* below: write sinName to disk, and on
+// failure set the standard "applied in memory but failed to write"
+// message (folding in the write error) plus InvalidateInstalledTree().
+// `what` is the caller's own past-tense description of what was applied
+// ("Edit applied", "Reordered \"Foo\"", "GUID moved", ...), so the
+// message reads naturally. Returns true on success, in which case the
+// caller still sets its own success message and still calls
+// InvalidateInstalledTree() itself -- wording differs too much per-job
+// to share that half.
+//--------------------------------------------------------------------------------
+bool TrySaveOrReport(const std::string& sinName, const std::string& what)
+{
+    std::string writeError;
+    if (SaveInstalledSinFile(sinName, writeError))
+        return true;
+
+    s_editResultMessage = what + " in memory but failed to write to disk (" + writeError +
+                           "). Reloading from disk so nothing shown is out of sync with what's actually saved.";
+    InvalidateInstalledTree();
+    return false;
+}
+
 namespace {
 
 //********************************************************************************
@@ -300,14 +367,8 @@ void ApplyPendingCategoryRename()
 
     (*category)["name"] = job.newName;
 
-    std::string writeError;
-    if (!SaveInstalledSinFile(job.sinName, writeError))
-    {
-        SetEditResultMessage("Rename applied in memory but failed to write to disk (" + writeError +
-                              "). Reloading from disk so nothing shown is out of sync with what's actually saved.");
-        InvalidateInstalledTree();
+    if (!TrySaveOrReport(job.sinName, "Rename applied"))
         return;
-    }
 
     SetEditResultMessage("Renamed category to \"" + job.newName + "\".");
     InvalidateInstalledTree(); //. force reload on next expand
@@ -545,14 +606,8 @@ void ApplyPendingCategoryMove()
         siblings.insert(siblings.begin() + insertIndex, std::move(categoryCopy));
     }
 
-    std::string writeError;
-    if (!SaveInstalledSinFile(job.sinName, writeError))
-    {
-        SetEditResultMessage("Reordered \"" + name + "\" in memory but failed to write to disk (" + writeError +
-                              "). Reloading from disk so nothing shown is out of sync with what's actually saved.");
-        InvalidateInstalledTree(); //. force reload after failed write
+    if (!TrySaveOrReport(job.sinName, "Reordered \"" + name + "\""))
         return;
-    }
 
     SetEditResultMessage("Reordered \"" + name + "\".");
     InvalidateInstalledTree(); //. force reload on next expand
@@ -730,26 +785,16 @@ void ApplyPendingEdit()
     }
     nlohmann::ordered_json& root = *rootPtr;
 
-    nlohmann::ordered_json* srcCategory = FindCategoryByPath(root, job.originalPath);
-    if (!srcCategory || !srcCategory->contains("effects") || !(*srcCategory)["effects"].is_array())
+    //_ Indexed-by-path-and-index lookup, not a name search -- sibling
+    // effects can share a name. originalIndex can't have shifted since
+    // BeginEdit time: no other mutation of this array is allowed while
+    // an edit is in flight.
+    std::string findError;
+    nlohmann::ordered_json* effect = FindEffectByPath(root, job.originalPath, job.originalIndex,
+                                                        job.originalName, job.originalName, &findError);
+    if (!effect)
     {
-        s_editResultMessage = "Edit failed: the original category is no longer there.";
-        return;
-    }
-
-    auto& effectsArr = (*srcCategory)["effects"];
-    //_ Indexed lookup, not a name search -- sibling effects can share a
-    // name. originalIndex can't have shifted since BeginEdit time: no
-    // other mutation of this array is allowed while an edit is in flight.
-    if (job.originalIndex < 0 || static_cast<size_t>(job.originalIndex) >= effectsArr.size())
-    {
-        s_editResultMessage = "Edit failed: effect \"" + job.originalName + "\" is no longer there.";
-        return;
-    }
-    auto it = effectsArr.begin() + job.originalIndex;
-    if (!it->contains("name") || (*it)["name"] != job.originalName)
-    {
-        s_editResultMessage = "Edit failed: effect \"" + job.originalName + "\" is no longer there.";
+        s_editResultMessage = "Edit failed: " + findError;
         return;
     }
 
@@ -760,23 +805,17 @@ void ApplyPendingEdit()
     for (const auto& g : job.newGuids)
         guidsArr.push_back(g);
 
-    (*it)["name"] = job.newName;
+    (*effect)["name"] = job.newName;
     if (job.newDescription.empty())
-        it->erase("description");
+        effect->erase("description");
     else
-        (*it)["description"] = job.newDescription;
-    (*it)["guids"] = std::move(guidsArr);
+        (*effect)["description"] = job.newDescription;
+    (*effect)["guids"] = std::move(guidsArr);
 
-    std::string writeError;
-    if (!SaveInstalledSinFile(job.sinName, writeError))
-    {
-        s_editResultMessage = "Edit applied in memory but failed to write to disk (" + writeError +
-                               "). Reloading from disk so nothing shown is out of sync with what's actually saved.";
-        InvalidateInstalledTree(); //. force reload after failed write
+    if (!TrySaveOrReport(job.sinName, "Edit applied"))
         return;
-    }
 
-    s_editResultMessage  = "Saved changes to \"" + job.newName + "\".";
+    s_editResultMessage = "Saved changes to \"" + job.newName + "\".";
     InvalidateInstalledTree(); //. force reload on next expand
 }
 
@@ -954,37 +993,24 @@ void ApplyPendingDelete()
     }
     else
     {
+        //_ Indexed-by-path-and-index lookup, not a name search -- same
+        // reasoning as ApplyPendingEdit/ApplyPendingMove. Once found,
+        // re-resolve the category to get an erasable iterator --
+        // guaranteed to still succeed, FindEffectByPath just verified
+        // path/index/name are all still valid.
+        std::string findError;
+        if (!FindEffectByPath(root, job.path, job.index, job.name, job.name, &findError))
+        {
+            s_editResultMessage = "Delete failed: " + findError;
+            return;
+        }
         nlohmann::ordered_json* srcCategory = FindCategoryByPath(root, job.path);
-        if (!srcCategory || !srcCategory->contains("effects") || !(*srcCategory)["effects"].is_array())
-        {
-            s_editResultMessage = "Delete failed: \"" + job.name + "\" is no longer there.";
-            return;
-        }
         auto& effectsArr = (*srcCategory)["effects"];
-        //_ Indexed lookup, not a name search -- same reasoning as
-        // ApplyPendingEdit/ApplyPendingMove.
-        if (job.index < 0 || static_cast<size_t>(job.index) >= effectsArr.size())
-        {
-            s_editResultMessage = "Delete failed: \"" + job.name + "\" is no longer there.";
-            return;
-        }
-        auto it = effectsArr.begin() + job.index;
-        if (!it->contains("name") || (*it)["name"] != job.name)
-        {
-            s_editResultMessage = "Delete failed: \"" + job.name + "\" is no longer there.";
-            return;
-        }
-        effectsArr.erase(it);
+        effectsArr.erase(effectsArr.begin() + job.index);
     }
 
-    std::string writeError;
-    if (!SaveInstalledSinFile(job.sinName, writeError))
-    {
-        s_editResultMessage = "Delete applied in memory but failed to write to disk (" + writeError +
-                               "). Reloading from disk so nothing shown is out of sync with what's actually saved.";
-        InvalidateInstalledTree();
+    if (!TrySaveOrReport(job.sinName, "Delete applied"))
         return;
-    }
 
     s_editResultMessage   = "Deleted \"" + job.name + "\".";
     InvalidateInstalledTree(); //. force reload on next expand
@@ -1032,33 +1058,21 @@ void ApplyPendingMove()
     }
     nlohmann::ordered_json& root = *rootPtr;
 
+    //_ Indexed-by-path-and-index lookup -- same reasoning as
+    // ApplyPendingEdit: sibling effects can share a name. Once found,
+    // re-resolve the category to get an erasable iterator -- guaranteed
+    // to still succeed, FindEffectByPath just verified path/index/name.
+    std::string findError;
+    if (!FindEffectByPath(root, job.originalPath, job.originalIndex, job.effectName, job.effectName, &findError))
+    {
+        s_editResultMessage = "Move failed: " + findError;
+        return;
+    }
     nlohmann::ordered_json* srcCategory = FindCategoryByPath(root, job.originalPath);
-    if (!srcCategory || !srcCategory->contains("effects") || !(*srcCategory)["effects"].is_array())
-    {
-        s_editResultMessage = "Move failed: the original category is no longer there.";
-        return;
-    }
-
-    nlohmann::ordered_json effectCopy;
-    bool found = false;
     auto& effectsArr = (*srcCategory)["effects"];
-    //_ Indexed lookup -- same reasoning as ApplyPendingEdit: sibling
-    // effects can share a name.
-    if (job.originalIndex >= 0 && static_cast<size_t>(job.originalIndex) < effectsArr.size())
-    {
-        auto it = effectsArr.begin() + job.originalIndex;
-        if (it->contains("name") && (*it)["name"] == job.effectName)
-        {
-            effectCopy = *it;
-            effectsArr.erase(it);
-            found = true;
-        }
-    }
-    if (!found)
-    {
-        s_editResultMessage = "Move failed: effect \"" + job.effectName + "\" is no longer there.";
-        return;
-    }
+    auto  srcIt       = effectsArr.begin() + job.originalIndex;
+    nlohmann::ordered_json effectCopy = std::move(*srcIt);
+    effectsArr.erase(srcIt);
 
     //_ destinationPath is a real, already-existing category (captured
     // from the tree at drop time), never typed text -- resolved the same
@@ -1096,14 +1110,8 @@ void ApplyPendingMove()
         destEffectsArr.insert(destEffectsArr.begin() + insertIndex, std::move(effectCopy));
     }
 
-    std::string writeError;
-    if (!SaveInstalledSinFile(job.sinName, writeError))
-    {
-        s_editResultMessage = "Moved \"" + job.effectName + "\" in memory but failed to write to disk (" + writeError +
-                               "). Reloading from disk so nothing shown is out of sync with what's actually saved.";
-        InvalidateInstalledTree(); //. force reload after failed write
+    if (!TrySaveOrReport(job.sinName, "Moved \"" + job.effectName + "\""))
         return;
-    }
 
     std::string destLabel = job.destinationPath.empty() ? std::string("(top level)") : JoinCategoryPathNames(root, job.destinationPath);
     if (job.originalPath == job.destinationPath)
@@ -1162,31 +1170,24 @@ void ApplyPendingGuidMerge()
     }
     nlohmann::ordered_json& root = *rootPtr;
 
-    nlohmann::ordered_json* srcCategory = FindCategoryByPath(root, job.originalPath);
-    if (!srcCategory || !srcCategory->contains("effects") || !(*srcCategory)["effects"].is_array())
+    //_ Both effects resolved by path/index/name -- same reasoning as
+    // ApplyPendingEdit/ApplyPendingMove, just needed twice here since a
+    // merge touches two independent effects instead of one.
+    std::string findError;
+    nlohmann::ordered_json* srcEffect = FindEffectByPath(root, job.originalPath, job.originalIndex,
+                                                           job.effectName, job.effectName, &findError);
+    if (!srcEffect)
     {
-        s_editResultMessage = "GUID move failed: the source effect's category is no longer there.";
-        return;
-    }
-    auto& srcEffects = (*srcCategory)["effects"];
-    if (job.originalIndex < 0 || static_cast<size_t>(job.originalIndex) >= srcEffects.size())
-    {
-        s_editResultMessage = "GUID move failed: \"" + job.effectName + "\" is no longer there.";
-        return;
-    }
-    auto srcIt = srcEffects.begin() + job.originalIndex;
-    if (!srcIt->contains("name") || (*srcIt)["name"] != job.effectName)
-    {
-        s_editResultMessage = "GUID move failed: \"" + job.effectName + "\" is no longer there.";
+        s_editResultMessage = "GUID move failed: " + findError;
         return;
     }
 
-    if (!srcIt->contains("guids") || !(*srcIt)["guids"].is_array())
+    if (!srcEffect->contains("guids") || !(*srcEffect)["guids"].is_array())
     {
         s_editResultMessage = "GUID move failed: \"" + job.effectName + "\" no longer has that GUID.";
         return;
     }
-    auto& srcGuids = (*srcIt)["guids"];
+    auto& srcGuids = (*srcEffect)["guids"];
     auto  guidIt   = std::find_if(srcGuids.begin(), srcGuids.end(),
         [&](const nlohmann::ordered_json& g) { return g.is_string() && g.get<std::string>() == job.guid; });
     if (guidIt == srcGuids.end())
@@ -1197,29 +1198,18 @@ void ApplyPendingGuidMerge()
 
     //_ destinationPath/Index are a real, already-existing effect
     // (captured from the tree at drop time), never typed text -- resolved
-    // the same way srcCategory was.
-    nlohmann::ordered_json* destCategory = FindCategoryByPath(root, job.destinationPath);
-    if (!destCategory || !destCategory->contains("effects") || !(*destCategory)["effects"].is_array())
+    // the same way srcEffect was.
+    nlohmann::ordered_json* destEffect = FindEffectByPath(root, job.destinationPath, job.destinationIndex,
+                                                            job.destinationEffectName, job.destinationEffectName, &findError);
+    if (!destEffect)
     {
-        s_editResultMessage = "GUID move failed: \"" + job.destinationEffectName + "\" is no longer there.";
-        return;
-    }
-    auto& destEffects = (*destCategory)["effects"];
-    if (job.destinationIndex < 0 || static_cast<size_t>(job.destinationIndex) >= destEffects.size())
-    {
-        s_editResultMessage = "GUID move failed: \"" + job.destinationEffectName + "\" is no longer there.";
-        return;
-    }
-    auto destIt = destEffects.begin() + job.destinationIndex;
-    if (!destIt->contains("name") || (*destIt)["name"] != job.destinationEffectName)
-    {
-        s_editResultMessage = "GUID move failed: \"" + job.destinationEffectName + "\" is no longer there.";
+        s_editResultMessage = "GUID move failed: " + findError;
         return;
     }
 
-    if (!destIt->contains("guids") || !(*destIt)["guids"].is_array())
-        (*destIt)["guids"] = nlohmann::ordered_json::array();
-    auto& destGuids = (*destIt)["guids"];
+    if (!destEffect->contains("guids") || !(*destEffect)["guids"].is_array())
+        (*destEffect)["guids"] = nlohmann::ordered_json::array();
+    auto& destGuids = (*destEffect)["guids"];
 
     //_ Never creates a cross-effect duplicate -- if the target already
     // has this GUID, the source copy is still removed (that's the point
@@ -1231,14 +1221,8 @@ void ApplyPendingGuidMerge()
     if (!alreadyOnDest)
         destGuids.push_back(job.guid);
 
-    std::string writeError;
-    if (!SaveInstalledSinFile(job.sinName, writeError))
-    {
-        s_editResultMessage = "GUID moved in memory but failed to write to disk (" + writeError +
-                               "). Reloading from disk so nothing shown is out of sync with what's actually saved.";
-        InvalidateInstalledTree();
+    if (!TrySaveOrReport(job.sinName, "GUID moved"))
         return;
-    }
 
     s_editResultMessage = alreadyOnDest
         ? "Moved GUID to \"" + job.destinationEffectName + "\" (it already had this GUID -- removed the duplicate from \"" +

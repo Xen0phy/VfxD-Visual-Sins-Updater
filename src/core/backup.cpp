@@ -8,6 +8,8 @@
 
 #include "core/backup.h"
 
+#include "sin_files.h"
+
 #include <filesystem>
 #include <fstream>
 #include <regex>
@@ -24,10 +26,11 @@ std::vector<BackupInfo> ScanBackups(const std::string& denoiserAddonDir)
     if (!fs::exists(denoiserAddonDir, ec) || ec)
         return out;   //. not installed, nothing to find
 
-    //_ Same sin-name/separator pattern as ScanInstalledSinFiles, plus a
-    // trailing ".bak" -- bare unsuffixed backups match too; version isn't
-    // tracked here since a backup is only ever restored to its own path.
-    static const std::regex kPattern(R"(^VfxD_(Gluttony|Pride|Sloth)(?:[-_]v\d+)?\.json\.bak$)");
+    //_ Same sin-name/separator pattern as ScanInstalledSinFiles (any
+    // <Name>, not a fixed list -- see sin_files.h), plus a trailing
+    // ".bak" -- bare unsuffixed backups match too; version isn't tracked
+    // here since a backup is only ever restored to its own path.
+    static const std::regex kVfxdPattern(R"(^VfxD_([A-Za-z0-9]+)(?:[-_]v\d+)?\.json\.bak$)");
 
     for (const auto& entry : fs::directory_iterator(denoiserAddonDir, ec))
     {
@@ -35,11 +38,28 @@ std::vector<BackupInfo> ScanBackups(const std::string& denoiserAddonDir)
         if (!entry.is_regular_file()) continue;
 
         std::string fileName = entry.path().filename().string();
-        std::smatch m;
-        if (!std::regex_match(fileName, m, kPattern)) continue;
+        if (fileName.size() < 9 || fileName.compare(fileName.size() - 9, 9, ".json.bak") != 0)
+            continue;   //. not a sin file's backup at all
 
         BackupInfo info;
-        info.sinName     = m[1].str();
+        std::smatch m;
+        if (std::regex_match(fileName, m, kVfxdPattern))
+        {
+            info.sinName = m[1].str();
+        }
+        else
+        {
+            //_ Not VfxD_<Name>-named -- fall back to the same
+            // name/version split ScanInstalledSinFiles uses for its own
+            // content-matched files, so a backup's sinName always lines
+            // up with the live file it belongs to. Version itself is
+            // discarded here, same as the VfxD_<Name> branch above.
+            std::string outName;
+            int         outVersion;
+            ExtractNameAndVersion(fileName.substr(0, fileName.size() - 9), outName, outVersion);
+            info.sinName = outName;
+        }
+
         info.bakPath     = entry.path().string();
         info.bakFileName = fileName;
         info.restorePath = fs::path(entry.path()).replace_extension().string();   //. strips just the .bak

@@ -70,7 +70,7 @@ int RaceToIndex(Mumble::ERace race)
 // One row holds everything editable about a single GUID entry, including
 // its self context -- which used to be an all-or-nothing snapshot hidden
 // entirely when absent, but is now four independently editable fields.
-// Each is pre-filled from a live-log snapshot when "report new" was
+// Each is pre-filled from a live-log snapshot when "report" was
 // clicked and that GUID had one, snapshotted once at that point (not
 // re-read live, so the form doesn't change under the user while they're
 // filling it out); otherwise it starts at its own default, still fully
@@ -101,7 +101,7 @@ static std::string                s_reportFormError;
 //--------------------------------------------------------------------------------
 // Re-reads Account/Character Name from GameState and overwrites the
 // report form's name buffers with whatever's live right now. Called only
-// from AddReportRowFromLiveLogEntry (every "report new" click) -- not on
+// from AddReportRowFromLiveLogEntry (every "report" click) -- not on
 // section render/addon load, and not for a manually-added row.
 //
 // Overwrite is unconditional, not "only if still blank" -- a later click
@@ -120,12 +120,21 @@ void RefreshReportNameFieldsFromGameState()
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // AddReportRowFromLiveLogEntry
 //--------------------------------------------------------------------------------
-// See report_ui.h for the contract. Refreshes the name fields here rather
+// See report_ui.h for the contract. No-ops (with a form error instead of a
+// silent drop) once s_reportRows is already at kMaxReportGuids -- see its
+// own comment in webhook_report.h. Refreshes the name fields here rather
 // than on render -- see RefreshReportNameFieldsFromGameState's comment
 // for why that's tied to this call specifically.
 //--------------------------------------------------------------------------------
 void AddReportRowFromLiveLogEntry(const LiveLogEntry& entry)
 {
+    if (s_reportRows.size() >= kMaxReportGuids)
+    {
+        s_reportFormError = "Reports are capped at " + std::to_string(kMaxReportGuids) +
+                            " GUIDs at a time -- send this batch first, or remove one below.";
+        return;
+    }
+
     RefreshReportNameFieldsFromGameState();
 
     ReportFormRow row;
@@ -327,7 +336,7 @@ std::string ComposeReportGuidBlock(const std::string& guid, bool typeIsSet, int 
 // RenderInstalledEffects) so per-GUID display names have something to
 // check against even if opened before "Installed Effects".
 //
-// Reporter-identity fields are only auto-filled/re-synced by "report new"
+// Reporter-identity fields are only auto-filled/re-synced by "report"
 // (see RefreshReportNameFieldsFromGameState); this function just displays
 // and edits whatever's currently in the buffers, starting blank each
 // session until the first click.
@@ -366,8 +375,8 @@ void RenderReportSection(const std::string& denoiserAddonDir)
     ImGui::Separator();
 
     ImGui::TextWrapped(
-        "Attach zero or more GUIDs -- click \"report new\" next to an entry in the "
-        "Live Log, or add one by hand below.");
+        "Attach zero or more GUIDs (up to %d) -- click \"report\" next to an "
+        "entry in the Live Log, or add one by hand below.", (int)kMaxReportGuids);
 
     int removeIndex = -1;
     for (size_t i = 0; i < s_reportRows.size(); ++i)
@@ -487,7 +496,11 @@ void RenderReportSection(const std::string& denoiserAddonDir)
     if (removeIndex >= 0)
         s_reportRows.erase(s_reportRows.begin() + removeIndex);
 
-    if (ImGui::SmallButton("+ Add GUID manually"))
+    //_ imgui 1.80 lacks BeginDisabled/EndDisabled -- same swap-label-and-
+    // ignore-click workaround as the Send button below, gated on
+    // kMaxReportGuids (see webhook_report.h) instead of an in-flight flag.
+    bool atGuidCap = s_reportRows.size() >= kMaxReportGuids;
+    if (ImGui::SmallButton(atGuidCap ? "Max GUIDs reached" : "+ Add GUID manually") && !atGuidCap)
         s_reportRows.push_back(ReportFormRow{});
 
     ImGui::Spacing();

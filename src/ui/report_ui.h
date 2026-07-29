@@ -36,7 +36,7 @@ void RenderReportSection(const std::string& denoiserAddonDir);
 //--------------------------------------------------------------------------------
 // Appends a report-form row auto-filled from a live-log entry, and
 // (re-)syncs the reporter-identity name fields from GameState. This is
-// what the Live Log section's per-entry "report new" button calls --
+// what the Live Log section's per-entry "report" button calls --
 // exposed here (rather than kept file-local) specifically so
 // live_log_ui.cpp, a separate translation unit, can reach it.
 //--------------------------------------------------------------------------------

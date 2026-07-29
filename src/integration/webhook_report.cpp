@@ -237,6 +237,18 @@ bool StartSendReport(const std::string& reporterLine,
         return false;
     }
 
+    //_ Real enforcement of kMaxReportGuids (see its own comment) -- the
+    // form in report_ui.cpp already stops a user adding a 6th row, this
+    // is what actually guarantees the relay never gets asked to compose
+    // a too-long Discord message.
+    if (entries.size() > kMaxReportGuids)
+    {
+        outError = "Reports are capped at " + std::to_string(kMaxReportGuids) +
+                   " GUIDs at a time -- send this batch first, then start another.";
+        s_reportInFlight.store(false); //. release the claim
+        return false;
+    }
+
     //_ Blocks the whole submission (not just the offending row) so the
     // user sees exactly what to fix; cross-user dedup is the relay's job
     std::unordered_set<std::string> seenThisSubmission;

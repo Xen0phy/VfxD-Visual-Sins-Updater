@@ -6,7 +6,7 @@
 // "Live Log (VfxDenoiser)" options-panel section, split out of addon.cpp.
 // Pairs with live_log.h: live_log.h/.cpp owns capture/storage of incoming
 // events, this file owns the per-type filter checkboxes and the entry list
-// UI, including the "report new" button that hands off to report_ui.h's
+// UI, including the "report" button that hands off to report_ui.h's
 // AddReportRowFromLiveLogEntry.
 //--------------------------------------------------------------------------------
 

@@ -42,10 +42,17 @@ struct BackupInfo
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // ScanBackups
 //--------------------------------------------------------------------------------
-// Scans denoiserAddonDir for .bak files belonging to the three known
-// Visual Sins files, matched the same way ScanInstalledSinFiles matches
-// the live files, plus a trailing ".bak". Does filesystem stat() calls --
-// call on demand, not every frame.
+// Scans denoiserAddonDir for .bak files belonging to any VfxD_<Name>.json
+// Visual Sins file -- not limited to the update-tracked kSinNames subset
+// (see sin_files.h) -- matched the same way ScanInstalledSinFiles matches
+// the live files, plus a trailing ".bak". Also picks up the .bak of any
+// other .json file SaveInstalledSinFile has ever written a backup for
+// (i.e. any file ScanInstalledSinFiles accepted by content, not just
+// name -- see its own comment); by the time a .bak exists its .json
+// sibling already passed that content check once, so ScanBackups itself
+// doesn't re-open the file, it just reuses the same name/version
+// fallback (ExtractNameAndVersion). Does filesystem stat() calls -- call
+// on demand, not every frame.
 //--------------------------------------------------------------------------------
 std::vector<BackupInfo> ScanBackups(const std::string& denoiserAddonDir);
 

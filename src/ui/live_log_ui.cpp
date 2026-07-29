@@ -110,15 +110,13 @@ void RenderLiveLogSection(AddonAPI_t* aApi, const std::string& denoiserAddonDir)
         ImGui::PushID(entry->guid_b64.c_str());
         bool open = ImGui::TreeNode(entry->displayName.c_str());
 
-        //_ Hidden once the guid is in an installed sin file; shown next
-        // to the row regardless of expansion. No duplicate-guid guard
-        // needed -- report.cpp rejects duplicates at submission.
-        if (!entry->knownInSin)
-        {
-            ImGui::SameLine();
-            if (ImGui::SmallButton("report new"))
-                AddReportRowFromLiveLogEntry(*entry);
-        }
+        //_ Always offered, even when knownInSin -- dedup happens
+        // server-side (Cloudflare worker), and knownInSin only reflects
+        // *this* user's sin file, which may be stale or a fork missing
+        // an effect the original still has.
+        ImGui::SameLine();
+        if (ImGui::SmallButton("report"))
+            AddReportRowFromLiveLogEntry(*entry);
 
         if (open)
         {
