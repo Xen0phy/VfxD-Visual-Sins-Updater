@@ -30,6 +30,16 @@
 // scoped under a node that stops being drawn this frame (hidden by search,
 // or collapsed) is cancelled immediately rather than left running
 // invisibly.
+//
+// The one exception is a single-GUID drag: a GUID's own bullet row, in
+// the plain read-only view only, is a drag source (see the
+// GuidListDragContext-driven branch of RenderGuidList below) -- not
+// offered from inside the effect editor, which is back to a single
+// "one GUID per line" textbox (see RenderEffectEditor in
+// installed_tree_edit.cpp). That's a genuine cross-effect content move,
+// any effect row in the same sin file is a valid target (except the one
+// currently open for editing), and it writes straight to disk on drop --
+// see QueueGuidMerge.
 //------------------------------------------------------------------------------
 
 #include "github_update.h"
@@ -51,14 +61,39 @@
 
 namespace {
 
+//********************************************************************************
+// GuidListDragContext
+//--------------------------------------------------------------------------------
+// sinName/path/index    the owning effect's identity (see GuidDragPayload)
+// effectName             owning effect's display name, for messages
+//--------------------------------------------------------------------------------
+// Passed to RenderGuidList to make its rows draggable straight from the
+// read-only tree (no need to open the effect's editor first) -- nullptr
+// (the default) keeps the plain BulletText rendering RenderGuidDiff's
+// added/removed/unchanged buckets use, where dragging wouldn't make
+// sense (an "Added" bucket's GUIDs aren't actually on this effect yet).
+//--------------------------------------------------------------------------------
+struct GuidListDragContext
+{
+    std::string       sinName;
+    std::vector<int>  path;
+    int               index = -1;
+    std::string       effectName;
+};
+
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // RenderGuidList
 //------------------------------------------------------------------------------
 // `color` is optional -- nullptr for the default text color (a plain guids
 // list), or a color to tint every bullet (e.g. kReworkColor, to set a
 // reworked effect's post-update GUIDs apart from its current ones).
+// `dragContext` is optional -- see GuidListDragContext. When set, each row
+// is a "VFXD_GUID" drag source (see QueueGuidMerge) instead of a plain
+// bullet; gated on !AnyEditInFlight() so it can't start a new drag while
+// some other edit is already open elsewhere.
 //------------------------------------------------------------------------------
-void RenderGuidList(const char* label, const std::vector<std::string>& guids, const ImVec4* color = nullptr)
+void RenderGuidList(const char* label, const std::vector<std::string>& guids, const ImVec4* color = nullptr,
+                     const GuidListDragContext* dragContext = nullptr)
 {
     if (guids.empty())
     {
@@ -70,8 +105,39 @@ void RenderGuidList(const char* label, const std::vector<std::string>& guids, co
     ImGui::Indent();
     if (color)
         ImGui::PushStyleColor(ImGuiCol_Text, *color);
-    for (const auto& g : guids)
-        ImGui::BulletText("%s", g.c_str());
+
+    if (!dragContext)
+    {
+        for (const auto& g : guids)
+            ImGui::BulletText("%s", g.c_str());
+    }
+    else
+    {
+        bool dragAllowed = !AnyEditInFlight();
+        for (size_t i = 0; i < guids.size(); ++i)
+        {
+            ImGui::PushID(static_cast<int>(i));
+            ImGui::BulletText("%s", guids[i].c_str());
+
+            //_ BulletText isn't an interactive widget -- it never registers an
+            // ImGui ID, so BeginDragDropSource needs ImGuiDragDropFlags_SourceAllowNullID
+            // to accept it as a source. Without this flag, ImGui hits an assert
+            // (IM_ASSERT(0) in BeginDragDropSource) any time this runs while the
+            // mouse button is down and the last item has no ID -- which includes
+            // the very first frame a node opens, since clicking the tree arrow
+            // toggles it open on mouse-DOWN, not mouse-up.
+            if (dragAllowed && ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
+            {
+                BeginGuidDrag(dragContext->sinName, dragContext->path, dragContext->index,
+                              dragContext->effectName, guids[i]);
+                ImGui::SetDragDropPayload("VFXD_GUID", &kGuidDragMarker, sizeof(kGuidDragMarker));
+                ImGui::Text("Move GUID \"%s\"", guids[i].c_str());
+                ImGui::EndDragDropSource();
+            }
+            ImGui::PopID();
+        }
+    }
+
     if (color)
         ImGui::PopStyleColor();
     ImGui::Unindent();
@@ -569,6 +635,13 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                 bool effIsRework   = effect.value("__vfxd_rework", false);
                 bool effIsConflict = effect.value("__vfxd_conflict", false);
 
+                //_ Hollowed out by a GUID drag-merge, or by deleting the
+                // last GUID by hand -- see "Delete Empty" below. Alpha-dimmed
+                // rather than text-colored, so it layers with the tints below.
+                bool effIsEmptyGuids = !effect.contains("guids") || !effect["guids"].is_array() || effect["guids"].empty();
+                if (effIsEmptyGuids)
+                    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.5f);
+
                 //_ A settings conflict is just as much a "review before
                 // applying" situation as a duplicate guid -- same red tint,
                 // same top priority.
@@ -585,10 +658,14 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                 bool effectNeedsForceOpen = searchActive && EffectHiddenContentMatches(effect, s_treeSearchQueryLower);
                 if (s_treeSearchQueryChanged)
                     ImGui::SetNextItemOpen(effectNeedsForceOpen, ImGuiCond_Always);
-                bool nodeOpen = ImGui::TreeNode("effect", "%s%s", effName.c_str(), isEditingThis ? " (editing)" : "");
+                bool nodeOpen = ImGui::TreeNode("effect", "%s%s%s", effName.c_str(),
+                                                isEditingThis ? " (editing)" : "",
+                                                effIsEmptyGuids ? " (empty)" : "");
 
                 if (effIsDupe || effIsNew || effIsRework || effIsConflict)
                     ImGui::PopStyleColor();
+                if (effIsEmptyGuids)
+                    ImGui::PopStyleVar();
 
                 //_ Places a dragged effect immediately above this row --
                 // complements the category-row target above so together
@@ -618,6 +695,28 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                             job.destinationIndex = effIndex;
 
                             QueueEffectMove(std::move(job));
+                        }
+                    }
+
+                    //_ Every effect row is a valid target except the one
+                    // currently being edited (see QueueGuidMerge) and itself.
+                    if (!isEditingThis && ImGui::AcceptDragDropPayload("VFXD_GUID"))
+                    {
+                        const GuidDragPayload& guidPayload = GetGuidDragPayload();
+                        bool sameEffect = guidPayload.originalPath == pathSoFar && guidPayload.originalIndex == effIndex;
+                        if (guidPayload.sinName == sinName && !sameEffect)
+                        {
+                            GuidMergeJob job;
+                            job.sinName               = guidPayload.sinName;
+                            job.originalPath          = guidPayload.originalPath;
+                            job.originalIndex         = guidPayload.originalIndex;
+                            job.effectName            = guidPayload.effectName;
+                            job.guid                  = guidPayload.guid;
+                            job.destinationPath       = pathSoFar;
+                            job.destinationIndex      = effIndex;
+                            job.destinationEffectName = effName;
+
+                            QueueGuidMerge(std::move(job));
                         }
                     }
                     ImGui::EndDragDropTarget();
@@ -755,7 +854,22 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                         }
                         else
                         {
-                            RenderGuidList("guids", guids);
+                            //_ effIsNew still needs checking here -- an overlay-only
+                            // effect has no stable on-disk position (same reasoning
+                            // as the row's own guards above), so its GUIDs can't drag.
+                            if (effIsNew)
+                            {
+                                RenderGuidList("guids", guids);
+                            }
+                            else
+                            {
+                                GuidListDragContext dragContext;
+                                dragContext.sinName    = sinName;
+                                dragContext.path       = pathSoFar;
+                                dragContext.index      = effIndex;
+                                dragContext.effectName = effName;
+                                RenderGuidList("guids", guids, nullptr, &dragContext);
+                            }
                         }
 
                         if (effect.contains("behaviors") && effect["behaviors"].is_array())
@@ -843,9 +957,27 @@ void RenderInstalledEffects(const std::string& denoiserAddonDir)
     if (ImGui::Button("Refresh##installed_tree"))
         LoadInstalledEffectsTree(denoiserAddonDir);
 
+    ImGui::SameLine();
+    //_ Greyed out while another edit's in flight, same as the per-effect
+    // "-" delete button -- not gated on there being anything empty yet,
+    // that's re-checked when the confirm itself renders (see below).
+    {
+        bool deleteEmptyDisabled = AnyEditInFlight() && !IsDeleteEmptyConfirmActive();
+        if (deleteEmptyDisabled)
+            ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.5f);
+        bool deleteEmptyClicked = ImGui::Button("Delete Empty##installed_tree");
+        if (deleteEmptyDisabled)
+            ImGui::PopStyleVar();
+        if (deleteEmptyClicked && !deleteEmptyDisabled)
+            BeginDeleteEmptyConfirm();
+    }
+    if (IsDeleteEmptyConfirmActive())
+        RenderDeleteEmptyConfirm();
+
     ImGui::TextDisabled("Drag an effect onto a category to move it there (or to the end of its own category), "
                          "or onto another effect to place it just above that one. Categories can be dragged the "
-                         "same way to reorder them among their own siblings.");
+                         "same way to reorder them among their own siblings. Drag a GUID onto another effect "
+                         "to move it there instead.");
 
     //_ Recomputes the lowercased query RenderCategoryTree's matching
     // helpers compare against; the actual filtering happens down there.
@@ -1091,4 +1223,5 @@ void RenderInstalledEffects(const std::string& denoiserAddonDir)
     ApplyPendingCategoryMove();
     ApplyPendingDelete();
     ApplyPendingCreateCategory();
+    ApplyPendingGuidMerge();
 }

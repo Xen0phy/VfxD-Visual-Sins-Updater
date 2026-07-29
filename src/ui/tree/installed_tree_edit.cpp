@@ -15,6 +15,7 @@
 #include "installed_tree_store.h"   //. FindInstalledJsonMutable, InvalidateInstalledTree, SaveInstalledSinFile
 #include "ui_colors.h"              //. kDuplicateColor
 
+#include <algorithm>
 #include <cstdio>
 #include <sstream>
 
@@ -1112,8 +1113,293 @@ void ApplyPendingMove()
     InvalidateInstalledTree(); //. force reload on next expand
 }
 
+static GuidDragPayload s_guidDragPayload;
+static bool            s_hasPendingGuidMerge = false;
+static GuidMergeJob    s_pendingGuidMerge;
+
+void BeginGuidDrag(const std::string& sinName, const std::vector<int>& path,
+                    int index, const std::string& effectName, const std::string& guid)
+{
+    s_guidDragPayload.sinName      = sinName;
+    s_guidDragPayload.originalPath = path;
+    s_guidDragPayload.originalIndex = index;
+    s_guidDragPayload.effectName    = effectName;
+    s_guidDragPayload.guid          = guid;
+}
+
+const GuidDragPayload& GetGuidDragPayload()
+{
+    return s_guidDragPayload;
+}
+
+void QueueGuidMerge(GuidMergeJob job)
+{
+    s_pendingGuidMerge    = std::move(job);
+    s_hasPendingGuidMerge = true;
+}
+
+void ApplyPendingGuidMerge()
+{
+    if (!s_hasPendingGuidMerge)
+        return;
+    s_hasPendingGuidMerge = false;
+
+    const GuidMergeJob& job = s_pendingGuidMerge;
+
+    if (job.originalPath == job.destinationPath && job.originalIndex == job.destinationIndex)
+    {
+        s_editResultMessage = "Nothing to do: dropped a GUID onto its own effect.";
+        return;
+    }
+
+    //_ Re-finds both effects by path/index rather than carrying pointers
+    // from render time -- same reasoning as ApplyPendingMove.
+    nlohmann::ordered_json* rootPtr = FindInstalledJsonMutable(job.sinName);
+    if (!rootPtr)
+    {
+        s_editResultMessage = "GUID move failed: " + job.sinName + " is no longer loaded.";
+        return;
+    }
+    nlohmann::ordered_json& root = *rootPtr;
+
+    nlohmann::ordered_json* srcCategory = FindCategoryByPath(root, job.originalPath);
+    if (!srcCategory || !srcCategory->contains("effects") || !(*srcCategory)["effects"].is_array())
+    {
+        s_editResultMessage = "GUID move failed: the source effect's category is no longer there.";
+        return;
+    }
+    auto& srcEffects = (*srcCategory)["effects"];
+    if (job.originalIndex < 0 || static_cast<size_t>(job.originalIndex) >= srcEffects.size())
+    {
+        s_editResultMessage = "GUID move failed: \"" + job.effectName + "\" is no longer there.";
+        return;
+    }
+    auto srcIt = srcEffects.begin() + job.originalIndex;
+    if (!srcIt->contains("name") || (*srcIt)["name"] != job.effectName)
+    {
+        s_editResultMessage = "GUID move failed: \"" + job.effectName + "\" is no longer there.";
+        return;
+    }
+
+    if (!srcIt->contains("guids") || !(*srcIt)["guids"].is_array())
+    {
+        s_editResultMessage = "GUID move failed: \"" + job.effectName + "\" no longer has that GUID.";
+        return;
+    }
+    auto& srcGuids = (*srcIt)["guids"];
+    auto  guidIt   = std::find_if(srcGuids.begin(), srcGuids.end(),
+        [&](const nlohmann::ordered_json& g) { return g.is_string() && g.get<std::string>() == job.guid; });
+    if (guidIt == srcGuids.end())
+    {
+        s_editResultMessage = "GUID move failed: \"" + job.effectName + "\" no longer has that GUID.";
+        return;
+    }
+
+    //_ destinationPath/Index are a real, already-existing effect
+    // (captured from the tree at drop time), never typed text -- resolved
+    // the same way srcCategory was.
+    nlohmann::ordered_json* destCategory = FindCategoryByPath(root, job.destinationPath);
+    if (!destCategory || !destCategory->contains("effects") || !(*destCategory)["effects"].is_array())
+    {
+        s_editResultMessage = "GUID move failed: \"" + job.destinationEffectName + "\" is no longer there.";
+        return;
+    }
+    auto& destEffects = (*destCategory)["effects"];
+    if (job.destinationIndex < 0 || static_cast<size_t>(job.destinationIndex) >= destEffects.size())
+    {
+        s_editResultMessage = "GUID move failed: \"" + job.destinationEffectName + "\" is no longer there.";
+        return;
+    }
+    auto destIt = destEffects.begin() + job.destinationIndex;
+    if (!destIt->contains("name") || (*destIt)["name"] != job.destinationEffectName)
+    {
+        s_editResultMessage = "GUID move failed: \"" + job.destinationEffectName + "\" is no longer there.";
+        return;
+    }
+
+    if (!destIt->contains("guids") || !(*destIt)["guids"].is_array())
+        (*destIt)["guids"] = nlohmann::ordered_json::array();
+    auto& destGuids = (*destIt)["guids"];
+
+    //_ Never creates a cross-effect duplicate -- if the target already
+    // has this GUID, the source copy is still removed (that's the point
+    // of the drag), it just isn't re-added on top of the existing one.
+    bool alreadyOnDest = std::any_of(destGuids.begin(), destGuids.end(),
+        [&](const nlohmann::ordered_json& g) { return g.is_string() && g.get<std::string>() == job.guid; });
+
+    srcGuids.erase(guidIt);
+    if (!alreadyOnDest)
+        destGuids.push_back(job.guid);
+
+    std::string writeError;
+    if (!SaveInstalledSinFile(job.sinName, writeError))
+    {
+        s_editResultMessage = "GUID moved in memory but failed to write to disk (" + writeError +
+                               "). Reloading from disk so nothing shown is out of sync with what's actually saved.";
+        InvalidateInstalledTree();
+        return;
+    }
+
+    s_editResultMessage = alreadyOnDest
+        ? "Moved GUID to \"" + job.destinationEffectName + "\" (it already had this GUID -- removed the duplicate from \"" +
+              job.effectName + "\")."
+        : "Moved GUID from \"" + job.effectName + "\" to \"" + job.destinationEffectName + "\".";
+    InvalidateInstalledTree(); //. force reload on next expand
+}
+
+namespace {
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// CollectEmptyGuidEffects / RemoveEmptyGuidEffects
+//--------------------------------------------------------------------------------
+// Recursive category walks backing CountEmptyGuidEffects and the "Delete
+// Empty" sweep -- an effect counts as empty if its "guids" key is
+// missing, non-array, or an empty array. Collect only counts; Remove
+// actually erases (erase-remove per category, then recurses into
+// subcategories) and returns how many it removed, for the result
+// message.
+//--------------------------------------------------------------------------------
+void CollectEmptyGuidEffects(const nlohmann::ordered_json& node, int& count)
+{
+    if (node.contains("effects") && node["effects"].is_array())
+        for (const auto& eff : node["effects"])
+            if (!eff.contains("guids") || !eff["guids"].is_array() || eff["guids"].empty())
+                ++count;
+
+    if (node.contains("categories") && node["categories"].is_array())
+        for (const auto& cat : node["categories"])
+            CollectEmptyGuidEffects(cat, count);
+}
+
+size_t RemoveEmptyGuidEffects(nlohmann::ordered_json& node)
+{
+    size_t removed = 0;
+
+    if (node.contains("effects") && node["effects"].is_array())
+    {
+        auto& effects = node["effects"];
+        for (auto it = effects.begin(); it != effects.end();)
+        {
+            if (!it->contains("guids") || !(*it)["guids"].is_array() || (*it)["guids"].empty())
+            {
+                it = effects.erase(it);
+                ++removed;
+            }
+            else
+            {
+                ++it;
+            }
+        }
+    }
+
+    if (node.contains("categories") && node["categories"].is_array())
+        for (auto& cat : node["categories"])
+            removed += RemoveEmptyGuidEffects(cat);
+
+    return removed;
+}
+
+bool s_deleteEmptyConfirmActive = false;
+
+} //. namespace
+
+int CountEmptyGuidEffects()
+{
+    int count = 0;
+    for (const auto& [sinName, root] : GetInstalledJson())
+        CollectEmptyGuidEffects(root, count);
+    return count;
+}
+
+bool IsDeleteEmptyConfirmActive()
+{
+    return s_deleteEmptyConfirmActive;
+}
+
+void BeginDeleteEmptyConfirm()
+{
+    s_deleteEmptyConfirmActive = true;
+    s_editResultMessage.clear();
+}
+
+void CancelDeleteEmptyConfirm()
+{
+    s_deleteEmptyConfirmActive = false;
+}
+
+void RenderDeleteEmptyConfirm()
+{
+    int count = CountEmptyGuidEffects();
+    if (count == 0)
+    {
+        s_editResultMessage       = "No empty effects to delete.";
+        s_deleteEmptyConfirmActive = false;
+        return;
+    }
+
+    ImGui::TextColored(kDuplicateColor,
+        "Delete %d empty effect%s (no GUIDs) across every loaded sin file? "
+        "A .bak is kept per file, but there's no in-app undo for this.",
+        count, count == 1 ? "" : "s");
+
+    if (ImGui::SmallButton("Delete##confirm_empty"))
+    {
+        int                      totalRemoved = 0;
+        std::vector<std::string> failedSins;
+
+        //_ GetInstalledJson() just supplies the set of sin names to visit
+        // -- each one is then re-fetched mutably, same "look it up fresh,
+        // don't carry a pointer" reasoning as every Apply* above.
+        std::vector<std::string> sinNames;
+        for (const auto& [sinName, root] : GetInstalledJson())
+            sinNames.push_back(sinName);
+
+        for (const auto& sinName : sinNames)
+        {
+            nlohmann::ordered_json* rootPtr = FindInstalledJsonMutable(sinName);
+            if (!rootPtr)
+                continue;
+
+            size_t removed = RemoveEmptyGuidEffects(*rootPtr);
+            if (removed == 0)
+                continue;
+
+            std::string writeError;
+            if (!SaveInstalledSinFile(sinName, writeError))
+                failedSins.push_back(sinName);
+            else
+                totalRemoved += static_cast<int>(removed);
+        }
+
+        s_deleteEmptyConfirmActive = false;
+
+        if (!failedSins.empty())
+        {
+            std::string joined;
+            for (size_t i = 0; i < failedSins.size(); ++i)
+            {
+                if (i)
+                    joined += ", ";
+                joined += failedSins[i];
+            }
+            s_editResultMessage = "Deleted " + std::to_string(totalRemoved) +
+                                   " empty effect(s), but failed to write: " + joined +
+                                   ". Reloading from disk so nothing shown is out of sync with what's actually saved.";
+        }
+        else
+        {
+            s_editResultMessage = "Deleted " + std::to_string(totalRemoved) + " empty effect(s).";
+        }
+        InvalidateInstalledTree();
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Cancel##delete_empty"))
+        CancelDeleteEmptyConfirm();
+}
+
 bool AnyEditInFlight()
 {
     return IsEffectEditActive() || IsCategoryRenameActive() ||
-           IsDeleteConfirmActive() || IsCreateCategoryActive();
+           IsDeleteConfirmActive() || IsCreateCategoryActive() ||
+           IsDeleteEmptyConfirmActive();
 }

@@ -105,7 +105,7 @@ void AddonUnload()
 //--------------------------------------------------------------------------------
 extern "C" __declspec(dllexport) AddonDefinition_t* GetAddonDef()
 {
-    s_addonDef.Signature   = 0x56465344; //. 'VFSD'
+    s_addonDef.Signature   = 0x58565355; //. 'XVSU'
     s_addonDef.APIVersion  = NEXUS_API_VERSION;
     s_addonDef.Name        = "VfxD Visual Sins Updater";
     s_addonDef.Version     = { Maj, Min, Bld, Rev };

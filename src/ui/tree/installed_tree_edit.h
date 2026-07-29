@@ -22,6 +22,12 @@
 // Neither category rename nor category move offers reparenting
 // (changing a category's parent) -- see the rename group and the move
 // group below for why.
+//
+// Two things below aren't part of that shared shape: single-GUID
+// drag-merge (writes straight to disk on drop, no Save click involved --
+// see QueueGuidMerge) and the bulk "Delete Empty" sweep (runs inline
+// before the tree walk starts, so it doesn't need the
+// Queue-then-Apply-after-walk dance the six above rely on).
 //--------------------------------------------------------------------------------
 
 #pragma once
@@ -91,9 +97,12 @@ const std::string& GetEditResultMessage();
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // AnyEditInFlight
 //--------------------------------------------------------------------------------
-// True if any one of the six state machines is currently active,
-// addon-wide -- used to grey out/disable starting a different edit
-// while another is already open.
+// True if any one of the six state machines -- or the newer bulk
+// "Delete Empty" confirm further down -- is currently active, addon-wide
+// -- used to grey out/disable starting a different edit while another is
+// already open. GUID drag-merge deliberately does NOT feed into this: it
+// only ever runs while its source effect's own edit is already the thing
+// holding AnyEditInFlight true, so it needs no separate flag.
 //--------------------------------------------------------------------------------
 bool AnyEditInFlight();
 
@@ -331,3 +340,108 @@ struct EffectMoveJob
 //--------------------------------------------------------------------------------
 void QueueEffectMove(EffectMoveJob job);
 void ApplyPendingMove();
+
+//_ Payload marker for a single-GUID drag -- same "bytes are just a type
+// marker" convention as kEffectDragMarker above.
+inline constexpr int kGuidDragMarker = 1;
+
+//********************************************************************************
+// GuidDragPayload
+//--------------------------------------------------------------------------------
+// sinName         which sin file the dragged GUID's effect belongs to
+// originalPath    that effect's containing category's identity
+// originalIndex   that effect's position within originalPath's
+//                 "effects" array -- together with originalPath, the
+//                 source effect's real identity
+// effectName      source effect's display name, used for messages
+// guid            the actual GUID string being moved
+//--------------------------------------------------------------------------------
+struct GuidDragPayload
+{
+    std::string       sinName;
+    std::vector<int>  originalPath;
+    int               originalIndex = -1;
+    std::string       effectName;
+    std::string       guid;
+};
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// BeginGuidDrag / GetGuidDragPayload
+//--------------------------------------------------------------------------------
+// Records the current single-GUID drag payload -- call every frame the
+// drag is held, from inside a GUID bullet's own BeginDragDropSource in
+// installed_tree_view.cpp's RenderGuidList (GuidListDragContext branch).
+// Deliberately not offered from inside the effect editor itself -- see
+// QueueGuidMerge for why. GetGuidDragPayload is only meaningful from
+// inside a BeginDragDropTarget block that just accepted "VFXD_GUID".
+//--------------------------------------------------------------------------------
+void BeginGuidDrag(const std::string& sinName, const std::vector<int>& path,
+                    int index, const std::string& effectName, const std::string& guid);
+const GuidDragPayload& GetGuidDragPayload();
+
+//********************************************************************************
+// GuidMergeJob
+//--------------------------------------------------------------------------------
+// sinName                  sin file the merge applies to
+// originalPath/Index       source effect's identity (see GuidDragPayload)
+// effectName               source effect's display name, for messages
+// guid                     the GUID being moved
+// destinationPath/Index    target effect's identity, captured at drop
+//                          time -- any effect row in the same sin file,
+//                          open or collapsed, is a valid target
+// destinationEffectName    target effect's display name, for messages
+//--------------------------------------------------------------------------------
+struct GuidMergeJob
+{
+    std::string       sinName;
+    std::vector<int>  originalPath;
+    int               originalIndex = -1;
+    std::string       effectName;
+    std::string       guid;
+    std::vector<int>  destinationPath;
+    int               destinationIndex = -1;
+    std::string       destinationEffectName;
+};
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// QueueGuidMerge / ApplyPendingGuidMerge
+//--------------------------------------------------------------------------------
+// Queue records a same-sin GUID move-and-merge to apply once the whole
+// tree has finished rendering this frame -- called from the destination
+// effect row's drop target, right alongside its VFXD_EFFECT accept.
+// Writes straight to disk on both ends, no Save click needed: the
+// source is always a plain read-only bullet, never the effect actually
+// open for editing, and the destination row refuses the drop while it's
+// the one being edited (its GUIDs textbox is a stale BeginEdit-time
+// snapshot until Save overwrites it wholesale). Skips the add on the
+// destination side if it's already present there, so a merge never
+// creates a cross-effect duplicate.
+//--------------------------------------------------------------------------------
+void QueueGuidMerge(GuidMergeJob job);
+void ApplyPendingGuidMerge();
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// CountEmptyGuidEffects
+//--------------------------------------------------------------------------------
+// Number of effects, across every currently loaded sin file, whose
+// "guids" array is missing or empty -- an effect a GUID drag-merge (or
+// a manual delete, once saved) has hollowed out. Used both to grey out
+// "Delete Empty" when there's nothing to do and to word its confirmation.
+//--------------------------------------------------------------------------------
+int CountEmptyGuidEffects();
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// BeginDeleteEmptyConfirm / CancelDeleteEmptyConfirm / RenderDeleteEmptyConfirm / IsDeleteEmptyConfirmActive
+//--------------------------------------------------------------------------------
+// A bulk sibling of BeginDeleteConfirm above: sweeps every empty effect
+// in every loaded sin file in one go, rather than one at a time. Render
+// re-counts (in case something changed since Begin) and, unlike the
+// single-effect confirm, performs the sweep itself the moment it's
+// confirmed -- it's called from RenderInstalledEffects before the tree
+// walk starts, so (unlike every job above) there's no mid-walk hazard in
+// mutating the tree right there instead of deferring it.
+//--------------------------------------------------------------------------------
+bool IsDeleteEmptyConfirmActive();
+void BeginDeleteEmptyConfirm();
+void CancelDeleteEmptyConfirm();
+void RenderDeleteEmptyConfirm();
