@@ -55,6 +55,35 @@ static HINTERNET  s_activeSession = nullptr;
 static HINTERNET  s_activeConnect = nullptr;
 static HINTERNET  s_activeRequest = nullptr;
 
+//_ See BeginReportShutdown/GetReportActiveThreadCount (webhook_report.h) --
+// same shape as github_update.cpp's s_shuttingDown/s_activeThreads pair,
+// kept separate rather than shared for the reasons in the header comment.
+static std::atomic<bool> s_reportShuttingDown{false};
+static std::atomic<int>  s_activeReportThreads{0};
+
+//********************************************************************************
+// ActiveReportThreadGuard
+//--------------------------------------------------------------------------------
+// Same shape as github_update.cpp's ActiveThreadGuard -- constructed as
+// the first statement inside the send thread's lambda so the spawned
+// thread itself does the counting, destroyed on every return path.
+//--------------------------------------------------------------------------------
+struct ActiveReportThreadGuard
+{
+    ActiveReportThreadGuard()  { ++s_activeReportThreads; }
+    ~ActiveReportThreadGuard() { --s_activeReportThreads; }
+};
+
+void BeginReportShutdown()
+{
+    s_reportShuttingDown.store(true);
+}
+
+int GetReportActiveThreadCount()
+{
+    return s_activeReportThreads.load();
+}
+
 void CancelInFlightReportRequest()
 {
     std::lock_guard<std::mutex> lock(s_activeHandlesMutex);
@@ -343,9 +372,21 @@ bool StartSendReport(const std::string& reporterLine,
 
     std::thread([body, submittedCount]()
     {
+        ActiveReportThreadGuard threadGuard;
+
         int statusCode = 0;
         std::string responseBody;
         bool ok = HttpsPostJson(Widen(DecodeWebhookUrl()), body, statusCode, responseBody);
+
+        //_ The POST above is the only thing CancelInFlightReportRequest can
+        // interrupt; this doesn't skip disk work like github_update.cpp's
+        // checks do -- it just stops a report being marked Done post-unload.
+        if (s_reportShuttingDown.load())
+        {
+            s_reportStatus.store(EReportStatus::Idle);
+            s_reportInFlight.store(false);
+            return;
+        }
 
         //_ Best-effort parse -- a malformed/empty body (e.g. a connection
         // dying mid-response) falls through to the generic messages below

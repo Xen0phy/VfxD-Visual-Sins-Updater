@@ -531,8 +531,8 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
     // a "__vfxd_virtual" overlay category (see BuildDiffOverlayTree).
     if (!categoryVirtual && !AnyEditInFlight() && ImGui::BeginPopupContextItem("category_ctx"))
     {
-        if (ImGui::MenuItem("Rename"))
-            BeginCategoryEdit(sinName, pathSoFar, name);
+        if (ImGui::MenuItem("Edit"))
+            BeginCategoryEdit(sinName, pathSoFar, name, category.value("description", std::string()));
         ImGui::EndPopup();
     }
 

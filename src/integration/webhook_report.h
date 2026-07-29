@@ -148,3 +148,16 @@ std::string GetLastReportMessage();
 // that one from Addon_Unload.
 //--------------------------------------------------------------------------------
 void CancelInFlightReportRequest();
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// BeginReportShutdown / GetReportActiveThreadCount
+//--------------------------------------------------------------------------------
+// Same shape as github_update.h's BeginUpdateShutdown/GetUpdateActiveThreadCount, kept as
+// separate functions (rather than shared ones) for the same reason this
+// file doesn't otherwise share code with github_update.cpp -- distinctly
+// named so both can be called independently from AddonUnload without a
+// link collision. Call alongside CancelInFlightReportRequest from
+// AddonUnload.
+//--------------------------------------------------------------------------------
+void BeginReportShutdown();
+int  GetReportActiveThreadCount();

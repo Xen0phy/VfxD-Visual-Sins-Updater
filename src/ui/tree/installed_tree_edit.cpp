@@ -176,7 +176,7 @@ namespace {
 // sinName    which sin file the renamed category belongs to
 // path       this category's own identity, root -> ... -> this
 //            category, inclusive
-// nameBuf    edit buffer for the in-progress name
+// nameBuf/descBuf   edit buffers, same "description" key as effects
 //--------------------------------------------------------------------------------
 // Shares the same "only one edit in flight addon-wide" rule as effect
 // editing (see AnyEditInFlight) -- so an effect edit and a category
@@ -187,23 +187,27 @@ struct CategoryEditState
     bool              active = false;
     std::string       sinName;
     std::vector<int>  path;
-    char              nameBuf[256] = {};
+    char              nameBuf[256]  = {};
+    char              descBuf[1024] = {};
 };
 static CategoryEditState s_categoryEdit;
 
 //********************************************************************************
 // CategoryRenameJob
 //--------------------------------------------------------------------------------
-// sinName    which sin file to rename in
-// path       root -> ... -> this category, inclusive (same convention
-//            as CategoryEditState::path)
-// newName    the trimmed replacement name
+// sinName        which sin file to rename in
+// path           root -> ... -> this category, inclusive (same convention
+//                as CategoryEditState::path)
+// newName        the trimmed replacement name
+// newDescription the replacement description -- same "erase if empty"
+//                handling as EditSaveJob::newDescription
 //--------------------------------------------------------------------------------
 struct CategoryRenameJob
 {
     std::string       sinName;
     std::vector<int>  path;
     std::string       newName;
+    std::string       newDescription;
 };
 static bool              s_hasPendingCategoryRename = false;
 static CategoryRenameJob s_pendingCategoryRename;
@@ -291,12 +295,14 @@ static CategoryMoveJob s_pendingCategoryMove;
 
 } //. namespace
 
-void BeginCategoryEdit(const std::string& sinName, const std::vector<int>& path, const std::string& currentName)
+void BeginCategoryEdit(const std::string& sinName, const std::vector<int>& path,
+                       const std::string& currentName, const std::string& currentDescription)
 {
     s_categoryEdit.active  = true;
     s_categoryEdit.sinName = sinName;
     s_categoryEdit.path    = path;
     std::snprintf(s_categoryEdit.nameBuf, sizeof(s_categoryEdit.nameBuf), "%s", currentName.c_str());
+    std::snprintf(s_categoryEdit.descBuf, sizeof(s_categoryEdit.descBuf), "%s", currentDescription.c_str());
     ClearEditResultMessage();
 }
 
@@ -310,9 +316,11 @@ void RenderCategoryEditor()
 {
     const float kFieldWidth = 250.0f;
 
-    ImGui::TextDisabled("Renaming this category.");
+    ImGui::TextDisabled("Editing this category.");
     ImGui::SetNextItemWidth(kFieldWidth);
     ImGui::InputText("Name##category", s_categoryEdit.nameBuf, sizeof(s_categoryEdit.nameBuf));
+    ImGui::InputTextMultiline("Description##category", s_categoryEdit.descBuf, sizeof(s_categoryEdit.descBuf),
+                               ImVec2(kFieldWidth, 60));
 
     if (ImGui::Button("Save##category"))
     {
@@ -328,9 +336,10 @@ void RenderCategoryEditor()
         else
         {
             CategoryRenameJob job;
-            job.sinName = s_categoryEdit.sinName;
-            job.path    = s_categoryEdit.path;
-            job.newName = trimmed;
+            job.sinName        = s_categoryEdit.sinName;
+            job.path           = s_categoryEdit.path;
+            job.newName        = trimmed;
+            job.newDescription = s_categoryEdit.descBuf;
 
             s_pendingCategoryRename    = std::move(job);
             s_hasPendingCategoryRename = true;
@@ -366,6 +375,10 @@ void ApplyPendingCategoryRename()
     }
 
     (*category)["name"] = job.newName;
+    if (job.newDescription.empty())
+        category->erase("description");
+    else
+        (*category)["description"] = job.newDescription;
 
     if (!TrySaveOrReport(job.sinName, "Rename applied"))
         return;

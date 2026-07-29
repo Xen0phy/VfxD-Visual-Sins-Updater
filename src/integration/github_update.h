@@ -252,3 +252,20 @@ void CancelInFlightUpdateRequest();
 // s_denoiserAddonDir already relies on elsewhere in this addon.
 //--------------------------------------------------------------------------------
 void SetUpdaterLogger(AddonAPI_t* aApi);
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// BeginUpdateShutdown / GetUpdateActiveThreadCount
+//--------------------------------------------------------------------------------
+// BeginUpdateShutdown flips a shared flag that every background thread
+// spawned from this file checks at each natural step boundary (after a
+// download completes, before a disk write), so a thread that's already
+// past its WinHTTP call -- where CancelInFlightUpdateRequest can no
+// longer do anything -- still gets a chance to notice unload has started
+// and return early instead of racing DLL teardown. GetUpdateActiveThreadCount
+// reports how many of those threads are still running, so AddonUnload can
+// poll for the real count hitting zero instead of guessing with a fixed
+// sleep. Both are meant to be called only from AddonUnload, on the render
+// thread.
+//--------------------------------------------------------------------------------
+void BeginUpdateShutdown();
+int  GetUpdateActiveThreadCount();

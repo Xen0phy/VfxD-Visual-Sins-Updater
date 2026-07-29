@@ -109,16 +109,17 @@ bool AnyEditInFlight();
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // BeginCategoryEdit / CancelCategoryEdit / RenderCategoryEditor / ApplyPendingCategoryRename
 //--------------------------------------------------------------------------------
-// Category rename -- a deliberately much smaller sibling of the effect
-// editor further down: only the category's own "name" is editable.
-// Reparenting isn't offered here, or by category move below, since it
+// Category editing -- name and description, same "description" key as
+// effects, still a smaller sibling of the effect editor further down:
+// reparenting isn't offered here, or by category move below, since it
 // would silently carry every effect/subcategory underneath along for
 // the ride, and nothing's asked for that yet. `path` is this
 // category's own identity, root -> ... -> this category, inclusive.
-// Render only records the pending rename; Apply re-finds the category
+// Render only records the pending job; Apply re-finds the category
 // by path and writes it, safe to call unconditionally every frame.
 //--------------------------------------------------------------------------------
-void BeginCategoryEdit(const std::string& sinName, const std::vector<int>& path, const std::string& currentName);
+void BeginCategoryEdit(const std::string& sinName, const std::vector<int>& path,
+                       const std::string& currentName, const std::string& currentDescription);
 void CancelCategoryEdit();
 void RenderCategoryEditor();
 void ApplyPendingCategoryRename();

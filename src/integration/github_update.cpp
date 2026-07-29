@@ -74,6 +74,36 @@ static std::atomic<bool> s_requestInFlight{false};
 static std::mutex        s_messageMutex;
 static std::string       s_lastApplyMessage; //. guarded by s_messageMutex
 
+//_ See BeginUpdateShutdown/GetUpdateActiveThreadCount (github_update.h).
+// s_shuttingDown is polled (not locked) at step boundaries; s_activeThreads
+// is only touched by ActiveThreadGuard so every exit path is covered.
+static std::atomic<bool> s_shuttingDown{false};
+static std::atomic<int>  s_activeThreads{0};
+
+//********************************************************************************
+// ActiveThreadGuard
+//--------------------------------------------------------------------------------
+// Constructed as the first statement inside each background thread lambda
+// (not by the caller before std::thread(...) -- it has to be the spawned
+// thread itself doing the counting) and destroyed on the way out no matter
+// which return statement or exception unwinds through it.
+//--------------------------------------------------------------------------------
+struct ActiveThreadGuard
+{
+    ActiveThreadGuard()  { ++s_activeThreads; }
+    ~ActiveThreadGuard() { --s_activeThreads; }
+};
+
+void BeginUpdateShutdown()
+{
+    s_shuttingDown.store(true);
+}
+
+int GetUpdateActiveThreadCount()
+{
+    return s_activeThreads.load();
+}
+
 //********************************************************************************
 // DiffCacheEntry
 //--------------------------------------------------------------------------------
@@ -279,6 +309,8 @@ void StartUpdateCheck(const std::string& denoiserAddonDir, bool alsoLoadDiff)
 
     std::thread([denoiserAddonDir, alsoLoadDiff]()
     {
+        ActiveThreadGuard threadGuard;
+
         //_ The loop below always walks kSinNames (all three), not just
         // what's found here, so a sin the user doesn't have yet still
         // gets a result (NotInstalled) an "Install" button can use.
@@ -367,6 +399,15 @@ void StartUpdateCheck(const std::string& denoiserAddonDir, bool alsoLoadDiff)
             return;
         }
 
+        //_ Unload started while the parse above was in flight -- nothing
+        // left to interrupt, but no reason to continue either; skip
+        // straight to releasing the in-flight claim instead of writing.
+        if (s_shuttingDown.load())
+        {
+            s_requestInFlight.store(false);
+            return;
+        }
+
         std::vector<SinUpdateInfo> results;
         for (int i = 0; i < kSinCount; ++i)
         {
@@ -433,10 +474,10 @@ void StartUpdateCheck(const std::string& denoiserAddonDir, bool alsoLoadDiff)
         s_checkStatus.store(ECheckStatus::Done);
         s_requestInFlight.store(false);
 
-        //_ Runs after s_requestInFlight is released above, since
-        // StartLoadDiff acquires that same flag itself -- calling it
-        // any earlier here would just make it no-op.
-        if (anyUpdate && alsoLoadDiff)
+        //_ Runs after s_requestInFlight is released, since StartLoadDiff
+        // acquires that flag itself. Also skipped once shutdown has begun --
+        // it would spawn a new thread AddonUnload never got to cancel.
+        if (anyUpdate && alsoLoadDiff && !s_shuttingDown.load())
             StartLoadDiff(denoiserAddonDir);
     })
     .detach();
@@ -498,8 +539,16 @@ void StartLoadDiff(const std::string& denoiserAddonDir, const std::string& onlyS
 
     std::thread([denoiserAddonDir, toLoad]()
     {
+        ActiveThreadGuard threadGuard;
+
         for (const auto& sin : toLoad)
         {
+            //_ Checked once per sin so a multi-sin load stops picking up
+            // new work as soon as unload begins. Any sin left at Loading
+            // here just gets retried next time the panel asks for it.
+            if (s_shuttingDown.load())
+                break;
+
             auto fail = [&sin]()
             {
                 std::lock_guard<std::mutex> lock(s_diffMutex);
@@ -601,7 +650,19 @@ void StartApplyUpdate(const std::string& denoiserAddonDir, const std::string& si
 
     std::thread([denoiserAddonDir, sinName, entry]()
     {
+        ActiveThreadGuard threadGuard;
+
         json oldFile = entry.oldFile; //. entry.oldFile stays untouched on failure
+
+        //_ Nothing downloaded here (already resolved by StartLoadDiff), so
+        // CancelInFlightUpdateRequest has no call to interrupt -- this is
+        // the one check standing between unload and the disk writes below.
+        if (s_shuttingDown.load())
+        {
+            s_applyStatus.store(EApplyStatus::Idle);
+            s_requestInFlight.store(false);
+            return;
+        }
 
         auto fail = [&](const char* why)
         {
@@ -663,9 +724,11 @@ void StartApplyUpdate(const std::string& denoiserAddonDir, const std::string& si
         s_applyStatus.store(EApplyStatus::Done);
         s_requestInFlight.store(false);
 
-        //_ Re-verify against what's actually on disk, rather than
-        // assuming the write matches our in-memory expectation.
-        StartUpdateCheck(denoiserAddonDir);
+        //_ Re-verify against what's actually on disk, rather than assuming
+        // the write matches expectation. Skipped once shutdown has begun --
+        // see StartUpdateCheck's alsoLoadDiff chain-call for the same reasoning.
+        if (!s_shuttingDown.load())
+            StartUpdateCheck(denoiserAddonDir);
     })
     .detach();
 }
@@ -699,6 +762,8 @@ void StartInstallSin(const std::string& denoiserAddonDir, const std::string& sin
 
     std::thread([denoiserAddonDir, sinName, target]()
     {
+        ActiveThreadGuard threadGuard;
+
         auto fail = [&](const char* why)
         {
             std::string msg = std::string("Failed: ") + sinName + " (" + why + ")";
@@ -716,6 +781,16 @@ void StartInstallSin(const std::string& denoiserAddonDir, const std::string& sin
         if (!HttpsGetToString(Widen(target.latestDownloadUrl), body, statusCode) || statusCode != 200)
         {
             fail("download failed");
+            return;
+        }
+
+        //_ The download above is the one thing CancelInFlightUpdateRequest
+        // can interrupt (handled by fail() already). Once it succeeds, this
+        // is the last chance to notice unload before writing to disk.
+        if (s_shuttingDown.load())
+        {
+            s_applyStatus.store(EApplyStatus::Idle);
+            s_requestInFlight.store(false);
             return;
         }
 
@@ -753,8 +828,10 @@ void StartInstallSin(const std::string& denoiserAddonDir, const std::string& sin
         s_requestInFlight.store(false);
 
         //_ Re-verify against what's actually on disk -- same reasoning
-        // as the end of StartApplyUpdate.
-        StartUpdateCheck(denoiserAddonDir);
+        // as the end of StartApplyUpdate, including skipping it once
+        // shutdown has begun.
+        if (!s_shuttingDown.load())
+            StartUpdateCheck(denoiserAddonDir);
     })
     .detach();
 }

@@ -91,10 +91,39 @@ void AddonUnload()
     LiveLog_Shutdown(s_api); //. unsubscribes, stops capture if on
     GameState_Shutdown();    //. clears cached DataLink pointers
 
+    //_ Flip the shutdown flags first -- a thread already past its WinHTTP
+    // call (e.g. mid file-write) can't be reached by the cancel calls
+    // below at all, only by checking this flag, so set it early.
+    BeginUpdateShutdown();
+    BeginReportShutdown();
+
+    //_ Still worth calling -- for any thread that's currently blocked
+    // inside a WinHTTP call, closing its handles is faster than waiting
+    // for the flag check on its next step boundary.
     CancelInFlightUpdateRequest();
     CancelInFlightReportRequest();
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    //_ Poll for the real thread count hitting zero instead of guessing
+    // with a fixed sleep -- fast in the common case, bounded in the
+    // worst case. Nexus doesn't wait on this, so don't block forever.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
+    while (std::chrono::steady_clock::now() < deadline &&
+           (GetUpdateActiveThreadCount() > 0 || GetReportActiveThreadCount() > 0))
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    //_ Still running past the timeout -- log via LogCritical (not just a
+    // warning), matching how every other unrecoverable failure in this
+    // addon is logged (see LogCritical in github_update.cpp).
+    const int stillRunning = GetUpdateActiveThreadCount() + GetReportActiveThreadCount();
+    if (stillRunning > 0 && s_api)
+    {
+        s_api->Log(LOGL_CRITICAL, "VfxDSinsUpdater",
+                   ("Unload: " + std::to_string(stillRunning) +
+                    " background thread(s) still running after the wait -- "
+                    "may crash if the DLL is unloaded now.").c_str());
+    }
 }
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
