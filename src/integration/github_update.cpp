@@ -73,6 +73,7 @@ static std::atomic<EApplyStatus> s_applyStatus{EApplyStatus::Idle};
 static std::atomic<bool> s_requestInFlight{false};
 static std::mutex        s_messageMutex;
 static std::string       s_lastApplyMessage; //. guarded by s_messageMutex
+static std::string       s_lastCheckMessage; //. guarded by s_messageMutex
 
 //_ See BeginUpdateShutdown/GetUpdateActiveThreadCount (github_update.h).
 // s_shuttingDown is polled (not locked) at step boundaries; s_activeThreads
@@ -299,6 +300,12 @@ static void SetLastApplyMessage(const std::string& msg)
     s_lastApplyMessage = msg;
 }
 
+static void SetLastCheckMessage(const std::string& msg)
+{
+    std::lock_guard<std::mutex> lock(s_messageMutex);
+    s_lastCheckMessage = msg;
+}
+
 void StartUpdateCheck(const std::string& denoiserAddonDir, bool alsoLoadDiff)
 {
     bool expected = false;
@@ -375,6 +382,13 @@ void StartUpdateCheck(const std::string& denoiserAddonDir, bool alsoLoadDiff)
 
         if (!ok || statusCode != 200)
         {
+            std::string msg = !ok
+                ? "Couldn't reach GitHub (network error/timeout)."
+                : (statusCode == 403 || statusCode == 429)
+                    ? "GitHub request failed (HTTP " + std::to_string(statusCode) + " -- rate limited? try again later)."
+                    : "GitHub request failed (HTTP " + std::to_string(statusCode) + ").";
+            SetLastCheckMessage(msg);
+            LogCritical(msg);
             storeFailure();
             s_checkStatus.store(ECheckStatus::Error);
             s_requestInFlight.store(false);
@@ -385,6 +399,9 @@ void StartUpdateCheck(const std::string& denoiserAddonDir, bool alsoLoadDiff)
         try { release = json::parse(body); }
         catch (...)
         {
+            std::string msg = "Couldn't parse GitHub's response (malformed JSON).";
+            SetLastCheckMessage(msg);
+            LogCritical(msg);
             storeFailure();
             s_checkStatus.store(ECheckStatus::Error);
             s_requestInFlight.store(false);
@@ -393,6 +410,9 @@ void StartUpdateCheck(const std::string& denoiserAddonDir, bool alsoLoadDiff)
 
         if (!release.contains("assets") || !release["assets"].is_array())
         {
+            std::string msg = "GitHub's response didn't contain a release asset list -- repo/release may have changed.";
+            SetLastCheckMessage(msg);
+            LogCritical(msg);
             storeFailure();
             s_checkStatus.store(ECheckStatus::Error);
             s_requestInFlight.store(false);
@@ -471,6 +491,7 @@ void StartUpdateCheck(const std::string& denoiserAddonDir, bool alsoLoadDiff)
             std::lock_guard<std::mutex> lock(s_mutex);
             s_sinInfo = std::move(results);
         }
+        SetLastCheckMessage(""); //. clear any stale error now that a check has succeeded
         s_checkStatus.store(ECheckStatus::Done);
         s_requestInFlight.store(false);
 
@@ -506,6 +527,12 @@ std::string GetLastApplyMessage()
 {
     std::lock_guard<std::mutex> lock(s_messageMutex);
     return s_lastApplyMessage;
+}
+
+std::string GetLastCheckMessage()
+{
+    std::lock_guard<std::mutex> lock(s_messageMutex);
+    return s_lastCheckMessage;
 }
 
 void StartLoadDiff(const std::string& denoiserAddonDir, const std::string& onlySinName)

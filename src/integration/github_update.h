@@ -232,6 +232,16 @@ EApplyStatus GetApplyStatus();
 std::string GetLastApplyMessage();
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// GetLastCheckMessage
+//--------------------------------------------------------------------------------
+// One-line human-readable reason the last StartUpdateCheck ended in
+// ECheckStatus::Error (e.g. "GitHub request failed (HTTP 403 -- rate
+// limited?)" or "couldn't parse GitHub's response"). Empty if the last
+// check succeeded, or if no check has run yet this session.
+//--------------------------------------------------------------------------------
+std::string GetLastCheckMessage();
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // CancelInFlightUpdateRequest
 //--------------------------------------------------------------------------------
 // Registered as a shutdown hook (see entry.cpp) so an addon

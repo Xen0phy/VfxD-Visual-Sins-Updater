@@ -77,7 +77,7 @@ Addon-owned HTTP behavior is implemented with Windows WinHTTP over HTTPS in two 
 
 | Endpoint | Auth | Purpose | Source |
 |---|---|---|---|
-| `GET https://api.github.com/repos/Xen0phy/VfxD_Visual_Sins/releases/latest` | None | Read latest release metadata for the Visual Sins JSON files | [`github_update.cpp:134-135,373-374`](src/integration/github_update.cpp#L373) |
+| `GET https://api.github.com/repos/Xen0phy/VfxD-Visual-Sins/releases/latest` | None | Read latest release metadata for the Visual Sins JSON files | [`github_update.cpp:134-135,373-374`](src/integration/github_update.cpp#L373) |
 | `GET <asset browser_download_url>` (redirects to a GitHub-owned asset host) | None | Downloads a specific sin's JSON content for diffing/installing, only on explicit user action | [`github_update.cpp:440,583,781`](src/integration/github_update.cpp#L583) |
 | `POST <XOR-obfuscated relay URL>` (Cloudflare Worker; not a fixed literal in this source tree — see above) | None (relay itself rate-limits/dedups) | Sends a user-composed effect report — one or more found/missing/misclassified effect GUIDs plus a required free-text note (GUIDs optional, note is not) — the Worker holds the real Discord webhook server-side and this addon never sees or sends a Discord URL directly | [`webhook_report.cpp:164-169,225,379`](src/integration/webhook_report.cpp#L379) |
 

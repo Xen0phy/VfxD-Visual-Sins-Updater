@@ -145,7 +145,13 @@ static void RenderSinActionRow()
         s_pendingActionSin.clear();
 
     if (checkStatus == ECheckStatus::Error)
-        ImGui::TextColored(ImVec4(0.9f, 0.4f, 0.4f, 1.0f), "Last check failed -- showing previous results, if any.");
+    {
+        std::string why = GetLastCheckMessage();
+        if (why.empty())
+            ImGui::TextColored(ImVec4(0.9f, 0.4f, 0.4f, 1.0f), "Last check failed -- showing previous results, if any.");
+        else
+            ImGui::TextColored(ImVec4(0.9f, 0.4f, 0.4f, 1.0f), "Last check failed: %s", why.c_str());
+    }
 
     std::vector<SinUpdateInfo> sinInfo = GetSinUpdateInfo();
     std::vector<SinDiffInfo>   diffs   = GetSinDiffInfo();
