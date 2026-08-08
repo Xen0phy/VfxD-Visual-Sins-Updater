@@ -347,10 +347,8 @@ bool StartSendReport(const std::string& reporterLine,
     }
 
     //_ Built here, on the calling thread -- cheap, keeps the background
-    // thread doing nothing but the network call, same split github_update.cpp
-    // uses. Shape matches vfxd-sins-report-relay/src/index.js: the Worker
-    // only ever treats guid as a dedup key and block/reporterLine/note as
-    // opaque text to assemble into the Discord message.
+    // thread doing nothing but the network call (same split github_update.cpp
+    // uses). Shape matches vfxd-sins-report-relay/src/index.js's Worker.
     json payload;
     payload["reporterLine"] = reporterLine;
     json jsonEntries = json::array();
@@ -402,10 +400,8 @@ bool StartSendReport(const std::string& reporterLine,
         if (ok && statusCode >= 200 && statusCode < 300)
         {
             //_ Per-entry, not all-or-nothing: "sent"/"omitted" list which
-            // submitted guids were actually forwarded vs. already known.
-            // "status" drives the wording/outcome directly rather than
-            // being re-derived from the counts, so it stays in sync with
-            // whatever the relay decided (see index.js's response doc).
+            // guids were forwarded vs. already known. "status" drives the
+            // wording directly, staying in sync with the relay (see index.js).
             std::string status = (parsedOk && parsed.contains("status") && parsed["status"].is_string())
                                       ? parsed["status"].get<std::string>()
                                       : "";

@@ -358,10 +358,9 @@ void StartUpdateCheck(const std::string& denoiserAddonDir, bool alsoLoadDiff)
                     {
                         info.installedPath    = instIt->second.fullPath;
                         info.installedVersion = instIt->second.version;
-                        //_ latestVersion stays -1 (unknown) -- UpToDate
-                        // here just means "installed, can't tell if
-                        // there's an update," falling through to the
-                        // non-actionable "Up to date" button.
+                        //_ latestVersion stays -1 (unknown) -- UpToDate here
+                        // just means "installed, can't tell if there's an
+                        // update," falling through to the non-actionable button.
                         info.state = ESinUpdateState::UpToDate;
                     }
                     else

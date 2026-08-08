@@ -47,9 +47,8 @@ static AddonAPI_t* s_api = nullptr;
 static std::atomic<bool> s_denoiserFound{false};
 
 //_ Set when the user clicks Install/Apply so the right column can say
-// Installing.../Applying... instead of a generic busy state;
-// StartInstallSin/StartApplyUpdate already serialize via
-// github_update.cpp's single in-flight guard, so at most one is pending.
+// Installing.../Applying... instead of a generic busy state -- at most
+// one is pending, per github_update.cpp's single in-flight guard.
 static std::string s_pendingActionSin;
 
 namespace {

@@ -16,7 +16,39 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <string>
 #include <vector>
+
+namespace {
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// GroupStripColor
+//--------------------------------------------------------------------------------
+// groupId < 0 (not currently part of a group, see live_log.h/.cpp) gets a
+// dim neutral gray; otherwise cycles through a small fixed palette.
+// Colors are reused once groupId wraps past the palette length -- fine,
+// since only groups visible in the list at the same time need to read as
+// distinct, and this is a per-row hint, not a rigorous unique-ID color.
+//--------------------------------------------------------------------------------
+ImVec4 GroupStripColor(int groupId)
+{
+    if (groupId < 0)
+        return ImVec4(0.35f, 0.35f, 0.38f, 1.0f);
+
+    static const ImVec4 kPalette[] = {
+        ImVec4(0.31f, 0.72f, 0.79f, 1.0f),
+        ImVec4(0.70f, 0.54f, 0.91f, 1.0f),
+        ImVec4(0.91f, 0.63f, 0.31f, 1.0f),
+        ImVec4(0.50f, 0.79f, 0.37f, 1.0f),
+        ImVec4(0.91f, 0.44f, 0.60f, 1.0f),
+        ImVec4(0.44f, 0.57f, 0.91f, 1.0f),
+        ImVec4(0.79f, 0.65f, 0.31f, 1.0f),
+        ImVec4(0.37f, 0.88f, 0.75f, 1.0f),
+    };
+    return kPalette[groupId % (sizeof(kPalette) / sizeof(kPalette[0]))];
+}
+
+} //. namespace
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // RenderLiveLogSection
@@ -108,12 +140,64 @@ void RenderLiveLogSection(AddonAPI_t* aApi, const std::string& denoiserAddonDir)
     for (const LiveLogEntry* entry : sorted)
     {
         ImGui::PushID(entry->guid_b64.c_str());
+
+        //_ Colored strip in the left margin, one segment per distinct group
+        // this guid recently belonged to (oldest left, newest right, capped
+        // at kLiveLogGroupHistoryCap). Never-grouped guid gets one dim-gray segment.
+        constexpr float kSegW   = 3.0f;
+        constexpr float kSegGap = 1.0f;
+        const auto&     history = entry->recentGroupIds;
+        int segCount = history.empty() ? 1 : static_cast<int>(history.size());
+        float stripWidth = segCount * kSegW + (segCount - 1) * kSegGap;
+
+        ImVec2 stripMin  = ImGui::GetCursorScreenPos();
+        float  rowHeight = ImGui::GetFrameHeight();
+        ImDrawList* drawList = ImGui::GetWindowDrawList();
+
+        if (history.empty())
+        {
+            drawList->AddRectFilled(
+                stripMin, ImVec2(stripMin.x + kSegW, stripMin.y + rowHeight),
+                ImGui::ColorConvertFloat4ToU32(GroupStripColor(-1)));
+        }
+        else
+        {
+            float x = stripMin.x;
+            for (int gid : history)
+            {
+                drawList->AddRectFilled(
+                    ImVec2(x, stripMin.y), ImVec2(x + kSegW, stripMin.y + rowHeight),
+                    ImGui::ColorConvertFloat4ToU32(GroupStripColor(gid)));
+                x += kSegW + kSegGap;
+            }
+        }
+
+        if (ImGui::IsMouseHoveringRect(stripMin, ImVec2(stripMin.x + stripWidth, stripMin.y + rowHeight)))
+        {
+            if (history.empty())
+            {
+                ImGui::SetTooltip("Not part of a group");
+            }
+            else
+            {
+                std::string tip = "Groups: ";
+                for (size_t i = 0; i < history.size(); ++i)
+                {
+                    if (i) tip += " -> ";
+                    tip += std::to_string(history[i]);
+                }
+                if (entry->groupId < 0)
+                    tip += " (currently ungrouped)";
+                ImGui::SetTooltip("%s", tip.c_str());
+            }
+        }
+
+        ImGui::Indent(stripWidth + 4.0f);
         bool open = ImGui::TreeNode(entry->displayName.c_str());
 
-        //_ Always offered, even when knownInSin -- dedup happens
-        // server-side (Cloudflare worker), and knownInSin only reflects
-        // *this* user's sin file, which may be stale or a fork missing
-        // an effect the original still has.
+        //_ Always offered, even when knownInSin -- dedup happens server-side
+        // (Cloudflare worker), and knownInSin only reflects this user's sin
+        // file, which may be stale or a fork missing an effect the original has.
         ImGui::SameLine();
         if (ImGui::SmallButton("report"))
             AddReportRowFromLiveLogEntry(*entry);
@@ -161,6 +245,7 @@ void RenderLiveLogSection(AddonAPI_t* aApi, const std::string& denoiserAddonDir)
 
             ImGui::TreePop();
         }
+        ImGui::Unindent(stripWidth + 4.0f);
         ImGui::PopID();
     }
 }

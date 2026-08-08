@@ -39,11 +39,9 @@ std::vector<InstalledSinFile> ScanInstalledSinFiles(const std::string& denoiserA
     if (!fs::exists(denoiserAddonDir, ec) || ec)
         return out;   //. not installed, nothing to find
 
-    //_ Matches "VfxD_Gluttony.json", "..._v3883.json" and "...-v3883.json"
-    // -- both separators are observed in the wild, so both are accepted.
-    // <Name> itself is any run of letters/digits, not a fixed list (see
-    // sin_files.h) -- this is what lets a hand-edited-only file like
-    // "VfxD_Greed.json" show up here too, with no version suffix at all.
+    //_ Matches "VfxD_<Name>[-v<N>|_v<N>].json" -- both separators are seen
+    // in the wild. <Name> is any letters/digits run, not a fixed list (see
+    // sin_files.h), so a hand-edited "VfxD_Greed.json" with no version matches too.
     static const std::regex kVfxdPattern(R"(^VfxD_([A-Za-z0-9]+)(?:[-_]v(\d+))?\.json$)");
 
     for (const auto& entry : fs::directory_iterator(denoiserAddonDir, ec))
@@ -71,12 +69,9 @@ std::vector<InstalledSinFile> ScanInstalledSinFiles(const std::string& denoiserA
         }
         else
         {
-            //_ Anything else only counts as an installed sin if its
-            // content says so: a top-level "version" key, the same
-            // shape VfxD itself writes -- the numbers inside it are
-            // never checked (see sin_files.h). This is what lets an
-            // arbitrarily-named file be edited/backed up/live-logged
-            // right alongside the classic VfxD_<Name> ones.
+            //_ Anything else only counts if its content says so -- a
+            // top-level "version" key, same shape VfxD writes (numbers
+            // never checked, see sin_files.h) -- so any arbitrarily-named file matches too.
             std::ifstream in(path, std::ios::binary);
             if (!in) continue;
 

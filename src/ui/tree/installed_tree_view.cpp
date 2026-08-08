@@ -119,13 +119,9 @@ void RenderGuidList(const char* label, const std::vector<std::string>& guids, co
             ImGui::PushID(static_cast<int>(i));
             ImGui::BulletText("%s", guids[i].c_str());
 
-            //_ BulletText isn't an interactive widget -- it never registers an
-            // ImGui ID, so BeginDragDropSource needs ImGuiDragDropFlags_SourceAllowNullID
-            // to accept it as a source. Without this flag, ImGui hits an assert
-            // (IM_ASSERT(0) in BeginDragDropSource) any time this runs while the
-            // mouse button is down and the last item has no ID -- which includes
-            // the very first frame a node opens, since clicking the tree arrow
-            // toggles it open on mouse-DOWN, not mouse-up.
+            //_ BulletText registers no ImGui ID, so BeginDragDropSource needs
+            // ImGuiDragDropFlags_SourceAllowNullID or it asserts -- including on a
+            // node's very first open frame, since the tree arrow toggles on mouse-DOWN.
             if (dragAllowed && ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
             {
                 BeginGuidDrag(dragContext->sinName, dragContext->path, dragContext->index,
@@ -450,18 +446,16 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
         ImGui::PopID();
     }
 
-    //_ Drop target for an effect dragged from elsewhere in this sin file --
-    // attaches to the row itself, so it accepts a drop whether open or
-    // collapsed. Not offered on a "__vfxd_virtual" overlay category, same
-    // reason as Rename: nothing real on disk yet to move into.
+    //_ Drop target for an effect dragged elsewhere in this sin file --
+    // attaches to the row itself, so it works open or collapsed. Not offered
+    // on a "__vfxd_virtual" overlay category (same reason as Rename: nothing on disk yet).
     if (!categoryVirtual && ImGui::BeginDragDropTarget())
     {
         if (ImGui::AcceptDragDropPayload("VFXD_EFFECT"))
         {
-            //_ Real payload lives in GetEffectDragPayload(), not the drop
-            // bytes (see EffectDragPayload). Guard the sin match since only
-            // same-sin moves are offered; skip if already last in this
-            // category to avoid a pointless no-op rewrite+.bak.
+            //_ Real payload lives in GetEffectDragPayload(), not the drop bytes
+            // (see EffectDragPayload). Guard the sin match (same-sin moves only);
+            // skip if already last in this category to avoid a pointless no-op rewrite+.bak.
             const EffectDragPayload& dragPayload = GetEffectDragPayload();
             bool sameCategory = dragPayload.originalPath == pathSoFar;
             bool alreadyLast  = sameCategory && category.contains("effects") && category["effects"].is_array() &&
@@ -482,10 +476,9 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
 
         if (ImGui::AcceptDragDropPayload("VFXD_CATEGORY"))
         {
-            //_ Reorder-only (see file header): dropped here means "append
-            // to my children" if I'm the dragged category's parent, or
-            // "insert above me" if we share a parent; a different parent
-            // entirely would be reparenting, so it's silently ignored.
+            //_ Reorder-only (see file header): dropped here means "append to
+            // my children" if I'm the dragged category's parent, or "insert
+            // above me" if we share a parent; a different parent would be reparenting -- ignored.
             if (GetCategoryDragSinName() == sinName && !GetCategoryDragPath().empty())
             {
                 const std::vector<int>& dragPath = GetCategoryDragPath();
@@ -537,9 +530,8 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
     }
 
     //_ Rendered after the context menu above so they don't steal "last
-    // item" from the TreeNode. Delete stays disabled while this category
-    // has any content -- never silently deletes it. "+" only shows once
-    // open, since it adds something *inside* what's being looked at.
+    // item" from the TreeNode. Delete stays disabled while the category has
+    // content; "+" only shows once open, since it adds *inside* what's shown.
     if (!categoryVirtual)
     {
         bool categoryEmpty = (!category.contains("effects") || category["effects"].empty()) &&
@@ -623,10 +615,9 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                 ImGui::PushID(effIndex);
 
                 std::string effName = effect.value("name", std::string("(unnamed effect)"));
-                //_ Identity is (sinName, path, index) -- NOT name. Siblings
-                // can share a name (VfxDenoiser doesn't require uniqueness);
-                // matching by name would make every same-named sibling
-                // think it was the one being edited.
+                //_ Identity is (sinName, path, index) -- NOT name. Siblings can
+                // share a name (VfxDenoiser doesn't require uniqueness); matching
+                // by name would make every same-named sibling think it was the one being edited.
                 bool isEditingThis = IsEffectBeingEdited(sinName, pathSoFar, effIndex);
                 bool isDeletingThisEffect = IsDeletingThisEffect(sinName, pathSoFar, effIndex);
 
@@ -668,18 +659,15 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                     ImGui::PopStyleVar();
 
                 //_ Places a dragged effect immediately above this row --
-                // complements the category-row target above so together
-                // they reach every position. Not offered on an overlay-only
-                // effect (__vfxd_new/__vfxd_rework): no stable real on-disk
-                // position while only previewed.
+                // complements the category-row target above so together they
+                // reach every position. Not offered on an overlay-only effect: no stable position while previewed.
                 if (!effIsNew && !effIsRework && ImGui::BeginDragDropTarget())
                 {
                     if (ImGui::AcceptDragDropPayload("VFXD_EFFECT"))
                     {
-                        //_ Same same-sin guard as the category target, plus
-                        // two no-op cases: dropped on itself, or on the
-                        // effect right after it (post-erase-shift, that
-                        // would land it back where it started).
+                        //_ Same same-sin guard as the category target, plus two
+                        // no-op cases: dropped on itself, or on the effect right
+                        // after it (post-erase-shift, that would land it back where it started).
                         const EffectDragPayload& dragPayload = GetEffectDragPayload();
                         bool sameCategory = dragPayload.originalPath == pathSoFar;
                         bool noOp = sameCategory && (dragPayload.originalIndex == effIndex ||
@@ -733,10 +721,9 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                     ImGui::EndDragDropSource();
                 }
 
-                //_ Only offered when no edit is in flight anywhere, and
-                // never on an overlay-only effect -- nothing at
-                // pathSoFar/effIndex in the real file is guaranteed to be
-                // this same effect until the update is applied.
+                //_ Only offered when no edit is in flight anywhere, and never
+                // on an overlay-only effect -- nothing at pathSoFar/effIndex in
+                // the real file is guaranteed to be this same effect until applied.
                 if (!effIsNew && !effIsRework && !AnyEditInFlight() && ImGui::BeginPopupContextItem("effect_ctx"))
                 {
                     if (ImGui::MenuItem("Edit"))
@@ -796,10 +783,9 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                             }
                             else if (effIsConflict)
                             {
-                                //_ A GUID this effect absorbed used to
-                                // belong to another effect surviving under
-                                // its own separate update -- still worth a
-                                // second look even though nothing's lost.
+                                //_ A GUID this effect absorbed used to belong to
+                                // another effect surviving under its own separate
+                                // update -- still worth a second look even though nothing's lost.
                                 ImGui::TextColored(kDuplicateColor,
                                     "This effect absorbed a GUID from another effect with different settings -- shown below, review before applying.");
                             }
@@ -923,10 +909,9 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
     }
     else
     {
-        //_ Collapsed -- nothing inside (rename UI, create prompt, effect
-        // editor) is drawn this frame, so cancel rather than let it run
-        // invisibly. DeleteConfirmState is deliberately excluded -- its
-        // row sits outside the collapsible content (see its own comment).
+        //_ Collapsed -- nothing inside (rename UI, create prompt, effect editor)
+        // is drawn this frame, so cancel rather than let it run invisibly.
+        // DeleteConfirmState is excluded -- its row sits outside this content.
         if (IsCategoryRenameUnderPath(sinName, pathSoFar))
             CancelCategoryEdit();
         if (IsEffectEditUnderPath(sinName, pathSoFar))
@@ -1043,10 +1028,9 @@ void RenderInstalledEffects(const std::string& denoiserAddonDir)
         auto        dupIt    = duplicateGuidsBySin.find(sin.sinName);
         bool        hasDupes = dupIt != duplicateGuidsBySin.end() && !dupIt->second.empty();
 
-        //_ Duplicate-guid tagging first (a property of the file itself),
-        // then the pending-update diff on the same copy -- both can
-        // coexist on one node; RenderCategoryTree picks red over
-        // orange/green. Only ever a copy -- see OverlayCacheEntry.
+        //_ Duplicate-guid tagging first (a property of the file itself), then
+        // the pending-update diff on the same copy -- both can coexist; RenderCategoryTree
+        // picks red over orange/green. Only ever a copy -- see OverlayCacheEntry.
         const nlohmann::ordered_json* fileToRender = installedFile;
 
         if (hasDupes || hasOverlay)

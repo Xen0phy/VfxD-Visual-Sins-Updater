@@ -27,9 +27,8 @@ std::vector<BackupInfo> ScanBackups(const std::string& denoiserAddonDir)
         return out;   //. not installed, nothing to find
 
     //_ Same sin-name/separator pattern as ScanInstalledSinFiles (any
-    // <Name>, not a fixed list -- see sin_files.h), plus a trailing
-    // ".bak" -- bare unsuffixed backups match too; version isn't tracked
-    // here since a backup is only ever restored to its own path.
+    // <Name>, not a fixed list -- see sin_files.h), plus a trailing ".bak".
+    // Version isn't tracked -- a backup is only ever restored to its own path.
     static const std::regex kVfxdPattern(R"(^VfxD_([A-Za-z0-9]+)(?:[-_]v\d+)?\.json\.bak$)");
 
     for (const auto& entry : fs::directory_iterator(denoiserAddonDir, ec))
@@ -49,11 +48,9 @@ std::vector<BackupInfo> ScanBackups(const std::string& denoiserAddonDir)
         }
         else
         {
-            //_ Not VfxD_<Name>-named -- fall back to the same
-            // name/version split ScanInstalledSinFiles uses for its own
-            // content-matched files, so a backup's sinName always lines
-            // up with the live file it belongs to. Version itself is
-            // discarded here, same as the VfxD_<Name> branch above.
+            //_ Not VfxD_<Name>-named -- fall back to the same name/version
+            // split ScanInstalledSinFiles uses for content-matched files, so
+            // sinName lines up with the live file it belongs to (version discarded).
             std::string outName;
             int         outVersion;
             ExtractNameAndVersion(fileName.substr(0, fileName.size() - 9), outName, outVersion);

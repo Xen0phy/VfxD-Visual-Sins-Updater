@@ -14,15 +14,17 @@
 #include <string>
 #include <vector>
 
-//_ Only the sins with a matching GitHub release asset -- consumed by
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// kSinNames / kSinCount
+//--------------------------------------------------------------------------------
+// Only the sins with a matching GitHub release asset -- consumed by
 // github_update.cpp's per-release check loop and addon.cpp's install/
-// check/apply action row. Kept deliberately separate from whatever
-// ScanInstalledSinFiles finds on disk: a hand-edited-only file (no
-// version suffix, nothing to check upstream) is a perfectly normal
-// installed sin that simply never appears in those two update-only
-// places. Must be kept in sync with github_update.cpp's asset-name
-// matching, but NOT with ScanInstalledSinFiles, which no longer
-// hardcodes this list -- see its own comment.
+// check/apply action row. Deliberately separate from whatever
+// ScanInstalledSinFiles finds on disk: a hand-edited-only file is a
+// perfectly normal installed sin that just never appears here. Keep in
+// sync with github_update.cpp's asset-name matching, NOT with
+// ScanInstalledSinFiles, which no longer hardcodes this list.
+//--------------------------------------------------------------------------------
 inline const char* const kSinNames[] = { "Gluttony", "Pride", "Sloth" };
 inline constexpr int kSinCount = 3;
 

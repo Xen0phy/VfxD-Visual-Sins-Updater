@@ -800,8 +800,7 @@ void ApplyPendingEdit()
 
     //_ Indexed-by-path-and-index lookup, not a name search -- sibling
     // effects can share a name. originalIndex can't have shifted since
-    // BeginEdit time: no other mutation of this array is allowed while
-    // an edit is in flight.
+    // BeginEdit time (no other mutation of this array is allowed mid-edit).
     std::string findError;
     nlohmann::ordered_json* effect = FindEffectByPath(root, job.originalPath, job.originalIndex,
                                                         job.originalName, job.originalName, &findError);
@@ -1006,11 +1005,9 @@ void ApplyPendingDelete()
     }
     else
     {
-        //_ Indexed-by-path-and-index lookup, not a name search -- same
-        // reasoning as ApplyPendingEdit/ApplyPendingMove. Once found,
-        // re-resolve the category to get an erasable iterator --
-        // guaranteed to still succeed, FindEffectByPath just verified
-        // path/index/name are all still valid.
+        //_ Same indexed-by-path-and-index lookup as ApplyPendingEdit. Once
+        // found, re-resolve the category for an erasable iterator --
+        // guaranteed to succeed since FindEffectByPath just verified path/index/name.
         std::string findError;
         if (!FindEffectByPath(root, job.path, job.index, job.name, job.name, &findError))
         {
@@ -1071,10 +1068,9 @@ void ApplyPendingMove()
     }
     nlohmann::ordered_json& root = *rootPtr;
 
-    //_ Indexed-by-path-and-index lookup -- same reasoning as
-    // ApplyPendingEdit: sibling effects can share a name. Once found,
-    // re-resolve the category to get an erasable iterator -- guaranteed
-    // to still succeed, FindEffectByPath just verified path/index/name.
+    //_ Same indexed-by-path-and-index lookup as ApplyPendingEdit. Once
+    // found, re-resolve the category for an erasable iterator --
+    // guaranteed to succeed since FindEffectByPath just verified path/index/name.
     std::string findError;
     if (!FindEffectByPath(root, job.originalPath, job.originalIndex, job.effectName, job.effectName, &findError))
     {

@@ -36,6 +36,87 @@ std::unordered_map<std::string, LiveLogEntry> s_entries;        //. guid_b64 -> 
 std::unordered_map<std::string, std::string>  s_guidToName;     //. name map from addon.cpp
 std::unordered_map<std::string, std::string>  s_guidToBehavior; //. behavior map from addon.cpp
 
+//_ Running "is a group currently open" state for AdvanceGroupState below.
+// Lives at module scope, not per-entry, since grouping is a property of
+// arrival order -- a single guid can drift through several groups.
+int          s_nextGroupId            = 0;
+int          s_currentGroupId         = -1;
+int          s_currentGroupDuration   = 0;
+unsigned int s_currentGroupA4         = 0;
+int          s_currentGroupStarterType = -1;   //. which of {1, 11} opened the active group
+
+//_ signature -> groupId, for content-addressed group identity (see
+// AdvanceGroupState below). Session-lifetime; cleared in LiveLog_Clear.
+std::unordered_map<std::string, int> s_groupSignatureToId;
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// MakeGroupSignature
+//--------------------------------------------------------------------------------
+// Builds the s_groupSignatureToId key for a starter line: two starters
+// with the same guid/duration/a4 collapse onto the same groupId, no
+// matter how far apart in time or how many unrelated groups sit between
+// them (see AdvanceGroupState).
+//--------------------------------------------------------------------------------
+std::string MakeGroupSignature(const std::string& starterGuid, int duration, unsigned int a4)
+{
+    return starterGuid + "|" + std::to_string(duration) + "|" + std::to_string(a4);
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// AdvanceGroupState
+//--------------------------------------------------------------------------------
+// Called unconditionally on every parsed line, before IngestLogLine's own
+// type/hideKnown filters -- a dropped *continuation* line must not break
+// group state, but a dropped *starter* type must still block grouping
+// entirely (see below).
+//
+// type:1 / type:11 opens a group, unless that starter type is itself
+// toggled off in s_typeEnabled -- then nothing opens, and any group in
+// progress closes immediately. The id is looked up by (starterGuid,
+// duration, a4) signature (see MakeGroupSignature), not freshly minted,
+// so a recurrence of the same starter effect/numbers reuses the same
+// groupId no matter how long ago it last showed up.
+//
+// A non-starter line joins the open group only if its duration and a4
+// match the starter's exactly; anything else -- including a toggled-off
+// type -- closes the group outright (strict contiguity: no gap of
+// non-matching lines survives mid-group) and returns -1 (ungrouped).
+//--------------------------------------------------------------------------------
+int AdvanceGroupState(const std::string& starterGuid, int type, int duration, unsigned int a4)
+{
+    if (type == 1 || type == 11)
+    {
+        if (!s_typeEnabled[type])
+        {
+            s_currentGroupId = -1;   //. starter filtered off: nothing opens, and anything open closes
+            return -1;
+        }
+
+        std::string sig = MakeGroupSignature(starterGuid, duration, a4);
+        auto it = s_groupSignatureToId.find(sig);
+        s_currentGroupId = (it != s_groupSignatureToId.end())
+            ? it->second
+            : (s_groupSignatureToId[sig] = s_nextGroupId++);
+
+        s_currentGroupDuration    = duration;
+        s_currentGroupA4          = a4;
+        s_currentGroupStarterType = type;
+        return s_currentGroupId;
+    }
+
+    if (s_currentGroupId >= 0
+        && s_typeEnabled[s_currentGroupStarterType]   //. group's own starter type must still be on
+        && duration == s_currentGroupDuration
+        && a4 == s_currentGroupA4)
+        return s_currentGroupId;
+
+    //_ Closes whatever group was open, not just this line -- (duration,
+    // a4) pairs get reused by unrelated effects, so without this,
+    // unrelated lines could silently keep joining on shared numbers.
+    s_currentGroupId = -1;
+    return -1;
+}
+
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // ParseInfoFields
 //--------------------------------------------------------------------------------
@@ -50,13 +131,9 @@ std::unordered_map<std::string, std::string>  s_guidToBehavior; //. behavior map
 //--------------------------------------------------------------------------------
 void ParseInfoFields(const std::string& info, LiveLogEntry& e)
 {
-    //_ Overrides LiveLogEntry's own default (0, a real, filterable type) --
-    // -1 is never a genuine infostr value, so a "type:" that's missing or
-    // fails to parse below falls through IngestLogLine's
-    // "parsed.type >= 0 && parsed.type < kLiveLogTypeCount" bounds check
-    // exactly like an out-of-table type >=12 already does (shown,
-    // unfiltered), rather than silently aliasing to type 0 -- which starts
-    // disabled and would otherwise vanish the entry without a trace.
+    //_ Overrides the default 0 -- a missing/failed "type:" parse should
+    // fail IngestLogLine's bounds check and show unfiltered, not silently
+    // alias to type 0 (disabled) and vanish the entry without a trace.
     e.type = -1;
 
     size_t pos = info.find("type:");   //. skip the leading effectDef name
@@ -109,6 +186,11 @@ void IngestLogLine(const std::string& guid_b64, const std::string& info)
     LiveLogEntry parsed{};
     ParseInfoFields(info, parsed);
 
+    //_ Always runs, even for a line about to be dropped below -- group
+    // state must stay continuous regardless of per-type display filters
+    // (see AdvanceGroupState).
+    int groupId = AdvanceGroupState(guid_b64, parsed.type, parsed.duration, parsed.a4);
+
     if (parsed.type >= 0 && parsed.type < kLiveLogTypeCount && !s_typeEnabled[parsed.type])
         return;   //. type toggled off
 
@@ -132,6 +214,18 @@ void IngestLogLine(const std::string& guid_b64, const std::string& info)
     entry.caster   = parsed.caster;
     entry.a6       = parsed.a6;
     entry.target   = parsed.target;
+    entry.groupId  = groupId;   //. "latest wins", same as type/duration/a4 above
+
+    //_ Append only when the group actually differs from the last one
+    // recorded -- same-group repeats don't grow this, and an ungrouped
+    // event neither appends nor clears history (groupId == -1).
+    if (groupId >= 0 && (entry.recentGroupIds.empty() || entry.recentGroupIds.back() != groupId))
+    {
+        entry.recentGroupIds.push_back(groupId);
+        if (entry.recentGroupIds.size() > kLiveLogGroupHistoryCap)
+            entry.recentGroupIds.erase(entry.recentGroupIds.begin());
+    }
+
     entry.seenCount++;
 
     //_ Written only when this event's caster or target is "self" (exact
@@ -247,4 +341,14 @@ void LiveLog_Clear()
 {
     s_entries.clear();
     s_nextSeq = 0;
+
+    //_ So a cleared log's next group starts at 0 with no stale "currently
+    // open group" or stale signatures carried over from before the clear
+    // (see s_groupSignatureToId).
+    s_nextGroupId            = 0;
+    s_currentGroupId         = -1;
+    s_currentGroupDuration   = 0;
+    s_currentGroupA4         = 0;
+    s_currentGroupStarterType = -1;
+    s_groupSignatureToId.clear();
 }

@@ -96,11 +96,9 @@ static char                       s_reportNoteBuf[1024] = {};
 //_ Validation error shown until the next attempt, cleared on success.
 static std::string                s_reportFormError;
 
-//_ Set true right after a successful StartSendReport call, false once
-// this file has reacted to that send's Done/Error result exactly once --
-// see the comment where it's consumed in RenderReportSection for why a
-// one-shot flag is needed (GetReportStatus() keeps returning Done for
-// many frames after the fact).
+//_ Set true right after a successful StartSendReport, false once this
+// file has reacted to that send's Done/Error result exactly once (see
+// the consuming comment in RenderReportSection for why a one-shot flag is needed).
 static bool                       s_reportAwaitingResult = false;
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -366,10 +364,8 @@ void RenderReportSection(const std::string& denoiserAddonDir)
     bool sending = (reportStatus == EReportStatus::Sending);
 
     //_ React to a just-finished send exactly once (not every frame Done
-    // stays true): only a genuinely full send clears the form. A
-    // partial/none-sent result -- or an outright error -- leaves the rows
-    // and note in place, since the person may want to see which guid was
-    // the duplicate or resend after fixing something.
+    // stays true): only a full send clears the form. Partial/none-sent or
+    // error leaves rows/note in place, so the person can see what happened.
     if (s_reportAwaitingResult && reportStatus != EReportStatus::Sending)
     {
         if (reportStatus == EReportStatus::Done && GetLastReportOutcome() == EReportOutcome::AllSent)
@@ -576,11 +572,9 @@ void RenderReportSection(const std::string& denoiserAddonDir)
             }
             else
             {
-                //_ Use whatever's actually in the boxes now -- may be the
-                // auto-filled value untouched, edited, or (if auto-fill
-                // had nothing to offer) typed from scratch. Backtick-wrapped
-                // so each name renders as its own inline code span in
-                // Discord, same treatment as every guid in ComposeReportGuidBlock.
+                //_ Use whatever's actually in the boxes now -- auto-filled,
+                // edited, or typed from scratch. Backtick-wrapped so each name
+                // renders as its own code span, same as guids in ComposeReportGuidBlock.
                 std::string acct = TrimReportText(s_reportAccountNameBuf);
                 std::string chr  = TrimReportText(s_reportCharacterNameBuf);
                 if (acct.empty()) acct = "(unknown)";
@@ -607,13 +601,9 @@ void RenderReportSection(const std::string& denoiserAddonDir)
     std::string lastMsg = GetLastReportMessage();
     if (!lastMsg.empty())
     {
-        //_ Color follows the outcome, not just success/failure: a full
-        // send reads as good news (green, same as a brand-new effect in
-        // the installed-tree overlay), a partial send as worth a second
-        // look (orange, same as a rework), and both an outright error and
-        // an all-already-known "none sent" result as red -- reusing
-        // ui_colors.h's existing new/rework/duplicate palette rather than
-        // introducing report-specific colors.
+        //_ Color follows outcome, not just success/failure: full send is
+        // green (new-effect), partial is orange (rework), error/none-sent
+        // is red -- reusing ui_colors.h's new/rework/duplicate palette.
         const ImVec4* color = nullptr;
         if (reportStatus == EReportStatus::Error)
         {

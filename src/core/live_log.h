@@ -19,11 +19,17 @@
 
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 //_ Number of distinct infostr "type:" values seen so far (0-11 inclusive)
 // -- not necessarily exhaustive; see LiveLog_GetTypeEnabled's fail-open
 // behavior below.
 inline constexpr int kLiveLogTypeCount = 12;
+
+//_ Cap on LiveLogEntry::recentGroupIds -- a guid that keeps drifting
+// through new groups only needs to show "this has happened more than
+// once, recently", not a full unbounded history.
+inline constexpr size_t kLiveLogGroupHistoryCap = 3;
 
 //********************************************************************************
 // LiveLogEntry
@@ -38,6 +44,10 @@ inline constexpr int kLiveLogTypeCount = 12;
 // installedBehavior     this user's own configured behavior for this guid
 // firstSeenSeq          assigned once, on this guid's first sighting
 // seenCount             number of events folded into this entry
+// groupId                which type:1/11 group this guid belongs to, -1
+//                        if none; content-addressed, see AdvanceGroupState.
+// recentGroupIds         distinct groups this guid has belonged to
+//                        recently, oldest first, capped at kLiveLogGroupHistoryCap.
 // mapID / race / profession / specialization   self-only, see below
 // hasSelfContext        true once this guid has ever had a self-event
 //--------------------------------------------------------------------------------
@@ -73,6 +83,9 @@ struct LiveLogEntry
 
     int firstSeenSeq = 0;
     int seenCount = 0;
+
+    int groupId = -1;   //. -1 = not currently part of a group; see live_log.cpp AdvanceGroupState
+    std::vector<int> recentGroupIds;   //. see comment above
 
     unsigned int        mapID          = 0;
     Mumble::ERace        race{};
