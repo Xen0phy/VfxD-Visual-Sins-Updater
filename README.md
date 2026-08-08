@@ -56,7 +56,7 @@ If you hit a bug, please open an issue rather than working around it silently â€
 ## Requirements
 
 - Guild Wars 2 with [Nexus](https://raidcore.gg/Nexus) installed
-- [HasKha's VfxDenoiser](https://github.com/HasKha/VfxDenoiser) installed and set up (**required**, see above)
+- [HasKha's VfxDenoiser](https://github.com/HasKha/VfxDenoiserReleases) installed and set up (**required**, see above)
 
 ## Installation
 
