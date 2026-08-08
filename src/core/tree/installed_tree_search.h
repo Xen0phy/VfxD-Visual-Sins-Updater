@@ -90,22 +90,20 @@ bool CategoryHasDescendantMatch(const nlohmann::ordered_json& category, const st
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // SilentlyCloseSubtree / SilentlyCloseChildren
 //--------------------------------------------------------------------------------
-// A category/effect's forced-open state only ever gets set on the one
-// frame the query changes, for whatever RenderCategoryTree actually visits
-// that frame -- but a collapsed (or search-hidden) category's own children
-// are never visited at all, so a category that gets force-CLOSED on a
-// query-change frame leaves whatever is underneath it exactly as it was.
-// A grandchild force-opened by an *earlier* query stays "open" in ImGui's
-// per-ID memory though invisible, and reappears already expanded the next
-// time its ancestor opens, looking like ImGui "forgot" to close it.
+// A category/effect's forced-open state only gets set on the frame the
+// query changes, for whatever RenderCategoryTree actually visits that
+// frame -- a collapsed or search-hidden category's children are never
+// visited, so force-CLOSING it leaves what's underneath untouched. A
+// grandchild force-opened by an earlier query stays "open" in ImGui's
+// per-ID memory though invisible, reappearing already expanded the next
+// time its ancestor opens.
 //
 // These two functions fix that by walking the JSON tree directly (nothing
-// is actually drawn) and writing "closed" into ImGui's per-ID storage for
-// every node underneath, using the exact ID scheme the real render pass
-// uses (PushID(index) for siblings, GetID(name)/GetID("effect") for a
-// category/effect). Only worth calling on the frame the query actually
-// changed -- see addon.cpp's s_treeSearchQueryChanged comment for why
-// redoing this every frame would reintroduce the stall already fixed here.
+// drawn) and writing "closed" into ImGui's per-ID storage for every node
+// underneath, using the render pass's own ID scheme (PushID(index) for
+// siblings, GetID(name)/GetID("effect") for a category/effect). Only
+// worth calling on the frame the query changed -- see addon.cpp's
+// s_treeSearchQueryChanged comment for why.
 //--------------------------------------------------------------------------------
 void SilentlyCloseSubtree(const nlohmann::ordered_json& category);
 void SilentlyCloseChildren(const nlohmann::ordered_json& category);

@@ -587,7 +587,7 @@ void StripConflictingMergedAwayGuids(MergePlan& plan)
     }
 }
 
-} // namespace
+} //. namespace
 
 MergePlan ResolveMergePlan(const json& oldFile, const json& newFile, bool& outOk)
 {
@@ -650,7 +650,7 @@ void ApplyMergePlan(json& oldFile, const MergePlan& plan)
     }
 
     std::unordered_set<const json*> toRemove;
-    std::vector<std::pair<json, std::vector<std::string>>> pendingMoves; // (post-update snapshot, target category path)
+    std::vector<std::pair<json, std::vector<std::string>>> pendingMoves; //. (post-update snapshot, target category path)
 
     for (const auto& rw : plan.reworks)
     {

@@ -118,16 +118,20 @@ bool PrepareAllStatements(std::string& outError)
         "INSERT OR IGNORE INTO effects (guid_b64, name, block_group, block_member, type, category_path) "
         "VALUES (?1, ?2, ?3, ?4, ?5, '')";
 
-    //_ Upsert -- race is no longer part of the UNIQUE key (see effect_db.h), so
-    // a repeat ORs its bit into the existing row. WHERE keeps an already-seen
-    // race a true no-op write, not just a no-op value.
+    //_ Upsert -- race and specialization are no longer part of the UNIQUE
+    // key (see effect_db.h), so a repeat ORs their bits into the existing
+    // row's masks. WHERE keeps an already-covered repeat a true no-op write.
     static const char* kInsertOccurrence =
         "INSERT INTO occurrences "
-        "(guid_b64, duration, a4, a6, self_mask, profession, race_mask, specialization) "
+        "(guid_b64, duration, a4, a6, self_mask, race_mask, specialization_mask_lo, specialization_mask_hi) "
         "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) "
-        "ON CONFLICT(guid_b64, duration, a4, a6, self_mask, profession, specialization) "
-        "DO UPDATE SET race_mask = race_mask | excluded.race_mask "
-        "WHERE (race_mask & excluded.race_mask) != excluded.race_mask";
+        "ON CONFLICT(guid_b64, duration, a4, a6, self_mask) "
+        "DO UPDATE SET race_mask = race_mask | excluded.race_mask, "
+        "specialization_mask_lo = specialization_mask_lo | excluded.specialization_mask_lo, "
+        "specialization_mask_hi = specialization_mask_hi | excluded.specialization_mask_hi "
+        "WHERE (race_mask & excluded.race_mask) != excluded.race_mask "
+        "   OR (specialization_mask_lo & excluded.specialization_mask_lo) != excluded.specialization_mask_lo "
+        "   OR (specialization_mask_hi & excluded.specialization_mask_hi) != excluded.specialization_mask_hi";
 
     static const char* kInsertGroupMember =
         "INSERT OR IGNORE INTO group_members (starter_guid_b64, duration, a4, member_guid_b64) "
@@ -140,19 +144,19 @@ bool PrepareAllStatements(std::string& outError)
         "SELECT 1 FROM effects WHERE guid_b64 = ?1 LIMIT 1";
 
     static const char* kSelectOccurrence =
-        "SELECT duration, a4, a6, self_mask, profession, race_mask, specialization "
+        "SELECT duration, a4, a6, self_mask, race_mask, specialization_mask_lo, specialization_mask_hi "
         "FROM occurrences WHERE guid_b64 = ?1";
 
     //_ Ordered by (duration, a4, member) rather than left to sqlite's
-    //. natural row order -- callers rely on this for stable, deterministic
-    //. iteration (see the header's doc comment on both functions).
+    // natural row order -- callers rely on this for stable, deterministic
+    // iteration (see the header's doc comment on both functions).
     static const char* kSelectGroupsStarted =
         "SELECT duration, a4, member_guid_b64 FROM group_members "
         "WHERE starter_guid_b64 = ?1 ORDER BY duration, a4, member_guid_b64";
 
     //_ starter_guid_b64 != member_guid_b64: excludes this guid's own
-    //. starter row, which GetGroupsStarted already covers -- see that
-    //. function's own doc comment in the header.
+    // starter row, which GetGroupsStarted already covers -- see that
+    // function's own doc comment in the header.
     static const char* kSelectGroupsMemberOf =
         "SELECT starter_guid_b64, duration, a4 FROM group_members "
         "WHERE member_guid_b64 = ?1 AND starter_guid_b64 != ?1 "
@@ -207,15 +211,15 @@ bool CreateSchemaIfNeeded(std::string& outError)
         "  category_path TEXT NOT NULL DEFAULT ''"
         ");"
         "CREATE TABLE IF NOT EXISTS occurrences ("
-        "  guid_b64       TEXT NOT NULL REFERENCES effects(guid_b64),"
-        "  duration       INTEGER NOT NULL,"
-        "  a4             INTEGER NOT NULL,"
-        "  a6             TEXT NOT NULL,"
-        "  self_mask      INTEGER NOT NULL,"
-        "  profession     INTEGER NOT NULL,"
-        "  race_mask      INTEGER NOT NULL,"
-        "  specialization INTEGER NOT NULL,"
-        "  UNIQUE(guid_b64, duration, a4, a6, self_mask, profession, specialization)"
+        "  guid_b64                 TEXT NOT NULL REFERENCES effects(guid_b64),"
+        "  duration                 INTEGER NOT NULL,"
+        "  a4                       INTEGER NOT NULL,"
+        "  a6                       TEXT NOT NULL,"
+        "  self_mask                INTEGER NOT NULL,"
+        "  race_mask                INTEGER NOT NULL,"
+        "  specialization_mask_lo   INTEGER NOT NULL,"
+        "  specialization_mask_hi   INTEGER NOT NULL,"
+        "  UNIQUE(guid_b64, duration, a4, a6, self_mask)"
         ");"
         "CREATE INDEX IF NOT EXISTS idx_occurrences_guid ON occurrences(guid_b64);"
         "CREATE TABLE IF NOT EXISTS group_members ("
@@ -241,24 +245,19 @@ bool CreateSchemaIfNeeded(std::string& outError)
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // ConfigurePragmas
 //--------------------------------------------------------------------------------
-// The actual fix for the per-capture stutter (a different bug than the tree-
-// rebuild stutter documented in EFFECT_DB_HANDOFF.md, and unrelated to it --
-// that fix is still in place and should stay in place). SQLite's defaults are
-// journal_mode=DELETE + synchronous=FULL, which means every autocommitted
-// INSERT does a blocking fsync() (plus a journal file create/delete) before
-// returning. EffectDb_RecordEvent runs on the render/update thread by this
-// module's own contract (see file header), and used to issue two such
-// autocommits per captured line (one for `effects`, one for `occurrences`) --
-// two synchronous disk syncs on the render thread per event, which is exactly
-// what a "stuck for a short moment" hitch during live capture looks like.
+// SQLite's defaults are journal_mode=DELETE + synchronous=FULL, which means
+// every autocommitted INSERT does a blocking fsync() (plus a journal file
+// create/delete) before returning. EffectDb_RecordEvent runs on the
+// render/update thread (see file header) and issues two such autocommits per
+// captured line (one for `effects`, one for `occurrences`) -- two synchronous
+// disk syncs on the render thread per event.
 //
 // WAL + synchronous=NORMAL removes the fsync-per-commit requirement (WAL
 // commits are a sequential append; checkpointing back into the main db file
-// happens later, off the hot path) without weakening the guarantee that
-// actually matters here -- a crash can lose the last WAL-committed write, but
-// can't corrupt the database, which is an acceptable trade for capture data.
-// Paired with wrapping RecordEvent's two inserts in one explicit transaction
-// (see below) so a single event is at most one commit instead of two.
+// happens later, off the hot path), at the cost of a crash losing the last
+// WAL-committed write -- an acceptable trade for capture data, since it can't
+// corrupt the database. Paired with wrapping RecordEvent's two inserts in one
+// explicit transaction (see below) so a single event is at most one commit.
 //--------------------------------------------------------------------------------
 bool ConfigurePragmas(std::string& outError)
 {
@@ -276,7 +275,7 @@ bool ConfigurePragmas(std::string& outError)
     return true;
 }
 
-} // namespace
+} //. namespace
 
 void EffectDb_SetApi(AddonAPI_t* aApi)
 {
@@ -370,13 +369,12 @@ void EffectDb_RecordEvent(const EffectDbRawEvent& ev)
 {
     if (!s_enabled || !s_db) return;
 
-    //. Both inserts below as one explicit transaction rather than two
-    //. autocommits -- at most one commit (and, under WAL, one cheap WAL
-    //. append rather than a blocking fsync) per captured line instead of
-    //. two. See ConfigurePragmas' doc comment for the full story.
+    //_ Both inserts below as one explicit transaction rather than two
+    // autocommits -- at most one commit (and, under WAL, one cheap WAL
+    // append rather than a blocking fsync) per captured line instead of two.
     sqlite3_exec(s_db, "BEGIN IMMEDIATE;", nullptr, nullptr, nullptr);
 
-    //. effects: first-seen-wins, INSERT OR IGNORE handles that for free
+    //_ effects: first-seen-wins, INSERT OR IGNORE handles that for free
     sqlite3_reset(s_insertEffectStmt);
     sqlite3_clear_bindings(s_insertEffectStmt);
     sqlite3_bind_text(s_insertEffectStmt, 1, ev.guid_b64.c_str(), -1, SQLITE_TRANSIENT);
@@ -389,9 +387,11 @@ void EffectDb_RecordEvent(const EffectDbRawEvent& ev)
     else if (sqlite3_changes(s_db) > 0)
         ++s_generation;   //. a genuinely new guid -- the tree overlay needs to pick this up
 
-    //_ occurrences: race is no longer part of the UNIQUE key -- a repeat tuple
-    // upserts, OR'ing ev.race's bit into the row (see kInsertOccurrence's
-    // comment).
+    //_ occurrences: race and specialization are no longer part of the
+    // UNIQUE key -- a repeat tuple upserts, OR'ing ev.race's bit and the
+    // resolved EffectDb_SpecBit into the row's masks (see kInsertOccurrence).
+    EffectDbSpecializationMask specBit = EffectDb_SpecBit(ev.profession, ev.specialization);
+
     sqlite3_reset(s_insertOccurrenceStmt);
     sqlite3_clear_bindings(s_insertOccurrenceStmt);
     sqlite3_bind_text(s_insertOccurrenceStmt, 1, ev.guid_b64.c_str(), -1, SQLITE_TRANSIENT);
@@ -399,16 +399,15 @@ void EffectDb_RecordEvent(const EffectDbRawEvent& ev)
     sqlite3_bind_int(s_insertOccurrenceStmt, 3, static_cast<int>(ev.a4));
     sqlite3_bind_text(s_insertOccurrenceStmt, 4, ev.a6.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_int(s_insertOccurrenceStmt, 5, static_cast<int>(ev.selfMask));
-    sqlite3_bind_int(s_insertOccurrenceStmt, 6, static_cast<int>(static_cast<unsigned char>(ev.profession)));
-    sqlite3_bind_int64(s_insertOccurrenceStmt, 7, static_cast<sqlite3_int64>(EffectDb_RaceBit(ev.race)));
-    sqlite3_bind_int(s_insertOccurrenceStmt, 8, static_cast<int>(ev.specialization));
+    sqlite3_bind_int64(s_insertOccurrenceStmt, 6, static_cast<sqlite3_int64>(EffectDb_RaceBit(ev.race)));
+    sqlite3_bind_int64(s_insertOccurrenceStmt, 7, static_cast<sqlite3_int64>(specBit.lo));
+    sqlite3_bind_int64(s_insertOccurrenceStmt, 8, static_cast<sqlite3_int64>(specBit.hi));
     if (sqlite3_step(s_insertOccurrenceStmt) != SQLITE_DONE)
         LogFailure(std::string("EffectDb_RecordEvent: occurrence insert failed: ") + sqlite3_errmsg(s_db));
 
-    //. group_members: only when the caller resolved this event as part of
-    //. a currently-open group (see EffectDbRawEvent::groupStarterGuid's
-    //. doc comment on why this module never re-derives that itself).
-    //. Same silent-no-op-on-repeat shape as occurrences, via UNIQUE.
+    //_ group_members: only when the caller resolved this event as part of
+    // a currently-open group (see EffectDbRawEvent::groupStarterGuid's
+    // doc comment on why this module never re-derives that itself).
     if (!ev.groupStarterGuid.empty())
     {
         sqlite3_reset(s_insertGroupMemberStmt);
@@ -494,13 +493,13 @@ std::vector<EffectDbOccurrence> EffectDb_GetOccurrences(const std::string& guid_
     while (sqlite3_step(s_selectOccurrenceStmt) == SQLITE_ROW)
     {
         EffectDbOccurrence o;
-        o.duration       = sqlite3_column_int(s_selectOccurrenceStmt, 0);
-        o.a4             = static_cast<unsigned int>(sqlite3_column_int(s_selectOccurrenceStmt, 1));
-        o.a6             = reinterpret_cast<const char*>(sqlite3_column_text(s_selectOccurrenceStmt, 2));
-        o.self_mask      = static_cast<EffectDbSelfMask>(sqlite3_column_int(s_selectOccurrenceStmt, 3));
-        o.profession     = static_cast<Mumble::EProfession>(sqlite3_column_int(s_selectOccurrenceStmt, 4));
-        o.raceMask       = static_cast<EffectDbRaceMask>(sqlite3_column_int64(s_selectOccurrenceStmt, 5));
-        o.specialization = static_cast<unsigned int>(sqlite3_column_int(s_selectOccurrenceStmt, 6));
+        o.duration                 = sqlite3_column_int(s_selectOccurrenceStmt, 0);
+        o.a4                       = static_cast<unsigned int>(sqlite3_column_int(s_selectOccurrenceStmt, 1));
+        o.a6                       = reinterpret_cast<const char*>(sqlite3_column_text(s_selectOccurrenceStmt, 2));
+        o.self_mask                = static_cast<EffectDbSelfMask>(sqlite3_column_int(s_selectOccurrenceStmt, 3));
+        o.raceMask                 = static_cast<EffectDbRaceMask>(sqlite3_column_int64(s_selectOccurrenceStmt, 4));
+        o.specializationMask.lo    = static_cast<uint64_t>(sqlite3_column_int64(s_selectOccurrenceStmt, 5));
+        o.specializationMask.hi    = static_cast<uint64_t>(sqlite3_column_int64(s_selectOccurrenceStmt, 6));
         out.push_back(o);
     }
     return out;
@@ -515,6 +514,18 @@ std::vector<Mumble::ERace> EffectDb_RacesInMask(EffectDbRaceMask mask)
     return out;
 }
 
+std::vector<unsigned int> EffectDb_SpecOrCoreIdsInMask(const EffectDbSpecializationMask& mask)
+{
+    std::vector<unsigned int> out;
+    for (unsigned bit = 0; bit < 64; ++bit)
+        if (mask.lo & (uint64_t{1} << bit))
+            out.push_back(bit);
+    for (unsigned bit = 0; bit < 64; ++bit)
+        if (mask.hi & (uint64_t{1} << bit))
+            out.push_back(bit + 64);
+    return out;
+}
+
 std::vector<EffectDbGroupInstance> EffectDb_GetGroupsStarted(const std::string& guid_b64)
 {
     std::vector<EffectDbGroupInstance> out;
@@ -525,9 +536,8 @@ std::vector<EffectDbGroupInstance> EffectDb_GetGroupsStarted(const std::string& 
     sqlite3_bind_text(s_selectGroupsStartedStmt, 1, guid_b64.c_str(), -1, SQLITE_TRANSIENT);
 
     //_ Rows arrive pre-sorted by (duration, a4, member) -- fold
-    //. consecutive rows sharing (duration, a4) into one instance rather
-    //. than a map, since the ORDER BY already guarantees they're
-    //. contiguous.
+    // consecutive rows sharing (duration, a4) into one instance rather
+    // than a map, since the ORDER BY already guarantees they're contiguous.
     while (sqlite3_step(s_selectGroupsStartedStmt) == SQLITE_ROW)
     {
         int          duration = sqlite3_column_int(s_selectGroupsStartedStmt, 0);

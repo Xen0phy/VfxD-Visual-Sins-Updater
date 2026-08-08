@@ -1,0 +1,587 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>EffectDbSpecializationMask checker</title>
+  <style>
+    :root{
+      --bg:#0c1210;
+      --panel:#121a17;
+      --line:#243530;
+      --text:#d8e6de;
+      --dim:#7d968b;
+      --lo:#5fc9a8;
+      --hi:#e0a458;
+      --pseudo:#c97b8a;
+      --mono: "IBM Plex Mono", "SF Mono", Consolas, monospace;
+    }
+    *{box-sizing:border-box;}
+    body{
+      margin:0;
+      background:var(--bg);
+      color:var(--text);
+      font-family:var(--mono);
+      font-size:14px;
+      line-height:1.5;
+      padding:28px 20px 60px;
+    }
+    .page{
+      max-width:1180px;
+      margin:0 auto;
+    }
+    h1{
+      font-size:16px;
+      letter-spacing:.02em;
+      margin:0 0 4px;
+      color:#eef5f0;
+    }
+    .sub{
+      color:var(--dim);
+      margin:0 0 20px;
+      font-size:12.5px;
+    }
+    .layout{
+      color:var(--dim);
+      font-size:11.5px;
+      border:1px solid var(--line);
+      background:var(--panel);
+      padding:10px 14px;
+      margin-bottom:26px;
+      white-space:pre;
+      overflow-x:auto;
+    }
+    .layout b{color:var(--text);font-weight:600;}
+    .layout .lo{color:var(--lo);}
+    .layout .hi{color:var(--hi);}
+    .layout .ps{color:var(--pseudo);}
+    
+    .grid{
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap:24px;
+    }
+    @media (max-width: 880px){ .grid{grid-template-columns:1fr;} }
+    
+    section{
+      border:1px solid var(--line);
+      background:var(--panel);
+      padding:18px 18px 20px;
+    }
+    section > h2{
+      font-size:12px;
+      text-transform:uppercase;
+      letter-spacing:.08em;
+      color:var(--dim);
+      margin:0 0 14px;
+      display:flex;
+      align-items:center;
+      gap:8px;
+    }
+    section > h2 .n{
+      color:#4a5c54;
+    }
+    
+    .profession{
+      border-top:1px solid var(--line);
+      padding:10px 0;
+    }
+    .profession:first-of-type{border-top:none;padding-top:0;}
+    .prof-head{
+      display:flex;
+      align-items:center;
+      gap:10px;
+      margin-bottom:6px;
+    }
+    .prof-head label{
+      cursor:pointer;
+      display:flex;
+      align-items:center;
+      gap:8px;
+      font-weight:600;
+      color:#eef5f0;
+    }
+    .prof-head .pos{
+      color:var(--pseudo);
+      font-size:11px;
+    }
+    .spec-list{
+      display:flex;
+      flex-wrap:wrap;
+      gap:6px 12px;
+      padding-left:22px;
+    }
+    .spec-list label{
+      display:flex;
+      align-items:center;
+      gap:5px;
+      cursor:pointer;
+      font-size:12.5px;
+      color:var(--text);
+    }
+    .spec-list label.elite{color:#bcd6c9;}
+    .spec-list .pos{color:var(--dim);font-size:10.5px;}
+    input[type=checkbox]{
+      appearance:none;
+      -webkit-appearance:none;
+      width:13px;height:13px;
+      background:#0a100e;
+      border:1px solid var(--line);
+      border-radius:2px;
+      cursor:pointer;
+      position:relative;
+      flex:0 0 auto;
+    }
+    input[type=checkbox]:hover{
+      border-color:var(--dim);
+    }
+    input[type=checkbox]:checked{
+      background:var(--lo);
+      border-color:var(--lo);
+    }
+    input[type=checkbox]:checked::after{
+      content:"";
+      position:absolute;
+      left:3px; top:0px;
+      width:4px; height:8px;
+      border:solid #0a100e;
+      border-width:0 2px 2px 0;
+      transform:rotate(45deg);
+    }
+    input[type=checkbox]:focus-visible{
+      outline:1px solid var(--lo);
+      outline-offset:1px;
+    }
+    
+    .out{
+      margin-top:16px;
+      border-top:1px solid var(--line);
+      padding-top:14px;
+    }
+    .out .row{
+      display:flex;
+      justify-content:space-between;
+      gap:12px;
+      margin-bottom:6px;
+    }
+    .out .row .k{color:var(--dim);}
+    .out .row .v{
+      color:#eef5f0;
+      word-break:break-all;
+      text-align:right;
+    }
+    .out .row.lo .v{color:var(--lo);}
+    .out .row.hi .v{color:var(--hi);}
+    
+    input[type=text]{
+      width:100%;
+      background:#0a100e;
+      border:1px solid var(--line);
+      color:var(--text);
+      font-family:var(--mono);
+      font-size:13px;
+      padding:8px 10px;
+      margin-bottom:4px;
+    }
+    input[type=text]:focus{
+      outline:none;
+      border-color:var(--lo);
+    }
+    .field{margin-bottom:14px;}
+    .field label{
+      display:block;
+      font-size:11px;
+      color:var(--dim);
+      margin-bottom:4px;
+    }
+    .field.lo label{color:var(--lo);}
+    .field.hi label{color:var(--hi);}
+    
+    .bits{
+      margin-top:6px;
+      border-top:1px solid var(--line);
+      padding-top:14px;
+    }
+    .bits .word-row{
+      display:flex;
+      align-items:baseline;
+      gap:8px;
+      margin-bottom:8px;
+    }
+    .bits .word-tag{
+      width:22px;
+      flex:0 0 auto;
+      font-size:10px;
+      color:var(--dim);
+    }
+    .bits .word-tag.lo{color:var(--lo);}
+    .bits .word-tag.hi{color:var(--hi);}
+    .bits .bitstream{
+      display:flex;
+      flex-wrap:wrap;
+      gap:2px 0;
+      font-size:11px;
+    }
+    .bits .byte-group{
+      display:flex;
+      padding:0 4px 0 0;
+      border-right:1px solid #1b2622;
+      margin-right:4px;
+    }
+    .bits .byte-group:last-child{border-right:none;}
+    .bits .bit{
+      width:11px;
+      text-align:center;
+      color:#2c3b35;
+    }
+    .bits .bit.set{
+      color:#eef5f0;
+      font-weight:700;
+    }
+    .bits .bit.set.region-spec{color:var(--lo);}
+    .bits .bit.set.region-pseudo{color:var(--pseudo);}
+    .bits .bit.set.region-headroom{color:var(--hi);}
+    .bits .bit.set.region-unused{color:#eef5f0;}
+    .bits .ruler{
+      display:flex;
+      font-size:9px;
+      color:#3a4a43;
+      margin-top:2px;
+    }
+    .bits .legend{
+      font-size:10.5px;
+      color:var(--dim);
+      margin-top:8px;
+      display:flex;
+      gap:14px;
+      flex-wrap:wrap;
+    }
+    .bits .legend span.sw{
+      display:inline-block;
+      width:8px;height:8px;
+      margin-right:4px;
+      vertical-align:middle;
+    }
+    
+    .decoded{
+      margin-top:16px;
+      border-top:1px solid var(--line);
+      padding-top:14px;
+    }
+    .decoded ul{
+      list-style:none;
+      margin:0;
+      padding:0;
+      display:flex;
+      flex-direction:column;
+      gap:4px;
+    }
+    .decoded li{
+      display:flex;
+      justify-content:space-between;
+      font-size:12.5px;
+    }
+    .decoded li .pos{color:var(--dim);}
+    .decoded li.spec{color:var(--lo);}
+    .decoded li.core{color:var(--pseudo);}
+    .empty{color:var(--dim);font-style:italic;}
+    
+    .footnote{
+      color:var(--dim);
+      font-size:11.5px;
+      margin-top:24px;
+    }
+    .clear-btn{
+      background:none;
+      border:1px solid var(--line);
+      color:var(--dim);
+      font-family:var(--mono);
+      font-size:11px;
+      padding:4px 10px;
+      cursor:pointer;
+      margin-left:auto;
+    }
+    .clear-btn:hover{border-color:var(--dim);color:var(--text);}
+  </style>
+</head>
+<body>
+  <div class="page">
+    
+    <h1>EffectDbSpecializationMask checker</h1>
+    <p class="sub">Encode a selection of specs/core builds into lo &amp; hi, or decode lo &amp; hi back into their meaning. Layout reference:</p>
+    
+    <div class="layout"><b>pos   0</b>        &mdash; unused
+      <span class="lo"><b>pos   1&ndash; 81</b></span>  &mdash; real specialization ids (id == position)
+      <b>pos  82&ndash;117</b>  &mdash; headroom, currently always 0
+      <span class="ps"><b>pos 118&ndash;127</b></span>  &mdash; core-only pseudo-ids, reverse indexed: 127&minus;profession
+      127=None(unused) 126=Guardian 125=Warrior 124=Engineer
+      123=Ranger 122=Thief 121=Elementalist 120=Mesmer
+      119=Necromancer 118=Revenant
+      <span class="lo">lo word</span> = positions  0&ndash;63    <span class="hi">hi word</span> = positions 64&ndash;127</div>
+      
+      <div class="grid">
+        
+        <section id="encodeSection">
+          <h2>Encode <span class="n">check specs / core builds &rarr; lo / hi</span> <button class="clear-btn" id="clearBtn">clear</button></h2>
+          <div id="professions"></div>
+          <div class="out">
+            <div class="row lo"><span class="k">specialization_mask_lo</span><span class="v" id="encLo">0</span></div>
+            <div class="row hi"><span class="k">specialization_mask_hi</span><span class="v" id="encHi">0</span></div>
+            <div class="row"><span class="k">lo (hex)</span><span class="v" id="encLoHex">0x0</span></div>
+            <div class="row"><span class="k">hi (hex)</span><span class="v" id="encHiHex">0x0</span></div>
+          </div>
+        </section>
+        
+        <section>
+          <h2>Decode <span class="n">lo / hi &rarr; specs / core builds</span></h2>
+          <div class="field lo">
+            <label>specialization_mask_lo (decimal or 0x hex)</label>
+            <input type="text" id="decLo" placeholder="0" value="0">
+          </div>
+          <div class="field hi">
+            <label>specialization_mask_hi (decimal or 0x hex)</label>
+            <input type="text" id="decHi" placeholder="0" value="0">
+          </div>
+          <div class="bits" id="bitsDisplay"></div>
+          <div class="decoded">
+            <ul id="decodedList"><li class="empty">nothing set</li></ul>
+          </div>
+        </section>
+        
+      </div>
+      
+      <p class="footnote">Bit test: <span id="quickTest"></span></p>
+      
+      <script>
+        const PROFESSIONS = [
+        //_ name, EProfession value, [ [id,name,elite], ... ]
+        { name:"Guardian", val:1, specs:[
+        [42,"Zeal",false],[16,"Radiance",false],[13,"Valor",false],[49,"Honor",false],[46,"Virtues",false],
+        [27,"Dragonhunter",true],[62,"Firebrand",true],[65,"Willbender",true],[81,"Luminary",true] ]},
+        { name:"Warrior", val:2, specs:[
+        [4,"Strength",false],[36,"Arms",false],[22,"Defense",false],[11,"Tactics",false],[51,"Discipline",false],
+        [18,"Berserker",true],[61,"Spellbreaker",true],[68,"Bladesworn",true],[74,"Paragon",true] ]},
+        { name:"Engineer", val:3, specs:[
+        [6,"Explosives",false],[38,"Firearms",false],[47,"Inventions",false],[29,"Alchemy",false],[21,"Tools",false],
+        [43,"Scrapper",true],[57,"Holosmith",true],[70,"Mechanist",true],[75,"Amalgam",true] ]},
+        { name:"Ranger", val:4, specs:[
+        [8,"Marksmanship",false],[30,"Skirmishing",false],[33,"Wilderness Survival",false],[32,"Beastmastery",false],[25,"Nature Magic",false],
+        [5,"Druid",true],[55,"Soulbeast",true],[72,"Untamed",true],[78,"Galeshot",true] ]},
+        { name:"Thief", val:5, specs:[
+        [28,"Deadly Arts",false],[35,"Critical Strikes",false],[20,"Shadow Arts",false],[54,"Acrobatics",false],[44,"Trickery",false],
+        [7,"Daredevil",true],[58,"Deadeye",true],[71,"Specter",true],[77,"Antiquary",true] ]},
+        { name:"Elementalist", val:6, specs:[
+        [31,"Fire",false],[41,"Air",false],[26,"Earth",false],[17,"Water",false],[37,"Arcane",false],
+        [48,"Tempest",true],[56,"Weaver",true],[67,"Catalyst",true],[80,"Evoker",true] ]},
+        { name:"Mesmer", val:7, specs:[
+        [1,"Dueling",false],[10,"Domination",false],[23,"Inspiration",false],[24,"Illusions",false],[45,"Chaos",false],
+        [40,"Chronomancer",true],[59,"Mirage",true],[66,"Virtuoso",true],[73,"Troubadour",true] ]},
+        { name:"Necromancer", val:8, specs:[
+        [53,"Spite",false],[39,"Curses",false],[2,"Death Magic",false],[19,"Blood Magic",false],[50,"Soul Reaping",false],
+        [34,"Reaper",true],[60,"Scourge",true],[64,"Harbinger",true],[76,"Ritualist",true] ]},
+        { name:"Revenant", val:9, specs:[
+        [3,"Invocation",false],[9,"Retribution",false],[14,"Corruption",false],[12,"Salvation",false],[15,"Devastation",false],
+        [52,"Herald",true],[63,"Renegade",true],[69,"Vindicator",true],[79,"Conduit",true] ]},
+        ];
+        
+        function corePos(prof){ return 127 - prof; }
+        
+        // ---- ENCODE UI ----
+        const professionsEl = document.getElementById('professions');
+        PROFESSIONS.forEach(p=>{
+          const wrap = document.createElement('div');
+          wrap.className = 'profession';
+          
+          const head = document.createElement('div');
+          head.className = 'prof-head';
+          const coreLabel = document.createElement('label');
+          const coreBox = document.createElement('input');
+          coreBox.type = 'checkbox';
+          coreBox.dataset.pos = corePos(p.val);
+          coreBox.addEventListener('change', recompute);
+          coreLabel.appendChild(coreBox);
+          coreLabel.appendChild(document.createTextNode(p.name + ' (core build)'));
+          head.appendChild(coreLabel);
+          const posSpan = document.createElement('span');
+          posSpan.className = 'pos';
+          posSpan.textContent = 'pos ' + corePos(p.val);
+          head.appendChild(posSpan);
+          wrap.appendChild(head);
+          
+          const list = document.createElement('div');
+          list.className = 'spec-list';
+          p.specs.forEach(([id,name,elite])=>{
+            const label = document.createElement('label');
+            if (elite) label.className = 'elite';
+            const box = document.createElement('input');
+            box.type = 'checkbox';
+            box.dataset.pos = id;
+            box.addEventListener('change', recompute);
+            label.appendChild(box);
+            label.appendChild(document.createTextNode(name));
+            const pos = document.createElement('span');
+            pos.className = 'pos';
+            pos.textContent = id;
+            label.appendChild(pos);
+            list.appendChild(label);
+          });
+          wrap.appendChild(list);
+          professionsEl.appendChild(wrap);
+        });
+        
+        function recompute(){
+          let lo = 0n, hi = 0n;
+          document.querySelectorAll('#professions input[type=checkbox]:checked').forEach(box=>{
+            const pos = parseInt(box.dataset.pos,10);
+            if (pos < 64) lo |= (1n << BigInt(pos));
+            else hi |= (1n << BigInt(pos-64));
+          });
+          document.getElementById('encLo').textContent = lo.toString();
+          document.getElementById('encHi').textContent = hi.toString();
+          document.getElementById('encLoHex').textContent = '0x' + lo.toString(16);
+          document.getElementById('encHiHex').textContent = '0x' + hi.toString(16);
+        }
+        
+        document.getElementById('clearBtn').addEventListener('click', ()=>{
+          document.querySelectorAll('#professions input[type=checkbox]').forEach(b=>b.checked=false);
+          recompute();
+        });
+        
+        // ---- DECODE UI ----
+        const ID_LOOKUP = {}; //. pos -> {label, kind}
+        PROFESSIONS.forEach(p=>{
+          ID_LOOKUP[corePos(p.val)] = { label: p.name + ' (core build, spec 0)', kind:'core' };
+          p.specs.forEach(([id,name,elite])=>{
+            ID_LOOKUP[id] = { label: p.name + ' \u2013 ' + name + (elite ? ' (elite)' : ' (core)'), kind:'spec' };
+          });
+        });
+        ID_LOOKUP[127] = { label:'None (sentinel, never recorded)', kind:'core' };
+        
+        function parseWord(str){
+          str = str.trim();
+          if (str === '') return 0n;
+          try{
+            if (/^0x/i.test(str)) return BigInt(str);
+            return BigInt(str);
+          }catch(e){
+            return null;
+          }
+        }
+        
+        function regionOf(pos){
+          if (pos === 0) return 'region-unused';
+          if (pos >= 1 && pos <= 81) return 'region-spec';
+          if (pos >= 82 && pos <= 117) return 'region-headroom';
+          return 'region-pseudo'; //. 118-127
+        }
+        
+        // builds one word's bit row, positions high-to-low, grouped into bytes of 8
+        function renderWordBits(value, baseOffset, tag, tagClass){
+          const wordRow = document.createElement('div');
+          wordRow.className = 'word-row';
+          const tagEl = document.createElement('div');
+          tagEl.className = 'word-tag ' + tagClass;
+          tagEl.textContent = tag;
+          wordRow.appendChild(tagEl);
+          
+          const stream = document.createElement('div');
+          stream.className = 'bitstream';
+          
+          for (let byteIdx = 7; byteIdx >= 0; byteIdx--){
+            const group = document.createElement('div');
+            group.className = 'byte-group';
+            for (let b = 7; b >= 0; b--){
+              const localPos = byteIdx*8 + b;
+              const globalPos = baseOffset + localPos;
+              const isSet = ((value >> BigInt(localPos)) & 1n) === 1n;
+              const bitEl = document.createElement('span');
+              bitEl.className = 'bit' + (isSet ? ' set ' + regionOf(globalPos) : '');
+              bitEl.title = 'pos ' + globalPos;
+              bitEl.textContent = isSet ? '1' : '0';
+              group.appendChild(bitEl);
+            }
+            stream.appendChild(group);
+          }
+          wordRow.appendChild(stream);
+          return wordRow;
+        }
+        
+        function renderBits(lo, hi){
+          const container = document.getElementById('bitsDisplay');
+          container.innerHTML = '';
+          container.appendChild(renderWordBits(lo, 0, 'lo', 'lo'));
+          container.appendChild(renderWordBits(hi, 64, 'hi', 'hi'));
+          
+          const legend = document.createElement('div');
+          legend.className = 'legend';
+          legend.innerHTML =
+          '<span><span class="sw" style="background:var(--lo)"></span>spec id (1\u201381)</span>' +
+          '<span><span class="sw" style="background:var(--hi)"></span>headroom (82\u2013117)</span>' +
+          '<span><span class="sw" style="background:var(--pseudo)"></span>core pseudo-id (118\u2013127)</span>' +
+          '<span><span class="sw" style="background:#eef5f0"></span>unused (pos 0)</span>';
+          container.appendChild(legend);
+        }
+        
+        function decode(){
+          const loStr = document.getElementById('decLo').value;
+          const hiStr = document.getElementById('decHi').value;
+          const lo = parseWord(loStr);
+          const hi = parseWord(hiStr);
+          const list = document.getElementById('decodedList');
+          list.innerHTML = '';
+          
+          if (lo === null || hi === null){
+            const li = document.createElement('li');
+            li.className = 'empty';
+            li.textContent = 'enter a valid decimal or 0x hex value';
+            list.appendChild(li);
+            document.getElementById('bitsDisplay').innerHTML = '';
+            return;
+          }
+          
+          renderBits(lo, hi);
+          
+          const positions = [];
+          for (let i=0; i<64; i++){
+            if ((lo >> BigInt(i)) & 1n) positions.push(i);
+          }
+          for (let i=0; i<64; i++){
+            if ((hi >> BigInt(i)) & 1n) positions.push(i+64);
+          }
+          
+          if (positions.length === 0){
+            const li = document.createElement('li');
+            li.className = 'empty';
+            li.textContent = 'nothing set';
+            list.appendChild(li);
+            return;
+          }
+          
+          positions.sort((a,b)=>a-b).forEach(pos=>{
+            const li = document.createElement('li');
+            const info = ID_LOOKUP[pos];
+            if (info){
+              li.className = info.kind;
+              li.innerHTML = '<span>' + info.label + '</span><span class="pos">pos ' + pos + '</span>';
+            } else {
+              li.className = 'empty';
+              li.innerHTML = '<span>unrecognized bit (headroom / unused)</span><span class="pos">pos ' + pos + '</span>';
+            }
+            list.appendChild(li);
+          });
+        }
+        
+        document.getElementById('decLo').addEventListener('input', decode);
+        document.getElementById('decHi').addEventListener('input', decode);
+        
+        // quick reference line
+        document.getElementById('quickTest').textContent =
+        'e.g. Firebrand alone (id 62, < 64) \u2192 lo = 2^62, hi = 0.  Willbender (id 65, \u2265 64) \u2192 lo = 0, hi = 2^1.  Guardian core build \u2192 pos 126 \u2192 hi bit 62 \u2192 hi = 2^62.';
+        
+        recompute();
+        decode();
+      </script>
+      
+    </div>
+  </body>
+  </html>
+  

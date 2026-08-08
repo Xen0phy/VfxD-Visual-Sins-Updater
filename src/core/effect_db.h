@@ -3,9 +3,10 @@
 //--------------------------------------------------------------------------------
 // The "for science" effect database -- a self-only, autonomous capture of
 // every distinct (guid, block, type) identity this addon has seen, plus
-// every distinct (duration, a4, a6, self_mask, profession, specialization)
-// combination each identity has shown up under, with a bitmask of every
-// race that combination has been seen on (see EffectDbRaceMask). Separate
+// every distinct (duration, a4, a6, self_mask) combination each identity
+// has shown up under, with a bitmask of every race (see EffectDbRaceMask)
+// and every profession+specialization pairing (see
+// EffectDbSpecializationMask) that combination has been seen on. Separate
 // concern from live_log.h: that module folds one entry per guid for
 // on-screen display and is cleared per-session; this module never folds
 // and never clears -- it accumulates across every session, permanently,
@@ -22,9 +23,10 @@
 // tables: effects (one row per identity, first-seen-wins on
 // guid_b64/block/type -- a later sighting never overwrites them, since
 // that would paper over a real finding about the identity rather than
-// record one), occurrences (one row per distinct tuple per guid, race
-// folded into a bitmask rather than one row per race -- see
-// EffectDbRaceMask), and group_members (which type:1/11 "starter" guid
+// record one), occurrences (one row per distinct tuple per guid, race and
+// profession+specialization each folded into their own bitmask rather
+// than one row per combination -- see EffectDbRaceMask and
+// EffectDbSpecializationMask), and group_members (which type:1/11 "starter" guid
 // each guid was seen alongside, keyed by the starter's own (guid,
 // duration, a4) since a later cast of the same starter can open a
 // differently-membered group). group_members exists because membership
@@ -44,6 +46,7 @@
 
 #include "game_state.h" //. pulls in Nexus.h (AddonAPI_t) and Mumble.h (EProfession/ERace) together
 
+#include <cassert>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -89,6 +92,93 @@ inline EffectDbRaceMask EffectDb_RaceBit(Mumble::ERace race)
 std::vector<Mumble::ERace> EffectDb_RacesInMask(EffectDbRaceMask mask);
 
 //********************************************************************************
+// EffectDbSpecializationMask
+//--------------------------------------------------------------------------------
+// lo   real spec ids 1..63 as bits (bit 0 unused -- ids start at 1)
+// hi   real spec ids 64..81, plus reserved core-only pseudo-ids 118..127
+//--------------------------------------------------------------------------------
+// Same "fold instead of a new row" reasoning as EffectDbRaceMask above,
+// applied to profession+specialization together rather than giving
+// profession its own independent mask, which would silently lose which
+// profession fired which spec on a multi-value row -- see
+// class-spec-bitmask-handoff.md for the full design writeup. A nonzero
+// specialization id already uniquely implies its owning profession (see
+// spec_profession_table.h), so one merged mask is enough; the only gap is
+// specialization == 0 (core build), closed by EffectDb_SpecOrCoreId below
+// with reserved pseudo-ids at the *top* of the bit range.
+//
+// Two uint64_t words rather than one: real GW2 spec ids alone already
+// exceed 64 (81 today), and SQLite's bitwise `|` only works cleanly on
+// 64-bit ints -- stored as specialization_mask_lo/_hi, each OR'd
+// independently on conflict, same shape as race_mask split across two words.
+//--------------------------------------------------------------------------------
+struct EffectDbSpecializationMask
+{
+    uint64_t lo = 0;
+    uint64_t hi = 0;
+};
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// EffectDb_SpecOrCoreId / EffectDb_SpecBit
+//--------------------------------------------------------------------------------
+// Resolve an event's (profession, specId) pair down to the bit index (or
+// full mask) to OR into a row -- specId == 0 (core build, see
+// GameState_GetSpecialization) falls through to a reserved profession-only
+// pseudo-id, 127 - static_cast<unsigned char>(profession), counting down
+// from 127 so real spec ids (currently 1..81) can keep growing upward
+// without colliding. specId is asserted < 82 to catch a caller
+// accidentally passing a pseudo-id back in.
+//--------------------------------------------------------------------------------
+inline unsigned int EffectDb_SpecOrCoreId(Mumble::EProfession prof, unsigned int specId)
+{
+    assert(specId == 0 || specId < 82); //. guard against reserved-id collision
+    return specId != 0
+        ? specId
+        : 127 - static_cast<unsigned char>(prof);
+}
+
+inline EffectDbSpecializationMask EffectDb_SpecBit(Mumble::EProfession prof, unsigned int specId)
+{
+    unsigned int bit = EffectDb_SpecOrCoreId(prof, specId);
+    EffectDbSpecializationMask mask;
+    if (bit < 64) mask.lo = uint64_t{1} << bit;
+    else          mask.hi = uint64_t{1} << (bit - 64);
+    return mask;
+}
+
+//_ Ids >= this are reserved profession-only pseudo-ids (see
+// EffectDb_SpecOrCoreId above), not real spec ids to look up in
+// spec_profession_table.h.
+constexpr unsigned int kEffectDbCoreOnlyIdFloor = 118;
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// EffectDb_ProfessionFromCoreOnlyId
+//--------------------------------------------------------------------------------
+// Inverse of EffectDb_SpecOrCoreId's pseudo-id branch -- given a reserved
+// id (>= kEffectDbCoreOnlyIdFloor) from EffectDb_SpecOrCoreIdsInMask,
+// returns which profession it stands for (a core build, no elite spec
+// active). Passing a real spec id here is a caller bug; callers are
+// expected to branch on kEffectDbCoreOnlyIdFloor first.
+//--------------------------------------------------------------------------------
+inline Mumble::EProfession EffectDb_ProfessionFromCoreOnlyId(unsigned int id)
+{
+    assert(id >= kEffectDbCoreOnlyIdFloor && id <= 127);
+    return static_cast<Mumble::EProfession>(127 - id);
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// EffectDb_SpecOrCoreIdsInMask
+//--------------------------------------------------------------------------------
+// Inverse of EffectDb_SpecBit -- every bit set in mask, unpacked back to
+// raw ids (1..127). Deliberately NOT resolved to a profession/name pair
+// here -- that's a display concern (see live_log_ui.cpp /
+// installed_tree_view.cpp), not this module's; a caller resolves each id
+// via SpecializationProfession()/SpecializationName() for a real id, or
+// EffectDb_ProfessionFromCoreOnlyId() for a reserved one.
+//--------------------------------------------------------------------------------
+std::vector<unsigned int> EffectDb_SpecOrCoreIdsInMask(const EffectDbSpecializationMask& mask);
+
+//********************************************************************************
 // EffectDbRawEvent
 //--------------------------------------------------------------------------------
 // One infostr line, essentially unparsed-further -- the input to
@@ -115,6 +205,9 @@ struct EffectDbRawEvent
 
     EffectDbSelfMask selfMask = kSelfMaskNone;
 
+    //_ Resolved to a single EffectDb_SpecBit before storage (see
+    // EffectDbSpecializationMask above); kept separate here since that's
+    // how GameState_GetProfession/GameState_GetSpecialization produce them.
     Mumble::EProfession  profession{};
     Mumble::ERace         race{};
     unsigned int          specialization = 0;
@@ -143,9 +236,8 @@ struct EffectDbOccurrence
     std::string  a6;
     EffectDbSelfMask self_mask = kSelfMaskNone;
 
-    Mumble::EProfession  profession{};
-    EffectDbRaceMask      raceMask = 0;  //. see EffectDb_RacesInMask to unpack
-    unsigned int          specialization = 0;
+    EffectDbRaceMask            raceMask = 0;  //. see EffectDb_RacesInMask to unpack
+    EffectDbSpecializationMask  specializationMask{};  //. see EffectDb_SpecOrCoreIdsInMask to unpack
 };
 
 //********************************************************************************
@@ -300,12 +392,13 @@ std::vector<EffectDbEffect> EffectDb_GetAllEffects();
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // EffectDb_GetOccurrences
 //--------------------------------------------------------------------------------
-// Every distinct (duration, a4, a6, self_mask, profession, specialization)
-// row recorded for guid_b64, for the "for science" expanded tree view
-// (duration/a4/a6 -> class -> spec, race_mask unpacked into the races
-// seen and folded in as an annotation -- see EffectDb_RacesInMask and
-// this module's callers for how that's grouped; this just returns the
-// flat rows). Empty if guid_b64 is unknown.
+// Every distinct (duration, a4, a6, self_mask) row recorded for guid_b64,
+// for the "for science" expanded tree view (duration/a4/a6 -> class ->
+// spec, with specializationMask unpacked into per-profession spec buckets
+// and raceMask unpacked into a "races seen" annotation on the signature --
+// see EffectDb_SpecOrCoreIdsInMask/EffectDb_RacesInMask and this module's
+// callers for how that's grouped; this just returns the flat rows). Empty
+// if guid_b64 is unknown.
 //--------------------------------------------------------------------------------
 std::vector<EffectDbOccurrence> EffectDb_GetOccurrences(const std::string& guid_b64);
 

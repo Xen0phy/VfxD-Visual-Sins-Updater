@@ -81,27 +81,22 @@ std::string MakeGroupSignature(const std::string& starterGuid, int duration, uns
 //--------------------------------------------------------------------------------
 // Called unconditionally on every parsed line, before IngestLogLine's own
 // type/hideKnown filters -- a dropped *continuation* line must not break
-// group state, but a dropped *starter* type must still block grouping
-// entirely (see below).
+// group state, but a dropped *starter* type must still block grouping.
 //
-// type:1 / type:11 opens a group, unless that starter type is itself
-// toggled off in s_typeEnabled -- then nothing opens, and any group in
-// progress closes immediately. The id is looked up by (starterGuid,
-// duration, a4) signature (see MakeGroupSignature), not freshly minted,
-// so a recurrence of the same starter effect/numbers reuses the same
-// groupId no matter how long ago it last showed up.
+// type:1 / type:11 opens a group, unless toggled off in s_typeEnabled --
+// then nothing opens, and any group in progress closes immediately. The
+// id is looked up by (starterGuid, duration, a4) signature (see
+// MakeGroupSignature), not freshly minted, so a recurrence of the same
+// starter reuses the same groupId no matter how long ago it last showed up.
 //
 // A non-starter line joins the open group only if its duration and a4
 // match the starter's exactly; anything else -- including a toggled-off
-// type -- closes the group outright (strict contiguity: no gap of
-// non-matching lines survives mid-group) and returns -1 (ungrouped).
+// type -- closes the group outright (strict contiguity) and returns -1.
 //
 // outGroupStarterGuid is set to the starter guid of whichever group this
-// line ends up belonging to (which is starterGuid itself, on a line that
-// opens a group), or cleared to "" whenever the return value is -1. This
-// is the value IngestLogLine threads into FeedEffectDb for the durable
-// group_members table -- see s_currentGroupStarterGuid's own comment on
-// why it's a separate concept from the int id returned here.
+// line ends up in, or cleared to "" when the return is -1 -- the value
+// IngestLogLine threads into FeedEffectDb for group_members (see
+// s_currentGroupStarterGuid's own comment on why it's a separate concept).
 //--------------------------------------------------------------------------------
 int AdvanceGroupState(const std::string& starterGuid, int type, int duration, unsigned int a4,
                        std::string& outGroupStarterGuid)
@@ -315,29 +310,34 @@ void ApplyGroupHistory(LiveLogEntry& entry, int groupId)
 // FeedEffectDb
 //--------------------------------------------------------------------------------
 // The "for science" capture hook -- called from IngestLogLine *before*
-// this module's own type-toggle/hideKnown display filters, deliberately.
-// Those filters exist to declutter the on-screen Live Log panel; they
-// have nothing to do with what's worth writing to a permanent research
-// database, and in particular s_typeEnabled starts types 1 and 11
-// *disabled* by default (see its initializer above) even though those
-// are precisely the marker rows the database exists to correlate --
-// filtering this on that toggle would silently starve it of them.
+// this module's own type-toggle/hideKnown display filters, deliberately:
+// those exist to declutter the on-screen panel, not to gate what's worth
+// writing to a permanent research database. In particular s_typeEnabled
+// starts types 1 and 11 *disabled* by default even though those are
+// precisely the marker rows the database exists to correlate.
 //
 // Caster-only for now (see effect_db.h on kSelfMaskCaster being the only
 // value currently produced) -- entirely separate from isSelfEvent below,
 // which is broader (caster OR target) and only feeds LiveLogEntry's own
 // display fold, not this.
 //
-// groupStarterGuid is passed straight through to EffectDbRawEvent as-is
-// (already resolved by AdvanceGroupState, called by IngestLogLine before
-// this) -- this function never touches group state itself, same "passed
-// in, not read from statics" convention the rest of this file already
-// follows for guid-name/behavior lookups.
+// groupStarterGuid passes straight through to EffectDbRawEvent as-is
+// (already resolved by AdvanceGroupState via IngestLogLine) -- same
+// "passed in, not read from statics" convention this file already follows.
+//
+// Bails before EffectDb_RecordEvent if no identity source is attached yet
+// (see GameState_GetProfession's doc comment) -- recording then would set
+// EffectDb_SpecOrCoreId's reserved sentinel bit, which can't be cleared.
 //--------------------------------------------------------------------------------
 void FeedEffectDb(const std::string& guid_b64, const std::string& info, const LiveLogEntry& parsed,
                    const std::string& groupStarterGuid)
 {
     if (!EffectDb_IsEnabled() || parsed.caster != "self")
+        return;
+
+    //_ No identity source attached yet -- see this function's doc comment
+    // on why that must bail here rather than being filtered out later.
+    if (!GameState_IsRTAPILive() && !GameState_HasMumbleIdentity())
         return;
 
     EffectDbRawEvent ev;
@@ -351,6 +351,9 @@ void FeedEffectDb(const std::string& guid_b64, const std::string& info, const Li
     ev.groupStarterGuid = groupStarterGuid;
     ev.selfMask = kSelfMaskCaster;
 
+    //_ Read close together, not a full fix, but keeps the window small
+    // where RTAPI could flip live/not-live between calls and mix sources
+    // (see GameState_GetProfession's doc comment on the None fallback).
     ev.profession     = GameState_GetProfession();
     ev.race           = GameState_GetRace();
     ev.specialization = GameState_GetSpecialization();

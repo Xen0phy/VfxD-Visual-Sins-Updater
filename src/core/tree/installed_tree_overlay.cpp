@@ -397,6 +397,9 @@ nlohmann::ordered_json BuildDuplicateOverlayTree(const nlohmann::ordered_json& i
 // RenderEffectDbDetail groups at render time. Shared by both branches of
 // BuildEffectDbOverlayTree below -- a db-only guid and an already-
 // JSON-backed guid that also has capture data both need exactly this.
+// specialization_ids is pre-unpacked (see EffectDb_SpecOrCoreIdsInMask) so
+// the render-time consumer never touches EffectDbSpecializationMask's
+// lo/hi words directly.
 //--------------------------------------------------------------------------------
 nlohmann::ordered_json BuildOccurrencesJson(const std::string& guid_b64)
 {
@@ -404,13 +407,15 @@ nlohmann::ordered_json BuildOccurrencesJson(const std::string& guid_b64)
     for (const auto& occ : EffectDb_GetOccurrences(guid_b64))
     {
         nlohmann::ordered_json o;
-        o["duration"]       = occ.duration;
-        o["a4"]             = occ.a4;
-        o["a6"]             = occ.a6;
-        o["self_mask"]      = static_cast<int>(occ.self_mask);
-        o["profession"]     = static_cast<int>(static_cast<unsigned char>(occ.profession));
-        o["race_mask"]      = occ.raceMask;
-        o["specialization"] = occ.specialization;
+        o["duration"]           = occ.duration;
+        o["a4"]                 = occ.a4;
+        o["a6"]                 = occ.a6;
+        o["self_mask"]          = static_cast<int>(occ.self_mask);
+        o["race_mask"]          = occ.raceMask;
+        //_ Flattened to a plain array of raw ids (1..127, see effect_db.h's
+        // EffectDbSpecializationMask) rather than the lo/hi words -- easier
+        // for the render-time consumer to iterate without redoing the unpack.
+        o["specialization_ids"] = EffectDb_SpecOrCoreIdsInMask(occ.specializationMask);
         occurrences.push_back(std::move(o));
     }
     return occurrences;

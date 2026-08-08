@@ -48,6 +48,7 @@ add_library(VfxDSinsUpdater SHARED
     src/core/live_log.cpp
     src/core/game_state.cpp
     src/core/specialization_names.cpp
+    src/core/spec_profession_table.cpp
     src/core/effect_db.cpp
     include/imgui.cpp
     include/imgui_draw.cpp

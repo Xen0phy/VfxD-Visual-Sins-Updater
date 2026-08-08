@@ -62,6 +62,7 @@
 #include "installed_tree_search.h"
 #include "installed_tree_store.h"
 #include "installed_tree_view.h"
+#include "spec_profession_table.h"
 #include "specialization_names.h"
 #include "ui_colors.h"
 
@@ -400,6 +401,33 @@ void RenderGroupInfo(const nlohmann::ordered_json& detail)
 }
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// DecodeSpecOrCoreId
+//------------------------------------------------------------------------------
+// One raw id from EffectDb_SpecOrCoreIdsInMask (1..127, see effect_db.h's
+// EffectDbSpecializationMask) -> the profession display name and
+// spec/core-build label to bucket it under in the tree. A reserved
+// pseudo-id (>= kEffectDbCoreOnlyIdFloor) decodes straight to its
+// profession via EffectDb_ProfessionFromCoreOnlyId, with no real spec
+// attached (core build, no elite spec active); anything below that decodes
+// through spec_profession_table.h/specialization_names.h, falling back to
+// a raw "Spec #N" label if the id isn't in that table yet (mirrors
+// SpecializationName's own "don't guess" contract -- see that header).
+//------------------------------------------------------------------------------
+void DecodeSpecOrCoreId(unsigned int id, std::string& outProfName, std::string& outSpecLabel)
+{
+    if (id >= kEffectDbCoreOnlyIdFloor)
+    {
+        outProfName  = GameState_ProfessionName(EffectDb_ProfessionFromCoreOnlyId(id));
+        outSpecLabel = "(core build)";
+        return;
+    }
+
+    outProfName = GameState_ProfessionName(SpecializationProfession(id));
+    const char* specName = SpecializationName(id);
+    outSpecLabel = specName ? std::string(specName) : ("Spec #" + std::to_string(id));
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // RenderEffectDbDetail
 //------------------------------------------------------------------------------
 // The "for science" expanded view. Called two different ways:
@@ -422,13 +450,15 @@ void RenderGroupInfo(const nlohmann::ordered_json& detail)
 //
 //   duration/a4/a6/self_mask  (the per-cast signature, see effect_db.h)
 //     profession
-//       specialization        (races seen: ...)
+//       specialization
+//     races seen: ...
 //
-// Race is deliberately an annotation on the leaf, not its own branch --
-// per this module's own design discussion, not every specialization is
-// race-gated, so a race branch would describe sampling coverage, not a
-// real rule; folding it into a "races seen" list makes that distinction
-// visible instead of implying structure that isn't there.
+// Race and profession/specialization are both deliberately annotations on
+// the signature, not nested inside one another -- one occurrences row
+// carries every race and every profession+specialization ever seen under
+// it as sibling masks, so there's no per-sighting pairing left to nest one
+// under the other (see effect_db.h's EffectDbSpecializationMask doc
+// comment; same accepted trade already applied to race independently).
 //
 // "groups" (this guid's group_members rows, both directions) is rendered
 // separately, below the occurrences groups, by RenderGroupInfo -- see
@@ -476,11 +506,15 @@ void RenderEffectDbDetail(const nlohmann::ordered_json& effect)
             continue;
         }
 
-        //_ (duration, a4, a6, self_mask) -> profession -> specialization ->
-        // races seen. std::map keeps both levels in stable order across
-        // frames, so nested TreeNode open state below persists (see loop-index note below).
-        std::map<std::tuple<int, unsigned int, std::string, int>,
-                 std::map<std::string, std::map<std::string, std::set<std::string>>>> groups;
+        //_ (duration, a4, a6, self_mask) -> { profession -> specs seen,
+        // races seen } -- siblings, not nested (see this function's doc
+        // comment). std::map keeps TreeNode open state stable across frames.
+        struct SignatureGroup
+        {
+            std::map<std::string, std::set<std::string>> specsByProfession;
+            std::set<std::string> racesSeen;
+        };
+        std::map<std::tuple<int, unsigned int, std::string, int>, SignatureGroup> groups;
 
         for (const auto& occ : detail["occurrences"])
         {
@@ -489,24 +523,26 @@ void RenderEffectDbDetail(const nlohmann::ordered_json& effect)
             std::string  a6       = occ.value("a6", std::string());
             int          selfMask = occ.value("self_mask", 0);
 
-            auto profession = static_cast<Mumble::EProfession>(occ.value("profession", 0));
-            auto raceMask   = static_cast<EffectDbRaceMask>(occ.value("race_mask", 0u));
-            unsigned int specId = occ.value("specialization", 0u);
+            auto raceMask = static_cast<EffectDbRaceMask>(occ.value("race_mask", 0u));
+            auto specIds  = occ.value("specialization_ids", std::vector<unsigned int>());
 
-            std::string profName = GameState_ProfessionName(profession);
-            const char* specName = SpecializationName(specId);
-            std::string specLabel = specName ? std::string(specName) : ("Spec #" + std::to_string(specId));
+            SignatureGroup& group = groups[{ duration, a4, a6, selfMask }];
 
-            auto& raceNames = groups[{ duration, a4, a6, selfMask }][profName][specLabel];
+            for (unsigned int id : specIds)
+            {
+                std::string profName, specLabel;
+                DecodeSpecOrCoreId(id, profName, specLabel);
+                group.specsByProfession[profName].insert(specLabel);
+            }
             for (Mumble::ERace race : EffectDb_RacesInMask(raceMask))
-                raceNames.insert(GameState_RaceName(race));
+                group.racesSeen.insert(GameState_RaceName(race));
         }
 
         //_ Loop index, not a pointer/address, for PushID below -- `groups`
         // is rebuilt fresh every frame, so an address-based ID would
         // reset every nested TreeNode's open state next frame; index stays stable.
         int groupIdx = 0;
-        for (const auto& [sig, byProf] : groups)
+        for (const auto& [sig, group] : groups)
         {
             const auto& [duration, a4, a6, selfMask] = sig;
             const char* selfLabel = (selfMask >= 0 && selfMask <= 3) ? kSelfMaskLabels[selfMask] : "?";
@@ -515,23 +551,24 @@ void RenderEffectDbDetail(const nlohmann::ordered_json& effect)
             if (ImGui::TreeNode("occgroup", "duration:%d  a4:%u  a6:%s  self:%s",
                                  duration, a4, a6.empty() ? "null" : a6.c_str(), selfLabel))
             {
-                for (const auto& [profName, bySpec] : byProf)
+                for (const auto& [profName, specs] : group.specsByProfession)
                 {
                     if (ImGui::TreeNode(profName.c_str(), "%s", profName.c_str()))
                     {
-                        for (const auto& [specLabel, races] : bySpec)
-                        {
-                            std::string raceList;
-                            for (const auto& r : races)
-                            {
-                                if (!raceList.empty()) raceList += ", ";
-                                raceList += r;
-                            }
-                            ImGui::BulletText("%s  (races seen: %s)", specLabel.c_str(), raceList.c_str());
-                        }
+                        for (const auto& specLabel : specs)
+                            ImGui::BulletText("%s", specLabel.c_str());
                         ImGui::TreePop();
                     }
                 }
+
+                std::string raceList;
+                for (const auto& r : group.racesSeen)
+                {
+                    if (!raceList.empty()) raceList += ", ";
+                    raceList += r;
+                }
+                ImGui::TextDisabled("Races seen: %s", raceList.empty() ? "(none)" : raceList.c_str());
+
                 ImGui::TreePop();
             }
             ImGui::PopID();

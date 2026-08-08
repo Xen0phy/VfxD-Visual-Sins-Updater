@@ -13,6 +13,7 @@
 #include "live_log_ui.h"
 #include "live_log.h"
 #include "report_ui.h"
+#include "spec_profession_table.h"
 #include "specialization_names.h"
 
 #include <algorithm>
@@ -102,12 +103,45 @@ void RenderForScienceGroupInfo(const std::string& guid_b64)
 }
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// DecodeSpecOrCoreId
+//--------------------------------------------------------------------------------
+// One raw id from EffectDb_SpecOrCoreIdsInMask (1..127, see effect_db.h's
+// EffectDbSpecializationMask) -> the profession display name and
+// spec/core-build label to bucket it under. A reserved pseudo-id
+// (>= kEffectDbCoreOnlyIdFloor) decodes straight to its profession via
+// EffectDb_ProfessionFromCoreOnlyId, with no real spec attached (core
+// build, no elite spec active); anything below that decodes through
+// spec_profession_table.h/specialization_names.h, falling back to a raw
+// "Spec #N" label if the id isn't in that table yet (mirrors
+// SpecializationName's own "don't guess" contract -- see that header).
+// Same helper installed_tree_view.cpp's RenderEffectDbDetail uses; kept
+// as its own copy here, same "no shared cache" reasoning as
+// ForScienceGroupMemberLabel below.
+//--------------------------------------------------------------------------------
+void DecodeSpecOrCoreId(unsigned int id, std::string& outProfName, std::string& outSpecLabel)
+{
+    if (id >= kEffectDbCoreOnlyIdFloor)
+    {
+        outProfName  = GameState_ProfessionName(EffectDb_ProfessionFromCoreOnlyId(id));
+        outSpecLabel = "(core build)";
+        return;
+    }
+
+    outProfName = GameState_ProfessionName(SpecializationProfession(id));
+    const char* specName = SpecializationName(id);
+    outSpecLabel = specName ? std::string(specName) : ("Spec #" + std::to_string(id));
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // RenderForScienceDetail
 //--------------------------------------------------------------------------------
-// The for-science branch's expanded view -- same grouping
-// RenderEffectDbDetail uses in installed_tree_view.cpp (duration/a4/a6/
-// self_mask -> profession -> specialization, races folded into a "races
-// seen" annotation on the leaf), but reads straight from
+// The for-science branch's expanded view (same grouping
+// RenderEffectDbDetail uses in installed_tree_view.cpp -- duration/a4/a6/
+// self_mask -> profession -> specialization, races seen as a sibling
+// annotation on the signature rather than nested under any one spec, since
+// one occurrences row carries every race and every profession+
+// specialization ever seen under it as sibling masks -- see effect_db.h's
+// EffectDbSpecializationMask doc comment), but reads straight from
 // EffectDb_GetEffect/EffectDb_GetOccurrences rather than the tree's
 // "__vfxd_db_by_guid" json, since the Live Log panel has no json node to
 // read this off of for a guid that isn't (yet) in any sin file.
@@ -142,25 +176,32 @@ void RenderForScienceDetail(const std::string& guid_b64)
 
     static const char* kSelfMaskLabels[] = { "none", "target", "caster", "both" };
 
-    //_ (duration, a4, a6, self_mask) -> profession -> specialization ->
-    // races seen. std::map for stable iteration order (see
+    //_ (duration, a4, a6, self_mask) -> { profession -> specs seen,
+    // races seen }. std::map for stable iteration order (see
     // RenderEffectDbDetail -- TreeNode open/closed state must persist).
-    std::map<std::tuple<int, unsigned int, std::string, int>,
-             std::map<std::string, std::map<std::string, std::set<std::string>>>> groups;
+    struct SignatureGroup
+    {
+        std::map<std::string, std::set<std::string>> specsByProfession;
+        std::set<std::string> racesSeen;
+    };
+    std::map<std::tuple<int, unsigned int, std::string, int>, SignatureGroup> groups;
 
     for (const auto& occ : occs)
     {
-        std::string profName  = GameState_ProfessionName(occ.profession);
-        const char* specName  = SpecializationName(occ.specialization);
-        std::string specLabel = specName ? std::string(specName) : ("Spec #" + std::to_string(occ.specialization));
+        SignatureGroup& group = groups[{ occ.duration, occ.a4, occ.a6, static_cast<int>(occ.self_mask) }];
 
-        auto& raceNames = groups[{ occ.duration, occ.a4, occ.a6, static_cast<int>(occ.self_mask) }][profName][specLabel];
+        for (unsigned int id : EffectDb_SpecOrCoreIdsInMask(occ.specializationMask))
+        {
+            std::string profName, specLabel;
+            DecodeSpecOrCoreId(id, profName, specLabel);
+            group.specsByProfession[profName].insert(specLabel);
+        }
         for (Mumble::ERace race : EffectDb_RacesInMask(occ.raceMask))
-            raceNames.insert(GameState_RaceName(race));
+            group.racesSeen.insert(GameState_RaceName(race));
     }
 
     int groupIdx = 0;
-    for (const auto& [sig, byProf] : groups)
+    for (const auto& [sig, group] : groups)
     {
         const auto& [duration, a4, a6, selfMask] = sig;
         const char* selfLabel = (selfMask >= 0 && selfMask <= 3) ? kSelfMaskLabels[selfMask] : "?";
@@ -169,23 +210,24 @@ void RenderForScienceDetail(const std::string& guid_b64)
         if (ImGui::TreeNode("occgroup", "duration:%d  a4:%u  a6:%s  self:%s",
                              duration, a4, a6.empty() ? "null" : a6.c_str(), selfLabel))
         {
-            for (const auto& [profName, bySpec] : byProf)
+            for (const auto& [profName, specs] : group.specsByProfession)
             {
                 if (ImGui::TreeNode(profName.c_str(), "%s", profName.c_str()))
                 {
-                    for (const auto& [specLabel, races] : bySpec)
-                    {
-                        std::string raceList;
-                        for (const auto& r : races)
-                        {
-                            if (!raceList.empty()) raceList += ", ";
-                            raceList += r;
-                        }
-                        ImGui::BulletText("%s  (races seen: %s)", specLabel.c_str(), raceList.c_str());
-                    }
+                    for (const auto& specLabel : specs)
+                        ImGui::BulletText("%s", specLabel.c_str());
                     ImGui::TreePop();
                 }
             }
+
+            std::string raceList;
+            for (const auto& r : group.racesSeen)
+            {
+                if (!raceList.empty()) raceList += ", ";
+                raceList += r;
+            }
+            ImGui::TextDisabled("Races seen: %s", raceList.empty() ? "(none)" : raceList.c_str());
+
             ImGui::TreePop();
         }
         ImGui::PopID();

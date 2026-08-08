@@ -20,7 +20,7 @@ Mumble::Identity*    s_mumbleIdentity = nullptr;
 Mumble::Data*        s_mumbleLink     = nullptr;
 RTAPI::RealTimeData* s_rtapiData      = nullptr;
 
-} // namespace
+} //. namespace
 
 void GameState_Init(AddonAPI_t* aApi)
 {
