@@ -118,10 +118,16 @@ bool PrepareAllStatements(std::string& outError)
         "INSERT OR IGNORE INTO effects (guid_b64, name, block_group, block_member, type, category_path) "
         "VALUES (?1, ?2, ?3, ?4, ?5, '')";
 
+    //_ Upsert -- race is no longer part of the UNIQUE key (see effect_db.h), so
+    // a repeat ORs its bit into the existing row. WHERE keeps an already-seen
+    // race a true no-op write, not just a no-op value.
     static const char* kInsertOccurrence =
-        "INSERT OR IGNORE INTO occurrences "
-        "(guid_b64, duration, a4, a6, self_mask, profession, race, specialization) "
-        "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)";
+        "INSERT INTO occurrences "
+        "(guid_b64, duration, a4, a6, self_mask, profession, race_mask, specialization) "
+        "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) "
+        "ON CONFLICT(guid_b64, duration, a4, a6, self_mask, profession, specialization) "
+        "DO UPDATE SET race_mask = race_mask | excluded.race_mask "
+        "WHERE (race_mask & excluded.race_mask) != excluded.race_mask";
 
     static const char* kInsertGroupMember =
         "INSERT OR IGNORE INTO group_members (starter_guid_b64, duration, a4, member_guid_b64) "
@@ -134,7 +140,7 @@ bool PrepareAllStatements(std::string& outError)
         "SELECT 1 FROM effects WHERE guid_b64 = ?1 LIMIT 1";
 
     static const char* kSelectOccurrence =
-        "SELECT duration, a4, a6, self_mask, profession, race, specialization "
+        "SELECT duration, a4, a6, self_mask, profession, race_mask, specialization "
         "FROM occurrences WHERE guid_b64 = ?1";
 
     //_ Ordered by (duration, a4, member) rather than left to sqlite's
@@ -207,9 +213,9 @@ bool CreateSchemaIfNeeded(std::string& outError)
         "  a6             TEXT NOT NULL,"
         "  self_mask      INTEGER NOT NULL,"
         "  profession     INTEGER NOT NULL,"
-        "  race           INTEGER NOT NULL,"
+        "  race_mask      INTEGER NOT NULL,"
         "  specialization INTEGER NOT NULL,"
-        "  UNIQUE(guid_b64, duration, a4, a6, self_mask, profession, race, specialization)"
+        "  UNIQUE(guid_b64, duration, a4, a6, self_mask, profession, specialization)"
         ");"
         "CREATE INDEX IF NOT EXISTS idx_occurrences_guid ON occurrences(guid_b64);"
         "CREATE TABLE IF NOT EXISTS group_members ("
@@ -383,7 +389,9 @@ void EffectDb_RecordEvent(const EffectDbRawEvent& ev)
     else if (sqlite3_changes(s_db) > 0)
         ++s_generation;   //. a genuinely new guid -- the tree overlay needs to pick this up
 
-    //. occurrences: UNIQUE constraint makes a repeat tuple a silent no-op
+    //_ occurrences: race is no longer part of the UNIQUE key -- a repeat tuple
+    // upserts, OR'ing ev.race's bit into the row (see kInsertOccurrence's
+    // comment).
     sqlite3_reset(s_insertOccurrenceStmt);
     sqlite3_clear_bindings(s_insertOccurrenceStmt);
     sqlite3_bind_text(s_insertOccurrenceStmt, 1, ev.guid_b64.c_str(), -1, SQLITE_TRANSIENT);
@@ -392,7 +400,7 @@ void EffectDb_RecordEvent(const EffectDbRawEvent& ev)
     sqlite3_bind_text(s_insertOccurrenceStmt, 4, ev.a6.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_int(s_insertOccurrenceStmt, 5, static_cast<int>(ev.selfMask));
     sqlite3_bind_int(s_insertOccurrenceStmt, 6, static_cast<int>(static_cast<unsigned char>(ev.profession)));
-    sqlite3_bind_int(s_insertOccurrenceStmt, 7, static_cast<int>(static_cast<unsigned char>(ev.race)));
+    sqlite3_bind_int64(s_insertOccurrenceStmt, 7, static_cast<sqlite3_int64>(EffectDb_RaceBit(ev.race)));
     sqlite3_bind_int(s_insertOccurrenceStmt, 8, static_cast<int>(ev.specialization));
     if (sqlite3_step(s_insertOccurrenceStmt) != SQLITE_DONE)
         LogFailure(std::string("EffectDb_RecordEvent: occurrence insert failed: ") + sqlite3_errmsg(s_db));
@@ -491,10 +499,19 @@ std::vector<EffectDbOccurrence> EffectDb_GetOccurrences(const std::string& guid_
         o.a6             = reinterpret_cast<const char*>(sqlite3_column_text(s_selectOccurrenceStmt, 2));
         o.self_mask      = static_cast<EffectDbSelfMask>(sqlite3_column_int(s_selectOccurrenceStmt, 3));
         o.profession     = static_cast<Mumble::EProfession>(sqlite3_column_int(s_selectOccurrenceStmt, 4));
-        o.race           = static_cast<Mumble::ERace>(sqlite3_column_int(s_selectOccurrenceStmt, 5));
+        o.raceMask       = static_cast<EffectDbRaceMask>(sqlite3_column_int64(s_selectOccurrenceStmt, 5));
         o.specialization = static_cast<unsigned int>(sqlite3_column_int(s_selectOccurrenceStmt, 6));
         out.push_back(o);
     }
+    return out;
+}
+
+std::vector<Mumble::ERace> EffectDb_RacesInMask(EffectDbRaceMask mask)
+{
+    std::vector<Mumble::ERace> out;
+    for (unsigned bit = 0; bit < sizeof(EffectDbRaceMask) * 8; ++bit)
+        if (mask & (EffectDbRaceMask{1} << bit))
+            out.push_back(static_cast<Mumble::ERace>(bit));
     return out;
 }
 

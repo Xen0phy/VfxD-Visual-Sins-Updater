@@ -409,7 +409,7 @@ nlohmann::ordered_json BuildOccurrencesJson(const std::string& guid_b64)
         o["a6"]             = occ.a6;
         o["self_mask"]      = static_cast<int>(occ.self_mask);
         o["profession"]     = static_cast<int>(static_cast<unsigned char>(occ.profession));
-        o["race"]           = static_cast<int>(static_cast<unsigned char>(occ.race));
+        o["race_mask"]      = occ.raceMask;
         o["specialization"] = occ.specialization;
         occurrences.push_back(std::move(o));
     }

@@ -151,11 +151,12 @@ void RenderForScienceDetail(const std::string& guid_b64)
     for (const auto& occ : occs)
     {
         std::string profName  = GameState_ProfessionName(occ.profession);
-        std::string raceName  = GameState_RaceName(occ.race);
         const char* specName  = SpecializationName(occ.specialization);
         std::string specLabel = specName ? std::string(specName) : ("Spec #" + std::to_string(occ.specialization));
 
-        groups[{ occ.duration, occ.a4, occ.a6, static_cast<int>(occ.self_mask) }][profName][specLabel].insert(raceName);
+        auto& raceNames = groups[{ occ.duration, occ.a4, occ.a6, static_cast<int>(occ.self_mask) }][profName][specLabel];
+        for (Mumble::ERace race : EffectDb_RacesInMask(occ.raceMask))
+            raceNames.insert(GameState_RaceName(race));
     }
 
     int groupIdx = 0;

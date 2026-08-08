@@ -490,15 +490,16 @@ void RenderEffectDbDetail(const nlohmann::ordered_json& effect)
             int          selfMask = occ.value("self_mask", 0);
 
             auto profession = static_cast<Mumble::EProfession>(occ.value("profession", 0));
-            auto race       = static_cast<Mumble::ERace>(occ.value("race", 0));
+            auto raceMask   = static_cast<EffectDbRaceMask>(occ.value("race_mask", 0u));
             unsigned int specId = occ.value("specialization", 0u);
 
             std::string profName = GameState_ProfessionName(profession);
-            std::string raceName = GameState_RaceName(race);
             const char* specName = SpecializationName(specId);
             std::string specLabel = specName ? std::string(specName) : ("Spec #" + std::to_string(specId));
 
-            groups[{ duration, a4, a6, selfMask }][profName][specLabel].insert(raceName);
+            auto& raceNames = groups[{ duration, a4, a6, selfMask }][profName][specLabel];
+            for (Mumble::ERace race : EffectDb_RacesInMask(raceMask))
+                raceNames.insert(GameState_RaceName(race));
         }
 
         //_ Loop index, not a pointer/address, for PushID below -- `groups`

@@ -3,95 +3,41 @@
 //--------------------------------------------------------------------------------
 // The "for science" effect database -- a self-only, autonomous capture of
 // every distinct (guid, block, type) identity this addon has seen, plus
-// every distinct (duration, a4, a6, self_mask, profession, race,
-// specialization) combination each of those identities has shown up
-// under. Separate concern from live_log.h: that module folds one entry
-// per guid for on-screen display and is cleared per-session; this module
-// never folds and never clears -- it's meant to accumulate across every
-// session, permanently, on disk.
+// every distinct (duration, a4, a6, self_mask, profession, specialization)
+// combination each identity has shown up under, with a bitmask of every
+// race that combination has been seen on (see EffectDbRaceMask). Separate
+// concern from live_log.h: that module folds one entry per guid for
+// on-screen display and is cleared per-session; this module never folds
+// and never clears -- it accumulates across every session, permanently,
+// on disk.
 //
 // Deliberately does NOT store: installedBehavior (this db doesn't care
 // what the user's own sin file does with a guid -- see live_log.h for
 // that), mapID (self-only capture makes it redundant with
 // profession/race/specialization, which already localize "where" in the
-// sense that matters here), or free-text notes (decided against --
-// too much upkeep for a background capture tool).
-//--------------------------------------------------------------------------------
-// Storage shape (SQLite, one file, see EffectDb_Open):
+// sense that matters here), or free-text notes (decided against -- too
+// much upkeep for a background capture tool).
 //
-//   effects
-//     guid_b64       PK
-//     name           from the infostr line's trailing name, "" for a
-//                    type 1/11 marker row that has none. Refreshed by
-//                    EffectDb_SetName only -- never overwritten by
-//                    ingestion once a row exists, so a user rename
-//                    survives later sightings of the same guid.
-//     block_group    5 chars, "" if this guid's infostr had no dotted
-//                    block at all
-//     block_member   5 chars, "" likewise
-//     type
-//     category_path  '\x1f'-joined path segments (see
-//                    EffectDb_SetCategoryPath), "" if never placed
-//
-//   occurrences
-//     guid_b64       FK -> effects.guid_b64
-//     duration
-//     a4
-//     a6
-//     self_mask      see EffectDbSelfMask
-//     profession
-//     race
-//     specialization
-//     UNIQUE(guid_b64, duration, a4, a6, self_mask, profession, race,
-//            specialization) -- a repeat of an already-seen combination
-//            is a silent no-op insert, not a new row. This is what makes
-//            the table safe to write to on every single matching event
-//            without the caller pre-checking for duplicates itself.
-//
-//   group_members
-//     starter_guid_b64  guid of the type:1/11 line that opened the group
-//     duration          the starter's duration
-//     a4                the starter's a4
-//     member_guid_b64   FK -> effects.guid_b64; a distinct guid seen while
-//                       that group was open, including the starter itself
-//                       (its own row has member_guid_b64 == starter_guid_b64)
-//     UNIQUE(starter_guid_b64, duration, a4, member_guid_b64) -- same
-//            "record the fact once" convention as occurrences.
-//
-//     This table exists because group membership can NOT be reconstructed
-//     later from `occurrences` alone, for two separate reasons, both
-//     confirmed against real log data rather than hypothetical:
-//       1. `occurrences` is deduplicated (see its own UNIQUE constraint
-//          above) -- a repeat sighting of an already-seen tuple writes
-//          nothing, so whether a *particular* firing happened to be
-//          preceded by a live, unbroken type:1/11 run is exactly the
-//          information that write throws away.
-//       2. (duration, a4) pairs get reused by unrelated effects (an open
-//          hypothesis below already documents a real example) -- so
-//          querying "everything that shares this starter's (duration,
-//          a4)" is not the same question as "everything that was actually
-//          in this group," and would silently merge unrelated data.
-//     The starter's own (duration, a4) is included in this table's key
-//     (not just starter_guid_b64) for the same reason: the same starter
-//     guid can open the group with different numbers on a later cast
-//     (see the "signature stamp" hypothesis below) -- whether that
-//     later firing has the same member set as an earlier one is itself
-//     an open question this table is meant to let someone actually check,
-//     not something to assume by merging them together at write time.
-//     Read side: EffectDb_GetGroupsStarted / EffectDb_GetGroupsMemberOf
-//     (below) expose this table for the tree/live-log "group info"
-//     display -- a raw membership browse, not pattern detection, so it
-//     doesn't run afoul of "Occurrence data was deliberately not wired
-//     into any correlation-detection UI" in the project handoff doc. That
-//     caution is about inferring/asserting a hypothesis (e.g. "a4
-//     determines group membership"); this is just showing the rows that
-//     are already there.
-//
-// guid_b64/block/type on `effects` are first-seen-wins: EffectDb_RecordEvent
-// never updates them on a guid that already has a row. If that
-// assumption -- block/type as a fixed identity -- ever turns out to be
-// wrong for some guid, that's a real finding, not a bug to code around
-// here; see the occurrences table for what already does vary.
+// Backed by a single SQLite file (see EffectDb_Open), holding three
+// tables: effects (one row per identity, first-seen-wins on
+// guid_b64/block/type -- a later sighting never overwrites them, since
+// that would paper over a real finding about the identity rather than
+// record one), occurrences (one row per distinct tuple per guid, race
+// folded into a bitmask rather than one row per race -- see
+// EffectDbRaceMask), and group_members (which type:1/11 "starter" guid
+// each guid was seen alongside, keyed by the starter's own (guid,
+// duration, a4) since a later cast of the same starter can open a
+// differently-membered group). group_members exists because membership
+// can't be recovered from occurrences alone: occurrences is deduplicated,
+// so a repeat sighting says nothing about whether *that* firing followed
+// a live type:1/11 run, and (duration, a4) pairs get reused across
+// unrelated effects, so grouping occurrences by a shared (duration, a4)
+// would silently merge data that was never actually together. See
+// EffectDb_RecordEvent for how all three tables are written, and
+// EffectDb_GetGroupsStarted / EffectDb_GetGroupsMemberOf for how
+// group_members is read back as a raw membership browse -- not pattern
+// detection, which occurrence data is deliberately kept out of (see this
+// module's own design discussion).
 //--------------------------------------------------------------------------------
 
 #pragma once
@@ -117,6 +63,30 @@ enum EffectDbSelfMask : uint8_t
     kSelfMaskCaster = 0b10,
     kSelfMaskBoth   = 0b11,
 };
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// EffectDbRaceMask / EffectDb_RaceBit / EffectDb_RacesInMask
+//--------------------------------------------------------------------------------
+// One bit per Mumble::ERace value, stored on `occurrences` as race_mask
+// instead of one full row per race (see the schema writeup up top). uint32_t
+// gives headroom past today's 5 known values (Asura..Sylvari), so a future
+// ERace addition is just a higher bit -- no schema change, no edit needed
+// here.
+//
+// EffectDb_RaceBit is the single-race bit EffectDb_RecordEvent ORs in on each
+// sighting. EffectDb_RacesInMask is the inverse -- every bit set in `mask`,
+// unpacked back to ERace values for a caller rendering "races seen" (see
+// live_log_ui.cpp / installed_tree_view.cpp). Loops the full 32-bit width, not
+// just today's 5, so a future ERace value shows up here without an edit.
+//--------------------------------------------------------------------------------
+using EffectDbRaceMask = uint32_t;
+
+inline EffectDbRaceMask EffectDb_RaceBit(Mumble::ERace race)
+{
+    return EffectDbRaceMask{1} << static_cast<unsigned char>(race);
+}
+
+std::vector<Mumble::ERace> EffectDb_RacesInMask(EffectDbRaceMask mask);
 
 //********************************************************************************
 // EffectDbRawEvent
@@ -174,7 +144,7 @@ struct EffectDbOccurrence
     EffectDbSelfMask self_mask = kSelfMaskNone;
 
     Mumble::EProfession  profession{};
-    Mumble::ERace         race{};
+    EffectDbRaceMask      raceMask = 0;  //. see EffectDb_RacesInMask to unpack
     unsigned int          specialization = 0;
 };
 
@@ -274,28 +244,17 @@ std::string EffectDb_Poll(const std::string& denoiserAddonDir);
 // EffectDb_RecordEvent
 //--------------------------------------------------------------------------------
 // No-op if EffectDb_IsEnabled() is false. Upserts `ev` into effects and
-// occurrences, and -- when ev.groupStarterGuid is non-empty -- into
-// group_members too: an EFFECTS row is inserted only if guid_b64 isn't
-// already known (first seen wins on name/block/type -- see the file-level
-// comment on why this is deliberate, not a shortcut); an OCCURRENCES row
-// is inserted only if this exact tuple hasn't been seen before for this
-// guid (silent no-op otherwise, per the UNIQUE constraint); a
-// GROUP_MEMBERS row records (ev.groupStarterGuid, ev.duration, ev.a4,
-// ev.guid_b64), again a silent no-op on repeat. All three inserts happen
-// in the one transaction below, so a group's starter guid always has its
-// own EFFECTS row committed before any member row that references it
-// (the starter's own event is always recorded first in real capture
-// order).
+// occurrences (see the file-level comment for what each table stores),
+// and into group_members too when ev.groupStarterGuid is non-empty. Each
+// insert is a silent no-op on a tuple that's already there, so the
+// caller never needs to pre-check for duplicates. All three happen in
+// one transaction, so a group's starter always has its own effects row
+// committed before any member row that references it.
 //
-// Caller is responsible for only ever passing self-involved events --
-// this module trusts ev.selfMask rather than re-deriving it, same
-// "passed in, not read from statics" convention live_log.h/report_ui.h
-// already use. In the current (caster-only) phase, ev.selfMask should
-// always be kSelfMaskCaster; kSelfMaskNone is never valid to pass here
-// (an event involving self in neither role has nothing to record against
-// profession/race/specialization and shouldn't have reached this call at
-// all) -- kSelfMaskTarget/kSelfMaskBoth are reserved for once
-// target-watching is added, not yet produced by anything.
+// Caller must only ever pass self-involved events -- ev.selfMask is
+// trusted as-is, never re-derived here. It should always be
+// kSelfMaskCaster for now; kSelfMaskTarget/kSelfMaskBoth are reserved
+// for once target-watching is added.
 //--------------------------------------------------------------------------------
 void EffectDb_RecordEvent(const EffectDbRawEvent& ev);
 
@@ -313,23 +272,17 @@ bool EffectDb_IsKnownGuid(const std::string& guid_b64);
 // EffectDb_GetGeneration
 //--------------------------------------------------------------------------------
 // Bumped on any write that could change what a tree overlay built from
-// this module's data should look like: a genuinely new effect row (a
-// dedup no-op does NOT bump this -- see EffectDb_RecordEvent, which is
-// called at high frequency and would otherwise force a full tree-overlay
-// rebuild on every repeat sighting), a successful EffectDb_SetName, or a
-// successful EffectDb_SetCategoryPath. Deliberately NOT bumped on a new
-// occurrence row alone -- nothing the tree currently renders depends on
-// occurrences (that's the "for science" detail expansion, not yet
-// built), and duration/a4/class combinations vary often enough on an
-// already-known guid that bumping for those too would rebuild the
-// overlay far more than the tree actually needs.
+// this data should look like: a genuinely new effect row (not a dedup
+// no-op -- see EffectDb_RecordEvent, called at high frequency), a
+// successful EffectDb_SetName, or a successful EffectDb_SetCategoryPath.
+// Deliberately NOT bumped for a new occurrence row alone -- nothing the
+// tree currently renders depends on occurrences yet, and those vary too
+// often on an already-known guid to justify rebuilding for them too.
 //
 // Same purpose as GetInstalledTreeGeneration in installed_tree_store.h --
-// lets a cache built over this data (see installed_tree_overlay.h's
-// BuildEffectDbOverlayTree and its caller in installed_tree_view.cpp)
-// tell "this actually changed" apart from "same generation I already
-// built my cache from", without every consumer needing its own
-// invalidation hook.
+// lets a cache built over this data (see BuildEffectDbOverlayTree in
+// installed_tree_overlay.h) tell "this changed" apart from "same
+// generation I already built from", without its own invalidation hook.
 //--------------------------------------------------------------------------------
 int EffectDb_GetGeneration();
 
@@ -347,38 +300,31 @@ std::vector<EffectDbEffect> EffectDb_GetAllEffects();
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // EffectDb_GetOccurrences
 //--------------------------------------------------------------------------------
-// Every distinct (duration, a4, a6, self_mask, profession, race,
-// specialization) row recorded for guid_b64, for the "for science"
-// expanded tree view (duration/a4/a6 -> class -> spec, race folded in as
-// an annotation -- see this module's callers for how that's grouped;
-// this just returns the flat rows). Empty if guid_b64 is unknown.
+// Every distinct (duration, a4, a6, self_mask, profession, specialization)
+// row recorded for guid_b64, for the "for science" expanded tree view
+// (duration/a4/a6 -> class -> spec, race_mask unpacked into the races
+// seen and folded in as an annotation -- see EffectDb_RacesInMask and
+// this module's callers for how that's grouped; this just returns the
+// flat rows). Empty if guid_b64 is unknown.
 //--------------------------------------------------------------------------------
 std::vector<EffectDbOccurrence> EffectDb_GetOccurrences(const std::string& guid_b64);
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // EffectDb_GetGroupsStarted / EffectDb_GetGroupsMemberOf
 //--------------------------------------------------------------------------------
-// Both read group_members (see the file-level comment on that table for
-// why it exists and what it does/doesn't let you reconstruct).
+// Both read group_members (see the file-level comment for why it exists
+// and what it does/doesn't let you reconstruct).
 //
-//  - GetGroupsStarted(guid_b64): every distinct (duration, a4) instance
-//    where guid_b64 was the *starter* (the type:1/11 line that opened
-//    the group), each with the full set of member guids recorded under
-//    that specific instance -- including guid_b64 itself, per
-//    EffectDbGroupInstance's own doc comment. Empty if this guid has
-//    never opened a group.
+//  - GetGroupsStarted(guid_b64): every (duration, a4) instance where
+//    guid_b64 was the *starter*, with the full member set recorded
+//    under that instance -- including guid_b64 itself.
 //  - GetGroupsMemberOf(guid_b64): every (starter guid, duration, a4)
-//    instance where guid_b64 showed up as a member of a group *someone
-//    else* started (starter_guid_b64 != guid_b64 -- a guid's own
-//    membership in a group it started itself is already covered by
-//    GetGroupsStarted, and would otherwise show up redundantly in both).
-//    Empty if this guid has never been swept into another guid's group.
+//    instance where guid_b64 was a member of a group *someone else*
+//    started; a guid's own group is already covered above, so it's
+//    excluded here rather than listed in both.
 //
-// Both empty if guid_b64 has no group_members rows at all -- most guids,
-// since only type:1/11 lines and whatever fired while one was open ever
-// get one. Ordered by (duration, a4) [/ starter guid] for stable,
-// deterministic iteration, same reason the occurrences grouping map
-// elsewhere in this codebase uses std::map rather than an unordered one.
+// Both empty if guid_b64 has no group_members rows. Ordered by
+// (duration, a4) [/ starter guid] for stable, deterministic iteration.
 //--------------------------------------------------------------------------------
 std::vector<EffectDbGroupInstance>   EffectDb_GetGroupsStarted(const std::string& guid_b64);
 std::vector<EffectDbGroupMembership> EffectDb_GetGroupsMemberOf(const std::string& guid_b64);
