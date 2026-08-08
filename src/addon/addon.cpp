@@ -282,12 +282,9 @@ void OptionsRenderCallback()
         return;
     }
 
-    //_ Rate-limited internally to ~1/sec -- cheap to call unconditionally
-    // every time this panel draws. Only ever non-empty the one frame
-    // "for science" capture stops because VfxD_Greed.json vanished out
-    // from under it -- see effect_db.h. Latched into a static rather than
-    // shown only that single frame, since a message that flashes for one
-    // frame and vanishes is as good as no message at all.
+    //_ EffectDb_Poll rate-limits itself internally (see effect_db.h),
+    // so calling it unconditionally here is cheap. Latched into a
+    // static so a stop message outlives the single frame it is returned on.
     static std::string s_effectDbStoppedMsg;
     std::string polled = EffectDb_Poll(s_denoiserAddonDir);
     if (!polled.empty())

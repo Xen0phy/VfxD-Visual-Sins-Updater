@@ -309,6 +309,97 @@ void RenderConflictSources(const nlohmann::ordered_json& effect)
 }
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// GroupMemberLabel
+//------------------------------------------------------------------------------
+// A group_members row only ever stores a guid -- resolve it to the db's
+// own name for display, same "prefer the db name, fall back to the raw
+// guid" convention RenderLiveLogSection's for-science branch already
+// uses. Every guid reaching this table has an EFFECTS row by the FK
+// itself (member_guid_b64 REFERENCES effects(guid_b64)), so the only
+// reason EffectDb_GetEffect would fail here is the guid never having
+// been renamed -- name is then "", and this still falls back correctly.
+//------------------------------------------------------------------------------
+std::string GroupMemberLabel(const std::string& guid_b64)
+{
+    EffectDbEffect eff{};
+    if (EffectDb_GetEffect(guid_b64, eff) && !eff.name.empty())
+        return eff.name;
+    return guid_b64;
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// RenderGroupInfo
+//------------------------------------------------------------------------------
+// The "group info" section RenderEffectDbDetail and (mirrored, reading
+// straight from EffectDb_GetGroupsStarted/MemberOf instead of this json)
+// live_log_ui.cpp's RenderForScienceDetail both show -- see effect_db.h's
+// group_members doc comment for what this table does and doesn't let you
+// reconstruct. `detail` is one guid's "__vfxd_db_by_guid" entry, already
+// carrying "groups": {"started": [...], "member_of": [...]} baked in by
+// BuildGroupsJson at cache-rebuild time (installed_tree_overlay.cpp) --
+// this function only renders, it never queries the db itself.
+//
+// Two separate lists, not one merged view, because they answer different
+// questions: "started" is every distinct (duration, a4) instance this
+// guid opened, with who else showed up while it was open; "member_of" is
+// every OTHER guid's group this one got swept into. A guid can appear in
+// both (it opens its own groups sometimes, and rides along in someone
+// else's other times) -- nothing here assumes exclusivity.
+//------------------------------------------------------------------------------
+void RenderGroupInfo(const nlohmann::ordered_json& detail)
+{
+    if (!detail.contains("groups") || !detail["groups"].is_object())
+        return;
+
+    const auto& groups = detail["groups"];
+
+    bool hasStarted   = groups.contains("started")   && groups["started"].is_array()   && !groups["started"].empty();
+    bool hasMemberOf  = groups.contains("member_of") && groups["member_of"].is_array() && !groups["member_of"].empty();
+    if (!hasStarted && !hasMemberOf)
+        return;   //. never opened or been swept into a group -- nothing worth a section for
+
+    if (ImGui::TreeNode("groupinfo", "Group info"))
+    {
+        if (hasStarted)
+        {
+            ImGui::TextDisabled("Groups started by this effect:");
+            int idx = 0;
+            for (const auto& inst : groups["started"])
+            {
+                int          duration = inst.value("duration", 0);
+                unsigned int a4       = inst.value("a4", 0u);
+
+                ImGui::PushID(idx++);
+                if (ImGui::TreeNode("startedgroup", "duration:%d  a4:%u  (%d member%s)",
+                                     duration, a4, static_cast<int>(inst.value("members", nlohmann::ordered_json::array()).size()),
+                                     inst.value("members", nlohmann::ordered_json::array()).size() == 1 ? "" : "s"))
+                {
+                    if (inst.contains("members") && inst["members"].is_array())
+                        for (const auto& m : inst["members"])
+                            ImGui::BulletText("%s", GroupMemberLabel(m.get<std::string>()).c_str());
+                    ImGui::TreePop();
+                }
+                ImGui::PopID();
+            }
+        }
+
+        if (hasMemberOf)
+        {
+            ImGui::TextDisabled("Also seen as a member of other groups:");
+            for (const auto& mo : groups["member_of"])
+            {
+                std::string starter  = mo.value("starter_guid_b64", std::string());
+                int         duration = mo.value("duration", 0);
+                unsigned int a4      = mo.value("a4", 0u);
+                ImGui::BulletText("%s  (duration:%d  a4:%u)", GroupMemberLabel(starter).c_str(), duration, a4);
+            }
+        }
+
+        ImGui::TreePop();
+    }
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // RenderEffectDbDetail
 //------------------------------------------------------------------------------
 // The "for science" expanded view. Called two different ways:
@@ -320,7 +411,7 @@ void RenderConflictSources(const nlohmann::ordered_json& effect)
 //    the block right after "Behaviors" in the normal-effect branch).
 //
 // Either way, reads "__vfxd_db_by_guid" -- an object keyed by guid,
-// {block_group, block_member, type, occurrences} per key -- that
+// {block_group, block_member, type, occurrences, groups} per key -- that
 // BuildEffectDbOverlayTree already embedded on the node (populated once
 // per cache rebuild, not per frame -- see that function). Almost always
 // exactly one guid; a merged multi-guid effect can have more than one,
@@ -338,6 +429,10 @@ void RenderConflictSources(const nlohmann::ordered_json& effect)
 // race-gated, so a race branch would describe sampling coverage, not a
 // real rule; folding it into a "races seen" list makes that distinction
 // visible instead of implying structure that isn't there.
+//
+// "groups" (this guid's group_members rows, both directions) is rendered
+// separately, below the occurrences groups, by RenderGroupInfo -- see
+// that function's own doc comment.
 //------------------------------------------------------------------------------
 void RenderEffectDbDetail(const nlohmann::ordered_json& effect)
 {
@@ -350,13 +445,9 @@ void RenderEffectDbDetail(const nlohmann::ordered_json& effect)
 
     static const char* kSelfMaskLabels[] = { "none", "target", "caster", "both" };
 
-    //_ Almost always exactly one guid -- a merged (multi-guid) effect can
-    // have more than one entry here if capture data exists for more than
-    // one of its guids separately (see BuildEffectDbOverlayTree's own
-    // comment on why this is an object keyed by guid rather than a flat
-    // field). Each guid renders its own header + groups, since block/
-    // type/occurrences are properties of that specific guid, not of the
-    // effect as a whole.
+    //_ Almost always exactly one guid -- a merged effect can have
+    // more than one entry if capture data exists for more than one
+    // of its guids separately (see BuildEffectDbOverlayTree).
     int guidIdx = 0;
     for (const auto& [guid, detail] : effect["__vfxd_db_by_guid"].items())
     {
@@ -377,15 +468,17 @@ void RenderEffectDbDetail(const nlohmann::ordered_json& effect)
         if (!detail.contains("occurrences") || !detail["occurrences"].is_array() || detail["occurrences"].empty())
         {
             ImGui::TextDisabled("No occurrences recorded yet.");
+            //_ Still worth checking for group data below even with no
+            // occurrences -- doesn't happen in practice today (see
+            // EffectDb_RecordEvent), but costs nothing if empty.
+            RenderGroupInfo(detail);
             ImGui::PopID();
             continue;
         }
 
-        //_ (duration, a4, a6, self_mask) -> profession -> specialization
-        // -> races seen. std::map keeps both levels in a stable,
-        // deterministic order across frames (needed for TreeNode
-        // open/closed state below to actually persist -- see the
-        // loop-index PushID note further down).
+        //_ (duration, a4, a6, self_mask) -> profession -> specialization ->
+        // races seen. std::map keeps both levels in stable order across
+        // frames, so nested TreeNode open state below persists (see loop-index note below).
         std::map<std::tuple<int, unsigned int, std::string, int>,
                  std::map<std::string, std::map<std::string, std::set<std::string>>>> groups;
 
@@ -409,12 +502,8 @@ void RenderEffectDbDetail(const nlohmann::ordered_json& effect)
         }
 
         //_ Loop index, not a pointer/address, for PushID below -- `groups`
-        // is rebuilt fresh every frame this function runs, so an
-        // address-based ID would change every frame and reset every
-        // nested TreeNode's open/closed state on the very next frame.
-        // Index is stable as long as the underlying data (and therefore
-        // std::map's iteration order) hasn't changed since the last
-        // frame, which is exactly the guarantee this needs.
+        // is rebuilt fresh every frame, so an address-based ID would
+        // reset every nested TreeNode's open state next frame; index stays stable.
         int groupIdx = 0;
         for (const auto& [sig, byProf] : groups)
         {
@@ -447,9 +536,13 @@ void RenderEffectDbDetail(const nlohmann::ordered_json& effect)
             ImGui::PopID();
         }
 
+        RenderGroupInfo(detail);
+
         ImGui::PopID();
     }
 }
+
+//******************************************************************************
 // OverlayCacheEntry
 //------------------------------------------------------------------------------
 // generation           tree generation this copy was built from
@@ -461,7 +554,7 @@ void RenderEffectDbDetail(const nlohmann::ordered_json& effect)
 //                      the check below is always true) everywhere else
 // file                 the built (dupe/diff/db-tagged) copy of the
 //                      installed tree
-//--------------------------------------------------------------------------------
+//------------------------------------------------------------------------------
 // Per-sin cache entry backing s_overlayCache -- see the file header for why
 // this cache exists. Invalidated on GetInstalledTreeGeneration() changing
 // (file reloaded/edited), the sin's own EDiffStatus changing (a diff
@@ -625,12 +718,9 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
         ImGui::PopID();
     }
 
-    //_ Drop target for an effect dragged from elsewhere in this sin file, a
-    // category reorder, or a db-only node's category placement --
-    // attaches to the row itself, so it accepts a drop whether open or
-    // collapsed. The effect/category accepts below are still gated on
-    // !categoryVirtual (nothing real on disk yet to move into, same
-    // reason as Rename); the db-only accept isn't -- see its own comment.
+    //_ Drop target for an effect dragged from elsewhere, a category
+    // reorder, or a db-only node's placement -- attaches to the row so
+    // it works whether open or collapsed; db-only accepts skip the !categoryVirtual gate.
     if (ImGui::BeginDragDropTarget())
     {
         if (!categoryVirtual && ImGui::AcceptDragDropPayload("VFXD_EFFECT"))
@@ -691,18 +781,8 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
         }
 
         //_ TODO #2 from the effect-db handoff doc: db-only category
-        // placement. Deliberately NOT gated on !categoryVirtual -- the
-        // synthetic "Unrecognized (for science)" bucket
-        // BuildEffectDbOverlayTree materializes is itself a legitimate
-        // (if redundant, since an empty category_path already renders
-        // there) drop target, and any other virtual category only exists
-        // because EffectDb_SetCategoryPath is about to make it real --
-        // that's the whole point of "materializing a virtual category
-        // header", see EffectDb_SetCategoryPath's own doc comment. Only
-        // offered within Greed's own tree -- a db-only node's drag
-        // source only ever exists there (see BuildEffectDbOverlayTree),
-        // so this mirrors the same-sin guard every other accept above
-        // uses.
+        // placement. Not gated on !categoryVirtual -- a virtual
+        // category here only exists because this drop makes it real.
         if (sinName == "Greed" && ImGui::AcceptDragDropPayload("VFXD_DBONLY_GUID"))
         {
             const DbOnlyGuidDragPayload& dbDragPayload = GetDbOnlyGuidDragPayload();
@@ -838,8 +918,7 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
 
                 //_ A synthetic db-only node always has exactly one guid --
                 // see BuildEffectDbOverlayTree. That guid is this node's
-                // whole identity for the "for science" actions below,
-                // since it has no stable JSON (path, index) position.
+                // whole identity below, since it has no stable JSON (path, index) position.
                 std::string dbOnlyGuid;
                 if (effIsDbOnly && effect.contains("guids") && effect["guids"].is_array() &&
                     !effect["guids"].empty() && effect["guids"][0].is_string())
@@ -883,9 +962,7 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
 
                 //_ Places a dragged effect immediately above this row --
                 // complements the category-row target above so together
-                // they reach every position. Not offered on an overlay-only
-                // effect (__vfxd_new/__vfxd_rework): no stable real on-disk
-                // position while only previewed.
+                // they cover every position; skipped for an overlay-only effect.
                 if (!effIsNew && !effIsRework && !effIsDbOnly && ImGui::BeginDragDropTarget())
                 {
                     if (ImGui::AcceptDragDropPayload("VFXD_EFFECT"))
@@ -947,11 +1024,8 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                 }
 
                 //_ TODO #2 from the effect-db handoff doc: a db-only
-                // node's own drag source, for placing it into a category
-                // by dropping it on a category row's target above (see
-                // that target's VFXD_DBONLY_GUID accept). Only offered on
-                // a known guid, same gate as the db-only context menu
-                // below, and while no other edit is in flight.
+                // node's own drag source, for dropping onto a category
+                // row's VFXD_DBONLY_GUID accept above. Same gates as the menu below.
                 if (effIsDbOnly && !dbOnlyGuid.empty() && !AnyEditInFlight() && ImGui::BeginDragDropSource())
                 {
                     BeginDbOnlyGuidDrag(dbOnlyGuid, effName);
@@ -962,8 +1036,7 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
 
                 //_ Only offered when no edit is in flight anywhere, and
                 // never on an overlay-only effect -- nothing at
-                // pathSoFar/effIndex in the real file is guaranteed to be
-                // this same effect until the update is applied.
+                // pathSoFar/effIndex is guaranteed to be it until applied.
                 if (!effIsNew && !effIsRework && !effIsDbOnly && !AnyEditInFlight() && ImGui::BeginPopupContextItem("effect_ctx"))
                 {
                     if (ImGui::MenuItem("Edit"))
@@ -972,11 +1045,8 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                 }
 
                 //_ The db-only counterpart of the context menu above --
-                // was deliberately absent entirely until now (see the
-                // effect-db handoff doc's TODO #1). Only offered on a
-                // known guid (dbOnlyGuid non-empty) and while no other
-                // edit is in flight, same gating as every other context
-                // menu here.
+                // was absent entirely until now (see the effect-db
+                // handoff doc's TODO #1). Same gating: known guid, no other edit in flight.
                 if (effIsDbOnly && !dbOnlyGuid.empty() && !AnyEditInFlight() && ImGui::BeginPopupContextItem("dbonly_ctx"))
                 {
                     if (ImGui::MenuItem("Add to JSON"))
@@ -1128,17 +1198,9 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                                 RenderBehavior(behavior);
                         }
 
-                        //_ Present whenever "for science" has captured
-                        // self-cast data for this guid -- which, in
-                        // practice, is most of what gets captured during
-                        // ordinary play (FeedEffectDb doesn't care
-                        // whether a guid is already curated into a sin
-                        // file). Collapsed by default via TreeNode rather
-                        // than always-expanded, same reasoning as any
-                        // other optional detail block here -- an already-
-                        // real, already-named effect doesn't need this
-                        // pushed in front of anyone who isn't looking for
-                        // it.
+                        //_ Present whenever "for science" has captured data for
+                        // this guid -- most of what gets captured during play.
+                        // Collapsed by default, like other optional blocks.
                         if (effect.contains("__vfxd_db_by_guid") && effect["__vfxd_db_by_guid"].is_object()
                             && !effect["__vfxd_db_by_guid"].empty())
                         {
@@ -1317,13 +1379,9 @@ void RenderInstalledEffects(const std::string& denoiserAddonDir)
         auto        dupIt    = duplicateGuidsBySin.find(sin.sinName);
         bool        hasDupes = dupIt != duplicateGuidsBySin.end() && !dupIt->second.empty();
 
-        //_ "For science" promotion always targets Greed specifically (see
-        // effect_db.h) -- so that's the only sin this overlay is ever
-        // meaningful for. Attempted unconditionally for Greed (not gated
-        // on EffectDb_IsEnabled(), which only reflects whether capture is
-        // currently *running* -- previously captured data should still
-        // render even with capture toggled off) since the builder itself
-        // is cheap when the db has nothing new to add.
+        //_ "For science" promotion always targets Greed (see
+        // effect_db.h) -- not gated on EffectDb_IsEnabled(), so
+        // captured data still renders with capture toggled off.
         bool isGreedSin      = (sin.sinName == "Greed");
         int  effectDbGenNow  = isGreedSin ? EffectDb_GetGeneration() : -1;
 
@@ -1337,16 +1395,9 @@ void RenderInstalledEffects(const std::string& denoiserAddonDir)
             EDiffStatus statusForCache = diff ? diff->status : EDiffStatus::NotLoaded;
             OverlayCacheEntry& cached = s_overlayCache[sin.sinName];
 
-            //_ Deliberately NOT reacting to effectDbGenNow changing on its
-            // own -- "for science" is meant to run fully in the
-            // background during live gameplay with zero rebuild cost;
-            // the tree only picks up new db content the next time a
-            // rebuild happens for an unrelated reason (pressing Refresh,
-            // which always bumps GetInstalledTreeGeneration(); or a real
-            // edit/apply). effectDbGenNow is still recorded below so a
-            // rebuild that DOES happen always captures the freshest db
-            // state available at that moment, rather than whatever was
-            // true the last time this cache entry was built.
+            //_ Deliberately not reacting to effectDbGenNow changing on
+            // its own -- capture runs fully in the background with zero
+            // rebuild cost, picked up on the next unrelated rebuild.
             bool stale = cached.generation != GetInstalledTreeGeneration() || cached.diffStatus != statusForCache;
 
             if (stale)

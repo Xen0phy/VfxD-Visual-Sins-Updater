@@ -48,6 +48,45 @@
 //            the table safe to write to on every single matching event
 //            without the caller pre-checking for duplicates itself.
 //
+//   group_members
+//     starter_guid_b64  guid of the type:1/11 line that opened the group
+//     duration          the starter's duration
+//     a4                the starter's a4
+//     member_guid_b64   FK -> effects.guid_b64; a distinct guid seen while
+//                       that group was open, including the starter itself
+//                       (its own row has member_guid_b64 == starter_guid_b64)
+//     UNIQUE(starter_guid_b64, duration, a4, member_guid_b64) -- same
+//            "record the fact once" convention as occurrences.
+//
+//     This table exists because group membership can NOT be reconstructed
+//     later from `occurrences` alone, for two separate reasons, both
+//     confirmed against real log data rather than hypothetical:
+//       1. `occurrences` is deduplicated (see its own UNIQUE constraint
+//          above) -- a repeat sighting of an already-seen tuple writes
+//          nothing, so whether a *particular* firing happened to be
+//          preceded by a live, unbroken type:1/11 run is exactly the
+//          information that write throws away.
+//       2. (duration, a4) pairs get reused by unrelated effects (an open
+//          hypothesis below already documents a real example) -- so
+//          querying "everything that shares this starter's (duration,
+//          a4)" is not the same question as "everything that was actually
+//          in this group," and would silently merge unrelated data.
+//     The starter's own (duration, a4) is included in this table's key
+//     (not just starter_guid_b64) for the same reason: the same starter
+//     guid can open the group with different numbers on a later cast
+//     (see the "signature stamp" hypothesis below) -- whether that
+//     later firing has the same member set as an earlier one is itself
+//     an open question this table is meant to let someone actually check,
+//     not something to assume by merging them together at write time.
+//     Read side: EffectDb_GetGroupsStarted / EffectDb_GetGroupsMemberOf
+//     (below) expose this table for the tree/live-log "group info"
+//     display -- a raw membership browse, not pattern detection, so it
+//     doesn't run afoul of "Occurrence data was deliberately not wired
+//     into any correlation-detection UI" in the project handoff doc. That
+//     caution is about inferring/asserting a hypothesis (e.g. "a4
+//     determines group membership"); this is just showing the rows that
+//     are already there.
+//
 // guid_b64/block/type on `effects` are first-seen-wins: EffectDb_RecordEvent
 // never updates them on a guid that already has a row. If that
 // assumption -- block/type as a fixed identity -- ever turns out to be
@@ -63,10 +102,14 @@
 #include <string>
 #include <vector>
 
-//_ Caster/target-relative-to-self, as a 2-bit flag rather than a bool,
-// so a later phase that also watches target==self doesn't need a schema
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// EffectDbSelfMask
+//--------------------------------------------------------------------------------
+// Caster/target-relative-to-self, as a 2-bit flag rather than a bool, so a
+// later phase that also watches target==self doesn't need a schema
 // change -- see EffectDb_RecordEvent's doc comment on why kSelfMaskNone
 // can't actually occur yet.
+//--------------------------------------------------------------------------------
 enum EffectDbSelfMask : uint8_t
 {
     kSelfMaskNone   = 0b00,
@@ -94,6 +137,11 @@ struct EffectDbRawEvent
     std::string a6;
     std::string blockGroup;     //. "" if this line had no dotted block
     std::string blockMember;    //. "" likewise
+
+    //_ "" if not part of an open type:1/11 group; otherwise the starter
+    // guid (equal to ev.guid_b64 on the starter's own event). Resolved
+    // by the caller's live group state -- never re-derived here (see AdvanceGroupState).
+    std::string groupStarterGuid;
 
     EffectDbSelfMask selfMask = kSelfMaskNone;
 
@@ -128,6 +176,33 @@ struct EffectDbOccurrence
     Mumble::EProfession  profession{};
     Mumble::ERace         race{};
     unsigned int          specialization = 0;
+};
+
+//********************************************************************************
+// EffectDbGroupInstance / EffectDbGroupMembership
+//--------------------------------------------------------------------------------
+// Read-side mirrors of group_members, split by which end of the FK the
+// query is keyed from -- see EffectDb_GetGroupsStarted/
+// EffectDb_GetGroupsMemberOf just below for which is which.
+//
+// EffectDbGroupInstance::memberGuids includes the starter's own guid
+// (group_members' own convention -- the starter's row has
+// member_guid_b64 == starter_guid_b64), so a group with no other member
+// ever recorded still shows up as a one-member instance rather than an
+// empty one.
+//--------------------------------------------------------------------------------
+struct EffectDbGroupInstance
+{
+    int          duration = 0;
+    unsigned int a4       = 0;
+    std::vector<std::string> memberGuids;
+};
+
+struct EffectDbGroupMembership
+{
+    std::string  starterGuid_b64;
+    int          duration = 0;
+    unsigned int a4       = 0;
 };
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -198,12 +273,19 @@ std::string EffectDb_Poll(const std::string& denoiserAddonDir);
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // EffectDb_RecordEvent
 //--------------------------------------------------------------------------------
-// No-op if EffectDb_IsEnabled() is false. Upserts `ev` into both tables:
-// an EFFECTS row is inserted only if guid_b64 isn't already known (first
-// seen wins on name/block/type -- see the file-level comment on why this
-// is deliberate, not a shortcut); an OCCURRENCES row is inserted only if
-// this exact tuple hasn't been seen before for this guid (silent no-op
-// otherwise, per the UNIQUE constraint).
+// No-op if EffectDb_IsEnabled() is false. Upserts `ev` into effects and
+// occurrences, and -- when ev.groupStarterGuid is non-empty -- into
+// group_members too: an EFFECTS row is inserted only if guid_b64 isn't
+// already known (first seen wins on name/block/type -- see the file-level
+// comment on why this is deliberate, not a shortcut); an OCCURRENCES row
+// is inserted only if this exact tuple hasn't been seen before for this
+// guid (silent no-op otherwise, per the UNIQUE constraint); a
+// GROUP_MEMBERS row records (ev.groupStarterGuid, ev.duration, ev.a4,
+// ev.guid_b64), again a silent no-op on repeat. All three inserts happen
+// in the one transaction below, so a group's starter guid always has its
+// own EFFECTS row committed before any member row that references it
+// (the starter's own event is always recorded first in real capture
+// order).
 //
 // Caller is responsible for only ever passing self-involved events --
 // this module trusts ev.selfMask rather than re-deriving it, same
@@ -272,6 +354,34 @@ std::vector<EffectDbEffect> EffectDb_GetAllEffects();
 // this just returns the flat rows). Empty if guid_b64 is unknown.
 //--------------------------------------------------------------------------------
 std::vector<EffectDbOccurrence> EffectDb_GetOccurrences(const std::string& guid_b64);
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// EffectDb_GetGroupsStarted / EffectDb_GetGroupsMemberOf
+//--------------------------------------------------------------------------------
+// Both read group_members (see the file-level comment on that table for
+// why it exists and what it does/doesn't let you reconstruct).
+//
+//  - GetGroupsStarted(guid_b64): every distinct (duration, a4) instance
+//    where guid_b64 was the *starter* (the type:1/11 line that opened
+//    the group), each with the full set of member guids recorded under
+//    that specific instance -- including guid_b64 itself, per
+//    EffectDbGroupInstance's own doc comment. Empty if this guid has
+//    never opened a group.
+//  - GetGroupsMemberOf(guid_b64): every (starter guid, duration, a4)
+//    instance where guid_b64 showed up as a member of a group *someone
+//    else* started (starter_guid_b64 != guid_b64 -- a guid's own
+//    membership in a group it started itself is already covered by
+//    GetGroupsStarted, and would otherwise show up redundantly in both).
+//    Empty if this guid has never been swept into another guid's group.
+//
+// Both empty if guid_b64 has no group_members rows at all -- most guids,
+// since only type:1/11 lines and whatever fired while one was open ever
+// get one. Ordered by (duration, a4) [/ starter guid] for stable,
+// deterministic iteration, same reason the occurrences grouping map
+// elsewhere in this codebase uses std::map rather than an unordered one.
+//--------------------------------------------------------------------------------
+std::vector<EffectDbGroupInstance>   EffectDb_GetGroupsStarted(const std::string& guid_b64);
+std::vector<EffectDbGroupMembership> EffectDb_GetGroupsMemberOf(const std::string& guid_b64);
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // EffectDb_SetName

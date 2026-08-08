@@ -828,13 +828,9 @@ void ApplyPendingEdit()
     if (!TrySaveOrReport(job.sinName, "Edit applied"))
         return;
 
-    //_ A rename here is meant to write both places when a guid is known to
-    // both -- see effect_db.h's EffectDb_SetName doc comment. This is the
-    // JSON half's caller, so it's also the natural place to drive the
-    // database half: any guid on this effect the database already knows
-    // about gets its name synced too. A guid the database has never seen
-    // is left alone (EffectDb_SetName would just no-op on it anyway) --
-    // this doesn't create new database rows, only updates existing ones.
+    //_ A rename here is meant to write both places when a guid is known
+    // to both (see effect_db.h's EffectDb_SetName). A guid the db has
+    // never seen is left alone -- only existing rows are updated, never new ones created.
     for (const auto& guid : job.newGuids)
         if (EffectDb_IsKnownGuid(guid))
             EffectDb_SetName(guid, job.newName);
@@ -967,17 +963,9 @@ void ApplyPendingDbRename()
 
     s_editResultMessage = "Renamed to \"" + job.newName + "\" in the effect database.";
 
-    //_ EffectDb_SetName already bumped EffectDb_GetGeneration() on its
-    // own, but the overlay cache deliberately does NOT react to that by
-    // itself -- see OverlayCacheEntry's comment on why effect-db
-    // generation changes alone never force a rebuild (that's what kept
-    // live background capture from stuttering the tree). This is
-    // different: a deliberate, user-clicked, one-off action, not
-    // high-frequency capture -- the same category of trigger "pressing
-    // Refresh" already is, per that same design. InvalidateInstalledTree()
-    // forces the next frame's rebuild to pick up the new name rather than
-    // leaving the old one on screen until some unrelated reload happens to
-    // occur.
+    //_ The overlay cache deliberately doesn't react to effect-db
+    // generation bumps alone (see OverlayCacheEntry) -- but this is a
+    // deliberate, user-clicked action, same trigger category as "pressing Refresh".
     InvalidateInstalledTree();
 }
 
@@ -1182,12 +1170,9 @@ void ApplyPendingDbCategoryPlacement()
 
     s_editResultMessage = "Moved \"" + job.effectName + "\" to " + JoinPath(job.categoryPath) + ".";
 
-    //_ Same reasoning as ApplyPendingDbRename: EffectDb_SetCategoryPath
-    // already bumped EffectDb_GetGeneration() on its own, but the overlay
-    // cache deliberately doesn't react to that by itself (see
-    // OverlayCacheEntry's comment) -- this is a deliberate, user-dragged,
-    // one-off action, so force the rebuild explicitly rather than waiting
-    // for an unrelated Refresh/JSON edit.
+    //_ Same reasoning as ApplyPendingDbRename: the overlay cache doesn't
+    // react to the generation bump on its own (see OverlayCacheEntry),
+    // but this is a deliberate, user-dragged action, so force the rebuild explicitly.
     InvalidateInstalledTree();
 }
 

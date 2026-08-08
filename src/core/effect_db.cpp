@@ -31,11 +31,14 @@ AddonAPI_t*  s_api = nullptr;
 bool         s_enabled = false;
 int          s_generation = 0;
 
-sqlite3_stmt* s_insertEffectStmt     = nullptr;
-sqlite3_stmt* s_insertOccurrenceStmt = nullptr;
+sqlite3_stmt* s_insertEffectStmt      = nullptr;
+sqlite3_stmt* s_insertOccurrenceStmt  = nullptr;
+sqlite3_stmt* s_insertGroupMemberStmt = nullptr;
 sqlite3_stmt* s_selectEffectStmt     = nullptr;
 sqlite3_stmt* s_selectKnownStmt      = nullptr;
 sqlite3_stmt* s_selectOccurrenceStmt = nullptr;
+sqlite3_stmt* s_selectGroupsStartedStmt   = nullptr;
+sqlite3_stmt* s_selectGroupsMemberOfStmt  = nullptr;
 sqlite3_stmt* s_updateNameStmt       = nullptr;
 sqlite3_stmt* s_updateCategoryStmt   = nullptr;
 
@@ -97,11 +100,14 @@ std::vector<std::string> SplitCategoryPath(const std::string& joined)
 //--------------------------------------------------------------------------------
 void FinalizeAllStatements()
 {
-    sqlite3_finalize(s_insertEffectStmt);     s_insertEffectStmt     = nullptr;
-    sqlite3_finalize(s_insertOccurrenceStmt); s_insertOccurrenceStmt = nullptr;
-    sqlite3_finalize(s_selectEffectStmt);     s_selectEffectStmt     = nullptr;
+    sqlite3_finalize(s_insertEffectStmt);      s_insertEffectStmt      = nullptr;
+    sqlite3_finalize(s_insertOccurrenceStmt);  s_insertOccurrenceStmt  = nullptr;
+    sqlite3_finalize(s_insertGroupMemberStmt); s_insertGroupMemberStmt = nullptr;
+    sqlite3_finalize(s_selectEffectStmt);      s_selectEffectStmt      = nullptr;
     sqlite3_finalize(s_selectKnownStmt);      s_selectKnownStmt      = nullptr;
     sqlite3_finalize(s_selectOccurrenceStmt); s_selectOccurrenceStmt = nullptr;
+    sqlite3_finalize(s_selectGroupsStartedStmt);  s_selectGroupsStartedStmt  = nullptr;
+    sqlite3_finalize(s_selectGroupsMemberOfStmt); s_selectGroupsMemberOfStmt = nullptr;
     sqlite3_finalize(s_updateNameStmt);       s_updateNameStmt       = nullptr;
     sqlite3_finalize(s_updateCategoryStmt);   s_updateCategoryStmt   = nullptr;
 }
@@ -117,6 +123,10 @@ bool PrepareAllStatements(std::string& outError)
         "(guid_b64, duration, a4, a6, self_mask, profession, race, specialization) "
         "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)";
 
+    static const char* kInsertGroupMember =
+        "INSERT OR IGNORE INTO group_members (starter_guid_b64, duration, a4, member_guid_b64) "
+        "VALUES (?1, ?2, ?3, ?4)";
+
     static const char* kSelectEffect =
         "SELECT name, block_group, block_member, type, category_path FROM effects WHERE guid_b64 = ?1";
 
@@ -127,6 +137,21 @@ bool PrepareAllStatements(std::string& outError)
         "SELECT duration, a4, a6, self_mask, profession, race, specialization "
         "FROM occurrences WHERE guid_b64 = ?1";
 
+    //_ Ordered by (duration, a4, member) rather than left to sqlite's
+    //. natural row order -- callers rely on this for stable, deterministic
+    //. iteration (see the header's doc comment on both functions).
+    static const char* kSelectGroupsStarted =
+        "SELECT duration, a4, member_guid_b64 FROM group_members "
+        "WHERE starter_guid_b64 = ?1 ORDER BY duration, a4, member_guid_b64";
+
+    //_ starter_guid_b64 != member_guid_b64: excludes this guid's own
+    //. starter row, which GetGroupsStarted already covers -- see that
+    //. function's own doc comment in the header.
+    static const char* kSelectGroupsMemberOf =
+        "SELECT starter_guid_b64, duration, a4 FROM group_members "
+        "WHERE member_guid_b64 = ?1 AND starter_guid_b64 != ?1 "
+        "ORDER BY starter_guid_b64, duration, a4";
+
     static const char* kUpdateName =
         "UPDATE effects SET name = ?1 WHERE guid_b64 = ?2";
 
@@ -134,11 +159,14 @@ bool PrepareAllStatements(std::string& outError)
         "UPDATE effects SET category_path = ?1 WHERE guid_b64 = ?2";
 
     struct { const char* sql; sqlite3_stmt** out; } stmts[] = {
-        { kInsertEffect,     &s_insertEffectStmt     },
-        { kInsertOccurrence, &s_insertOccurrenceStmt },
-        { kSelectEffect,     &s_selectEffectStmt     },
+        { kInsertEffect,      &s_insertEffectStmt      },
+        { kInsertOccurrence,  &s_insertOccurrenceStmt  },
+        { kInsertGroupMember, &s_insertGroupMemberStmt },
+        { kSelectEffect,      &s_selectEffectStmt      },
         { kSelectKnown,      &s_selectKnownStmt      },
         { kSelectOccurrence, &s_selectOccurrenceStmt },
+        { kSelectGroupsStarted,  &s_selectGroupsStartedStmt  },
+        { kSelectGroupsMemberOf, &s_selectGroupsMemberOfStmt },
         { kUpdateName,       &s_updateNameStmt       },
         { kUpdateCategory,   &s_updateCategoryStmt   },
     };
@@ -183,7 +211,16 @@ bool CreateSchemaIfNeeded(std::string& outError)
         "  specialization INTEGER NOT NULL,"
         "  UNIQUE(guid_b64, duration, a4, a6, self_mask, profession, race, specialization)"
         ");"
-        "CREATE INDEX IF NOT EXISTS idx_occurrences_guid ON occurrences(guid_b64);";
+        "CREATE INDEX IF NOT EXISTS idx_occurrences_guid ON occurrences(guid_b64);"
+        "CREATE TABLE IF NOT EXISTS group_members ("
+        "  starter_guid_b64 TEXT NOT NULL,"
+        "  duration         INTEGER NOT NULL,"
+        "  a4               INTEGER NOT NULL,"
+        "  member_guid_b64  TEXT NOT NULL REFERENCES effects(guid_b64),"
+        "  UNIQUE(starter_guid_b64, duration, a4, member_guid_b64)"
+        ");"
+        "CREATE INDEX IF NOT EXISTS idx_group_members_member ON group_members(member_guid_b64);"
+        "CREATE INDEX IF NOT EXISTS idx_group_members_starter ON group_members(starter_guid_b64, duration, a4);";
 
     char* errMsg = nullptr;
     if (sqlite3_exec(s_db, kSchema, nullptr, nullptr, &errMsg) != SQLITE_OK)
@@ -360,6 +397,22 @@ void EffectDb_RecordEvent(const EffectDbRawEvent& ev)
     if (sqlite3_step(s_insertOccurrenceStmt) != SQLITE_DONE)
         LogFailure(std::string("EffectDb_RecordEvent: occurrence insert failed: ") + sqlite3_errmsg(s_db));
 
+    //. group_members: only when the caller resolved this event as part of
+    //. a currently-open group (see EffectDbRawEvent::groupStarterGuid's
+    //. doc comment on why this module never re-derives that itself).
+    //. Same silent-no-op-on-repeat shape as occurrences, via UNIQUE.
+    if (!ev.groupStarterGuid.empty())
+    {
+        sqlite3_reset(s_insertGroupMemberStmt);
+        sqlite3_clear_bindings(s_insertGroupMemberStmt);
+        sqlite3_bind_text(s_insertGroupMemberStmt, 1, ev.groupStarterGuid.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(s_insertGroupMemberStmt, 2, ev.duration);
+        sqlite3_bind_int(s_insertGroupMemberStmt, 3, static_cast<int>(ev.a4));
+        sqlite3_bind_text(s_insertGroupMemberStmt, 4, ev.guid_b64.c_str(), -1, SQLITE_TRANSIENT);
+        if (sqlite3_step(s_insertGroupMemberStmt) != SQLITE_DONE)
+            LogFailure(std::string("EffectDb_RecordEvent: group_members insert failed: ") + sqlite3_errmsg(s_db));
+    }
+
     sqlite3_exec(s_db, "COMMIT;", nullptr, nullptr, nullptr);
 }
 
@@ -441,6 +494,57 @@ std::vector<EffectDbOccurrence> EffectDb_GetOccurrences(const std::string& guid_
         o.race           = static_cast<Mumble::ERace>(sqlite3_column_int(s_selectOccurrenceStmt, 5));
         o.specialization = static_cast<unsigned int>(sqlite3_column_int(s_selectOccurrenceStmt, 6));
         out.push_back(o);
+    }
+    return out;
+}
+
+std::vector<EffectDbGroupInstance> EffectDb_GetGroupsStarted(const std::string& guid_b64)
+{
+    std::vector<EffectDbGroupInstance> out;
+    if (!s_db) return out;
+
+    sqlite3_reset(s_selectGroupsStartedStmt);
+    sqlite3_clear_bindings(s_selectGroupsStartedStmt);
+    sqlite3_bind_text(s_selectGroupsStartedStmt, 1, guid_b64.c_str(), -1, SQLITE_TRANSIENT);
+
+    //_ Rows arrive pre-sorted by (duration, a4, member) -- fold
+    //. consecutive rows sharing (duration, a4) into one instance rather
+    //. than a map, since the ORDER BY already guarantees they're
+    //. contiguous.
+    while (sqlite3_step(s_selectGroupsStartedStmt) == SQLITE_ROW)
+    {
+        int          duration = sqlite3_column_int(s_selectGroupsStartedStmt, 0);
+        unsigned int a4       = static_cast<unsigned int>(sqlite3_column_int(s_selectGroupsStartedStmt, 1));
+        std::string  member   = reinterpret_cast<const char*>(sqlite3_column_text(s_selectGroupsStartedStmt, 2));
+
+        if (out.empty() || out.back().duration != duration || out.back().a4 != a4)
+        {
+            EffectDbGroupInstance inst;
+            inst.duration = duration;
+            inst.a4       = a4;
+            out.push_back(std::move(inst));
+        }
+        out.back().memberGuids.push_back(std::move(member));
+    }
+    return out;
+}
+
+std::vector<EffectDbGroupMembership> EffectDb_GetGroupsMemberOf(const std::string& guid_b64)
+{
+    std::vector<EffectDbGroupMembership> out;
+    if (!s_db) return out;
+
+    sqlite3_reset(s_selectGroupsMemberOfStmt);
+    sqlite3_clear_bindings(s_selectGroupsMemberOfStmt);
+    sqlite3_bind_text(s_selectGroupsMemberOfStmt, 1, guid_b64.c_str(), -1, SQLITE_TRANSIENT);
+
+    while (sqlite3_step(s_selectGroupsMemberOfStmt) == SQLITE_ROW)
+    {
+        EffectDbGroupMembership m;
+        m.starterGuid_b64 = reinterpret_cast<const char*>(sqlite3_column_text(s_selectGroupsMemberOfStmt, 0));
+        m.duration         = sqlite3_column_int(s_selectGroupsMemberOfStmt, 1);
+        m.a4               = static_cast<unsigned int>(sqlite3_column_int(s_selectGroupsMemberOfStmt, 2));
+        out.push_back(std::move(m));
     }
     return out;
 }

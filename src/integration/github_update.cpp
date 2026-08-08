@@ -657,14 +657,9 @@ std::vector<SinDiffInfo> GetSinDiffInfo()
 
 void StartApplyUpdate(const std::string& denoiserAddonDir, const std::string& sinName)
 {
-    //_ "For science" capture and the update/apply path are two distinct,
-    // deliberately mutually-exclusive paths -- see effect_db.h. A bulk
-    // rewrite of an installed sin's categories/guids while a live
-    // capture session has the tree open (and may be mid-drag-and-drop,
-    // mid-rename, etc.) is exactly the kind of ground-shifting-under-you
-    // situation that toggle exists to avoid. The options-panel UI is
-    // expected to grey out the Apply action for the same reason -- this
-    // is the belt-and-suspenders check behind that, not the only one.
+    //_ "For science" capture and update/apply are deliberately mutually
+    // exclusive -- see effect_db.h. The options UI is expected to grey
+    // out Apply while capture is on; this is the backing check behind that.
     if (EffectDb_IsEnabled())
         return;
 

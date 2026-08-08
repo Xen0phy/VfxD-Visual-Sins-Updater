@@ -417,6 +417,46 @@ nlohmann::ordered_json BuildOccurrencesJson(const std::string& guid_b64)
 }
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// BuildGroupsJson
+//--------------------------------------------------------------------------------
+// EffectDb_GetGroupsStarted/EffectDb_GetGroupsMemberOf(guid), reshaped
+// into the flat JSON RenderEffectDbDetail reads at render time -- same
+// "bake it into the cache once per rebuild, not once per frame" shape as
+// BuildOccurrencesJson right above. Two arrays under one object so the
+// tree's render side can tell "guids this one swept up when it opened a
+// group" apart from "groups this one got swept into" without a second
+// lookup.
+//--------------------------------------------------------------------------------
+nlohmann::ordered_json BuildGroupsJson(const std::string& guid_b64)
+{
+    nlohmann::ordered_json groups;
+
+    nlohmann::ordered_json started = nlohmann::ordered_json::array();
+    for (const auto& inst : EffectDb_GetGroupsStarted(guid_b64))
+    {
+        nlohmann::ordered_json s;
+        s["duration"] = inst.duration;
+        s["a4"]       = inst.a4;
+        s["members"]  = inst.memberGuids;
+        started.push_back(std::move(s));
+    }
+    groups["started"] = std::move(started);
+
+    nlohmann::ordered_json memberOf = nlohmann::ordered_json::array();
+    for (const auto& m : EffectDb_GetGroupsMemberOf(guid_b64))
+    {
+        nlohmann::ordered_json mo;
+        mo["starter_guid_b64"] = m.starterGuid_b64;
+        mo["duration"]         = m.duration;
+        mo["a4"]               = m.a4;
+        memberOf.push_back(std::move(mo));
+    }
+    groups["member_of"] = std::move(memberOf);
+
+    return groups;
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // BuildEffectDbOverlayTree
 //--------------------------------------------------------------------------------
 // See installed_tree_overlay.h. Reuses IndexDiffCategory (to find/skip
@@ -469,33 +509,22 @@ nlohmann::ordered_json BuildEffectDbOverlayTree(const nlohmann::ordered_json& in
         detail["block_member"] = dbEff.blockMember;
         detail["type"]         = dbEff.type;
         detail["occurrences"]  = BuildOccurrencesJson(dbEff.guid_b64);
+        detail["groups"]       = BuildGroupsJson(dbEff.guid_b64);
 
         auto existingIt = idx.guidToEffect.find(dbEff.guid_b64);
         if (existingIt != idx.guidToEffect.end())
         {
-            //_ Enrich the real node in place -- see the file-level
-            // comment above on why this isn't a skip. Left un-tagged as
-            // "__vfxd_db_only" on purpose: this is still a fully real,
-            // fully editable JSON effect, just with extra data attached.
-            //
-            // Keyed under this specific guid inside "__vfxd_db_by_guid",
-            // NOT a flat field on the effect -- guidToEffect maps every
-            // guid of a multi-guid (merged) effect to the SAME object, so
-            // a flat field would silently overwrite one guid's captured
-            // data with another's if more than one of an effect's guids
-            // has been captured separately.
+            //_ Enrich the real node in place (not skipped, not tagged
+            // "__vfxd_db_only") -- keyed by guid under "__vfxd_db_by_guid",
+            // not a flat field, since a merged effect's guids share one object.
             nlohmann::ordered_json& existing = *existingIt->second;
             if (!existing.contains("__vfxd_db_by_guid") || !existing["__vfxd_db_by_guid"].is_object())
                 existing["__vfxd_db_by_guid"] = nlohmann::ordered_json::object();
             existing["__vfxd_db_by_guid"][dbEff.guid_b64] = std::move(detail);
 
-            //_ A guid that was already JSON-known before "for science"
-            // ever captured it has never had EffectDb_SetCategoryPath
-            // called for it (that only happens via a drag, for guids
-            // that started out db-only) -- so its category_path in the
-            // db would otherwise just sit at "" forever, even though its
-            // real placement is right here in `idx`. Sync it whenever it
-            // differs; a no-op most rebuilds once this has run once.
+            //_ A guid that was JSON-known before capture never gets
+            // EffectDb_SetCategoryPath called (that's drag-only, for db-only
+            // guids) -- sync it here from `idx`; a no-op most rebuilds.
             auto pathIt = idx.guidToCategoryPath.find(dbEff.guid_b64);
             if (pathIt != idx.guidToCategoryPath.end() && pathIt->second != dbEff.categoryPath)
                 EffectDb_SetCategoryPath(dbEff.guid_b64, pathIt->second);
@@ -517,10 +546,9 @@ nlohmann::ordered_json BuildEffectDbOverlayTree(const nlohmann::ordered_json& in
         newEffect["guids"]          = nlohmann::ordered_json::array({ dbEff.guid_b64 });
         newEffect["__vfxd_db_only"] = true;
 
-        //_ Same by-guid shape as the enrichment branch above -- a
-        // synthetic node only ever has one guid, so this object always
-        // has exactly one key, but RenderEffectDbDetail can then handle
-        // both cases with the same loop instead of two different shapes.
+        //_ Same by-guid shape as the enrichment branch above -- always
+        // exactly one key here (a synthetic node has only one guid), but
+        // it lets RenderEffectDbDetail use one loop for both cases.
         nlohmann::ordered_json byGuid = nlohmann::ordered_json::object();
         byGuid[dbEff.guid_b64] = std::move(detail);
         newEffect["__vfxd_db_by_guid"] = std::move(byGuid);
