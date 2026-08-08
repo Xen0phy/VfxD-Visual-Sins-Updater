@@ -4,6 +4,8 @@
 // kNewColor         flags a brand-new effect not yet applied
 // kReworkColor      flags an existing effect whose GUIDs would be refreshed
 // kDuplicateColor   flags a duplicate-or-error condition
+// kDbOnlyColor      flags an effect that only exists in the "for science"
+//                   database, not yet promoted to any installed sin file
 //--------------------------------------------------------------------------------
 // Colors used to flag pending-update content overlaid onto the installed-
 // effects tree (see BuildDiffOverlayTree in installed_tree_overlay.*). One
@@ -26,3 +28,4 @@
 inline const ImVec4 kNewColor       (0.40f, 0.85f, 0.40f, 1.0f); //. green
 inline const ImVec4 kReworkColor    (0.95f, 0.60f, 0.20f, 1.0f); //. orange
 inline const ImVec4 kDuplicateColor (0.90f, 0.25f, 0.25f, 1.0f); //. red
+inline const ImVec4 kDbOnlyColor    (0.75f, 0.85f, 1.00f, 1.0f); //. blueish-white

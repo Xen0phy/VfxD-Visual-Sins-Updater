@@ -19,6 +19,7 @@
 //--------------------------------------------------------------------------------
 
 #include "addon.h"
+#include "effect_db.h"
 #include "game_state.h"
 #include "github_update.h"
 #include "imgui.h"
@@ -60,6 +61,8 @@ void AddonLoad(AddonAPI_t* aApi)
     SetUpdaterLogger(aApi);
     GameState_Init(aApi);   //. caches DataLink pointers, see game_state.h
     LiveLog_Init(aApi);     //. subscribes EV_VFXD_SINS_LOG
+    EffectDb_SetApi(aApi);  //. log pointer only -- EffectDb_Open happens lazily,
+                             //. the first time EffectDb_SetEnabled(true) succeeds
 
     //_ Paths_GetAddonDirectory only constructs the path string; checking
     //_ fs::is_directory here is what makes `found` mean what it says.
@@ -89,6 +92,8 @@ void AddonUnload()
         s_api->GUI_Deregister(OptionsRenderCallback);
 
     LiveLog_Shutdown(s_api); //. unsubscribes, stops capture if on
+    EffectDb_Close();        //. finalizes prepared statements + closes the sqlite connection,
+                              //. same "tear down before Nexus can unload the DLL" reasoning as LiveLog above
     GameState_Shutdown();    //. clears cached DataLink pointers
 
     //_ Flip the shutdown flags first -- a thread already past its WinHTTP

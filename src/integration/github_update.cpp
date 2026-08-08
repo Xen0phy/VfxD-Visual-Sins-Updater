@@ -21,6 +21,7 @@
 
 #pragma comment(lib, "winhttp.lib")
 
+#include "effect_db.h"
 #include "github_update.h"
 #include "merge.h"
 #include "nlohmann_json.hpp"
@@ -656,6 +657,17 @@ std::vector<SinDiffInfo> GetSinDiffInfo()
 
 void StartApplyUpdate(const std::string& denoiserAddonDir, const std::string& sinName)
 {
+    //_ "For science" capture and the update/apply path are two distinct,
+    // deliberately mutually-exclusive paths -- see effect_db.h. A bulk
+    // rewrite of an installed sin's categories/guids while a live
+    // capture session has the tree open (and may be mid-drag-and-drop,
+    // mid-rename, etc.) is exactly the kind of ground-shifting-under-you
+    // situation that toggle exists to avoid. The options-panel UI is
+    // expected to grey out the Apply action for the same reason -- this
+    // is the belt-and-suspenders check behind that, not the only one.
+    if (EffectDb_IsEnabled())
+        return;
+
     bool expected = false;
     if (!s_requestInFlight.compare_exchange_strong(expected, true))
         return; //. already in flight
@@ -761,6 +773,12 @@ void StartApplyUpdate(const std::string& denoiserAddonDir, const std::string& si
 
 void StartInstallSin(const std::string& denoiserAddonDir, const std::string& sinName)
 {
+    //_ Same "for science" lock as StartApplyUpdate -- see the comment
+    // there. StartInstallSin writes a brand-new sin file via the same
+    // write-safety path, so it's under the same restriction.
+    if (EffectDb_IsEnabled())
+        return;
+
     bool expected = false;
     if (!s_requestInFlight.compare_exchange_strong(expected, true))
         return; //. already in flight

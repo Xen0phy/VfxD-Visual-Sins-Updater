@@ -2,32 +2,40 @@
 // installed_tree_edit.h
 //--------------------------------------------------------------------------------
 // The tree-editing subsystem -- right-click-to-edit, category rename,
-// delete, create-category, and effect/category drag-and-drop reordering --
-// split out of addon.cpp. Six state machines share one shape: Begin*
-// populates file-local state and marks it active, Cancel* clears it,
-// Render* draws the inline widget and only records a pending job, and
-// Apply* consumes that job once the whole tree has finished rendering
-// for the frame, so the effect/category arrays are never mutated
-// mid-walk. RenderCategoryTree/RenderInstalledEffects (still in
-// addon.cpp) reach this subsystem only through the accessor API below,
-// never through its statics directly.
+// delete, create-category, effect/category drag-and-drop reordering, and
+// the effect-db "for science" rename/promotion actions -- split out of
+// addon.cpp. Seven state machines share one shape: Begin* populates
+// file-local state and marks it active, Cancel* clears it, Render* draws
+// the inline widget and only records a pending job, and Apply* consumes
+// that job once the whole tree has finished rendering for the frame, so
+// the effect/category arrays are never mutated mid-walk.
+// RenderCategoryTree/RenderInstalledEffects (still in addon.cpp) reach
+// this subsystem only through the accessor API below, never through its
+// statics directly.
 //
-// The six: category rename, create category, move category
+// The seven: category rename, create category, move category
 // (reorder-only, via drag-and-drop), effect edit, effect/category
-// delete (shared, via the isCategory flag), and effect move
-// (drag-and-drop). Only one of the six can be active addon-wide at a
-// time -- see AnyEditInFlight -- so an effect edit, say, can never
-// overlap a category rename.
+// delete (shared, via the isCategory flag), effect move
+// (drag-and-drop), and db-only rename (EffectDb_SetName only, for a guid
+// with no JSON entry -- see BeginDbRename). Only one of the seven can be
+// active addon-wide at a time -- see AnyEditInFlight -- so an effect edit,
+// say, can never overlap a category rename.
 //
 // Neither category rename nor category move offers reparenting
 // (changing a category's parent) -- see the rename group and the move
 // group below for why.
 //
-// Two things below aren't part of that shared shape: single-GUID
+// Four things below aren't part of that shared shape: single-GUID
 // drag-merge (writes straight to disk on drop, no Save click involved --
-// see QueueGuidMerge) and the bulk "Delete Empty" sweep (runs inline
-// before the tree walk starts, so it doesn't need the
-// Queue-then-Apply-after-walk dance the six above rely on).
+// see QueueGuidMerge), the bulk "Delete Empty" sweep (runs inline before
+// the tree walk starts, so it doesn't need the Queue-then-Apply-after-walk
+// dance the seven above rely on), "Add to JSON" promotion
+// (QueuePromoteToJson/ApplyPendingPromote) -- a one-click action with no
+// inline editor of its own, so it's Queue/Apply without a matching
+// Begin/Cancel/Render trio -- and drag-and-drop category placement for a
+// db-only node (QueueDbCategoryPlacement/ApplyPendingDbCategoryPlacement,
+// effect-db handoff doc TODO #2), same "dropping IS the action, no
+// editor" shape as promotion.
 //--------------------------------------------------------------------------------
 
 #pragma once
@@ -227,6 +235,114 @@ void ApplyPendingEdit();
 bool IsEffectBeingEdited(const std::string& sinName, const std::vector<int>& path, int index);
 bool IsEffectEditUnderPath(const std::string& sinName, const std::vector<int>& path);
 bool IsEffectEditActive();
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// BeginDbRename / CancelDbRename / RenderDbRenameEditor / ApplyPendingDbRename
+//--------------------------------------------------------------------------------
+// Rename for a "for science" database entry that has NO installed-sin JSON
+// counterpart yet (a "__vfxd_db_only" node -- see RenderCategoryTree's
+// effIsDbOnly branch). Writes only to the effect database
+// (EffectDb_SetName), never to any sin file. A guid that's already
+// JSON-backed uses the ordinary effect editor instead
+// (BeginEdit/RenderEffectEditor/ApplyPendingEdit), which now also syncs
+// the effect database's name for any guid it recognizes as already known
+// there -- see ApplyPendingEdit's own comment; that's what makes a rename
+// on a JSON+database guid write both places, and a JSON-only guid write
+// only JSON. Identity here is the guid itself, not a (sinName, path,
+// index) triple, since a db-only node has no stable JSON position. Render
+// only records the pending save; Apply re-applies EffectDb_SetName, safe
+// to call unconditionally every frame.
+//--------------------------------------------------------------------------------
+void BeginDbRename(const std::string& guid_b64, const std::string& currentName);
+void CancelDbRename();
+void RenderDbRenameEditor();
+void ApplyPendingDbRename();
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// IsDbGuidBeingRenamed / IsDbRenameActive
+//--------------------------------------------------------------------------------
+// True for the db-only rename targeting exactly this guid, and for one
+// active anywhere -- respectively. The latter feeds AnyEditInFlight.
+//--------------------------------------------------------------------------------
+bool IsDbGuidBeingRenamed(const std::string& guid_b64);
+bool IsDbRenameActive();
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// QueuePromoteToJson / ApplyPendingPromote
+//--------------------------------------------------------------------------------
+// "Add to JSON" -- the promotion action from TODO #1 in the effect-db
+// handoff doc. Always targets Greed (see effect_db.h on why promotion has
+// no per-guid file choice). Writes a plain new effect -- name, single-guid
+// "guids" array -- at the db entry's own category_path (see
+// EffectDb_SetCategoryPath), materializing that category chain for real if
+// it doesn't exist on disk yet, or into the same "Unrecognized (for
+// science)" bucket BuildEffectDbOverlayTree already displays it under if
+// category_path was never set. No-ops (with a result message) if the guid
+// is no longer known to the database, or already has a real JSON entry
+// somewhere in Greed. Queue only records which guid; Apply re-looks-up its
+// current name/category fresh from the database rather than trusting
+// anything captured at click time, and is safe to call unconditionally
+// every frame, same shape as every other queued job here.
+//--------------------------------------------------------------------------------
+void QueuePromoteToJson(const std::string& guid_b64);
+void ApplyPendingPromote();
+
+//_ Payload marker for a db-only node drag -- same "bytes are just a type
+// marker" convention as kEffectDragMarker above.
+inline constexpr int kDbOnlyGuidDragMarker = 1;
+
+//********************************************************************************
+// DbOnlyGuidDragPayload
+//--------------------------------------------------------------------------------
+// guid_b64      the db-only guid being dragged -- its whole identity,
+//               same "no stable JSON position" reasoning as BeginDbRename
+// effectName    display name, for messages
+//--------------------------------------------------------------------------------
+// Always implicitly scoped to Greed (see effect_db.h on why "for
+// science" placement has no per-sin choice), so unlike EffectDragPayload
+// there's no sinName field to carry.
+//--------------------------------------------------------------------------------
+struct DbOnlyGuidDragPayload
+{
+    std::string guid_b64;
+    std::string effectName;
+};
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// BeginDbOnlyGuidDrag / GetDbOnlyGuidDragPayload
+//--------------------------------------------------------------------------------
+// Records the current db-only-node drag payload -- call every frame the
+// drag is held, from inside a "__vfxd_db_only" effect row's own
+// BeginDragDropSource (installed_tree_view.cpp's RenderCategoryTree).
+// GetDbOnlyGuidDragPayload is only meaningful from inside a
+// BeginDragDropTarget block that just accepted "VFXD_DBONLY_GUID".
+//--------------------------------------------------------------------------------
+void BeginDbOnlyGuidDrag(const std::string& guid_b64, const std::string& effectName);
+const DbOnlyGuidDragPayload& GetDbOnlyGuidDragPayload();
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// QueueDbCategoryPlacement / ApplyPendingDbCategoryPlacement
+//--------------------------------------------------------------------------------
+// TODO #2 from the effect-db handoff doc: drag-and-drop category
+// placement for a db-only node, dropped onto a category row in the tree.
+// Writes only EffectDb_SetCategoryPath -- same "db-only = db-only"
+// split as BeginDbRename, never touches any sin file since there's
+// nothing in JSON to place for a guid with no JSON entry. Not a
+// Begin/Cancel/Render trio -- there's no inline editor, dropping IS the
+// action, same shape as QueuePromoteToJson. `categoryPath` is the
+// destination category's name path, root to the dropped-on category
+// inclusive (RenderCategoryTree's namePathSoFar, not the index-based
+// pathSoFar -- EffectDb_SetCategoryPath and BuildEffectDbOverlayTree
+// both key placement by category name, not index). Queue records the
+// guid, destination path, and a copy of the drag payload's effectName
+// (for the result message -- see DbCategoryPlacementJob); Apply
+// re-applies EffectDb_SetCategoryPath once the whole tree has finished
+// rendering this frame, safe to call unconditionally every frame like
+// every other queued job here. No-ops (with a result message) if the
+// guid is no longer known to the database.
+//--------------------------------------------------------------------------------
+void QueueDbCategoryPlacement(const std::string& guid_b64, const std::vector<std::string>& categoryPath);
+void ApplyPendingDbCategoryPlacement();
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // BeginDeleteConfirm / CancelDeleteConfirm / RenderDeleteConfirm / ApplyPendingDelete

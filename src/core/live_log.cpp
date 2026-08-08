@@ -3,12 +3,15 @@
 //--------------------------------------------------------------------------------
 // See live_log.h for the module contract and vfxd_sins_bridge.h for the
 // wire format. This file owns: the subscribe/unsubscribe lifecycle, the
-// one-entry-per-guid storage map, the drop-on-arrival "hide known"
-// filter, and infostr parsing. Rendering (the CollapsingHeader, the tree,
-// the toggles) stays in addon.cpp alongside every other section, same as
-// backup.cpp/report.cpp already do for their own sections.
+// one-entry-per-guid storage map (plus its for-science twin, see
+// UpdateForScienceEntry), the drop-on-arrival "hide known" filter, and
+// infostr parsing. Rendering (the CollapsingHeader, the tree, the
+// toggles) stays in live_log_ui.cpp/addon.cpp alongside every other
+// section, same as backup.cpp/report.cpp already do for their own
+// sections.
 //--------------------------------------------------------------------------------
 
+#include "effect_db.h"
 #include "live_log.h"
 #include "vfxd_sins_bridge.h"
 
@@ -35,6 +38,14 @@ int s_nextSeq = 0;
 std::unordered_map<std::string, LiveLogEntry> s_entries;        //. guid_b64 -> entry
 std::unordered_map<std::string, std::string>  s_guidToName;     //. name map from addon.cpp
 std::unordered_map<std::string, std::string>  s_guidToBehavior; //. behavior map from addon.cpp
+
+//_ The effect db's own capture stream, mirrored for display -- see
+// LiveLog_GetForScienceEntries's doc comment in live_log.h. Separate
+// firstSeenSeq counter so this list's "received order" is independent of
+// the ordinary entries map's (a guid can appear in one and not the other,
+// or at different times in each).
+std::unordered_map<std::string, LiveLogEntry> s_forScienceEntries; //. guid_b64 -> entry
+int s_forScienceNextSeq = 0;
 
 //_ Running "is a group currently open" state for AdvanceGroupState below.
 // Lives at module scope, not per-entry, since grouping is a property of
@@ -169,6 +180,166 @@ void ParseInfoFields(const std::string& info, LiveLogEntry& e)
 }
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// ParseLeadingBlock
+//--------------------------------------------------------------------------------
+// info's leading token, before "type:" -- e.g. "GDgna.cndZw" -- which
+// ParseInfoFields above has always simply skipped past (its own
+// info.find("type:") jump). Split on '.' into group/member. Left empty
+// (both out params untouched) if this line has no dotted block at all --
+// not every infostr carries one, and guessing at a non-block-shaped
+// leading token would be worse than leaving it blank.
+//--------------------------------------------------------------------------------
+void ParseLeadingBlock(const std::string& info, std::string& outGroup, std::string& outMember)
+{
+    size_t typePos = info.find("type:");
+    if (typePos == std::string::npos)
+        return;
+
+    std::string leading = info.substr(0, typePos);
+    size_t end = leading.find_last_not_of(" \t");
+    if (end == std::string::npos)
+        return;   //. nothing but whitespace before "type:" -- no block here
+    leading = leading.substr(0, end + 1);
+
+    size_t dot = leading.find('.');
+    if (dot == std::string::npos)
+        return;   //. not block-shaped
+
+    outGroup  = leading.substr(0, dot);
+    outMember = leading.substr(dot + 1);
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// ParseTrailingName
+//--------------------------------------------------------------------------------
+// Everything after the last recognized key:value token, minus the
+// " -> behavior" suffix this addon deliberately never parses further
+// (see live_log.h on `behavior` being fully removed) -- e.g.
+// "Cross 032 - Bullet Trail" out of "... target:self Cross 032 - Bullet
+// Trail -> Hide". Empty for a nameless type 1/11 marker line.
+//
+// Independent of field order on purpose, per ParseInfoFields's own
+// comment that infostr makes no ordering guarantee: walks every
+// whitespace-delimited token, remembers the stream position right after
+// the *last* one shaped like a recognized key:value pair, and returns
+// whatever text follows that position.
+//--------------------------------------------------------------------------------
+std::string ParseTrailingName(const std::string& info)
+{
+    static const std::string kKeys[] = { "type:", "duration:", "a4:", "caster:", "a6:", "target:" };
+
+    std::istringstream tokens(info);
+    std::string tok;
+    size_t lastKeyEnd = std::string::npos;
+
+    while (tokens >> tok)
+    {
+        bool isKey = false;
+        for (const auto& k : kKeys)
+        {
+            if (tok.rfind(k, 0) == 0) { isKey = true; break; }
+        }
+        if (isKey)
+        {
+            auto pos = tokens.tellg();
+            //_ tellg() returns -1 once extraction has consumed the rest of
+            // the stream (this key was the last token) -- treat that as
+            // "nothing follows" rather than misreading it as a huge offset.
+            lastKeyEnd = (pos == std::istringstream::pos_type(-1)) ? info.size() : static_cast<size_t>(pos);
+        }
+    }
+
+    if (lastKeyEnd == std::string::npos || lastKeyEnd > info.size())
+        return "";
+
+    std::string rest = info.substr(lastKeyEnd);
+    size_t start = rest.find_first_not_of(" \t");
+    if (start == std::string::npos)
+        return "";
+    rest = rest.substr(start);
+
+    size_t arrow = rest.find(" -> ");
+    if (arrow != std::string::npos)
+        rest = rest.substr(0, arrow);
+
+    size_t end = rest.find_last_not_of(" \t");
+    return (end == std::string::npos) ? "" : rest.substr(0, end + 1);
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// FeedEffectDb
+//--------------------------------------------------------------------------------
+// The "for science" capture hook -- called from IngestLogLine *before*
+// this module's own type-toggle/hideKnown display filters, deliberately.
+// Those filters exist to declutter the on-screen Live Log panel; they
+// have nothing to do with what's worth writing to a permanent research
+// database, and in particular s_typeEnabled starts types 1 and 11
+// *disabled* by default (see its initializer above) even though those
+// are precisely the marker rows the database exists to correlate --
+// filtering this on that toggle would silently starve it of them.
+//
+// Caster-only for now (see effect_db.h on kSelfMaskCaster being the only
+// value currently produced) -- entirely separate from isSelfEvent below,
+// which is broader (caster OR target) and only feeds LiveLogEntry's own
+// display fold, not this.
+//--------------------------------------------------------------------------------
+void FeedEffectDb(const std::string& guid_b64, const std::string& info, const LiveLogEntry& parsed)
+{
+    if (!EffectDb_IsEnabled() || parsed.caster != "self")
+        return;
+
+    EffectDbRawEvent ev;
+    ev.guid_b64 = guid_b64;
+    ev.name     = ParseTrailingName(info);
+    ParseLeadingBlock(info, ev.blockGroup, ev.blockMember);
+    ev.type     = parsed.type;
+    ev.duration = parsed.duration;
+    ev.a4       = parsed.a4;
+    ev.a6       = parsed.a6;
+    ev.selfMask = kSelfMaskCaster;
+
+    ev.profession     = GameState_GetProfession();
+    ev.race           = GameState_GetRace();
+    ev.specialization = GameState_GetSpecialization();
+
+    EffectDb_RecordEvent(ev);
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// UpdateForScienceEntry
+//--------------------------------------------------------------------------------
+// Display-side twin of FeedEffectDb -- same gate (EffectDb_IsEnabled() &&
+// parsed.caster == "self"), so this map's contents always match what's
+// actually landing in the db, never showing an event the db itself
+// dropped. Deliberately does NOT check s_typeEnabled or s_hideKnown --
+// this stream exists specifically so "for science" isn't blind to
+// whatever the ordinary display filters currently hide (see FeedEffectDb's
+// own comment on why types 1/11 in particular can't be filtered here).
+//--------------------------------------------------------------------------------
+void UpdateForScienceEntry(const std::string& guid_b64, const LiveLogEntry& parsed)
+{
+    if (!EffectDb_IsEnabled() || parsed.caster != "self")
+        return;
+
+    bool known = s_guidToName.count(guid_b64) > 0;
+
+    LiveLogEntry& entry = s_forScienceEntries[guid_b64];
+    if (entry.seenCount == 0)
+        entry.firstSeenSeq = s_forScienceNextSeq++;
+
+    entry.guid_b64     = guid_b64;
+    entry.knownInSin   = known;
+    entry.displayName  = known ? s_guidToName.at(guid_b64) : guid_b64;
+    entry.type         = parsed.type;
+    entry.duration     = parsed.duration;
+    entry.a4           = parsed.a4;
+    entry.caster       = parsed.caster;
+    entry.a6           = parsed.a6;
+    entry.target       = parsed.target;
+    entry.seenCount++;
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // IngestLogLine
 //--------------------------------------------------------------------------------
 // The actual ingestion path, shared by the real Events_Subscribe callback
@@ -185,6 +356,9 @@ void IngestLogLine(const std::string& guid_b64, const std::string& info)
     // use the freshly-parsed type without a separate parse pass.
     LiveLogEntry parsed{};
     ParseInfoFields(info, parsed);
+
+    FeedEffectDb(guid_b64, info, parsed);   //. unconditionally, before either filter below -- see FeedEffectDb
+    UpdateForScienceEntry(guid_b64, parsed);   //. same gate as FeedEffectDb, see that function's comment
 
     //_ Always runs, even for a line about to be dropped below -- group
     // state must stay continuous regardless of per-type display filters
@@ -337,10 +511,17 @@ const std::unordered_map<std::string, LiveLogEntry>& LiveLog_GetEntries()
     return s_entries;
 }
 
+const std::unordered_map<std::string, LiveLogEntry>& LiveLog_GetForScienceEntries()
+{
+    return s_forScienceEntries;
+}
+
 void LiveLog_Clear()
 {
     s_entries.clear();
     s_nextSeq = 0;
+    s_forScienceEntries.clear();
+    s_forScienceNextSeq = 0;
 
     //_ So a cleared log's next group starts at 0 with no stale "currently
     // open group" or stale signatures carried over from before the clear

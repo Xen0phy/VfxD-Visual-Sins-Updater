@@ -23,6 +23,7 @@
 
 #include "addon.h"
 #include "backups_ui.h"
+#include "effect_db.h"
 #include "github_update.h"
 #include "imgui.h"
 #include "installed_tree_store.h"
@@ -279,6 +280,25 @@ void OptionsRenderCallback()
     {
         ImGui::TextDisabled("VfxDenoiser isn't installed -- nothing to update.");
         return;
+    }
+
+    //_ Rate-limited internally to ~1/sec -- cheap to call unconditionally
+    // every time this panel draws. Only ever non-empty the one frame
+    // "for science" capture stops because VfxD_Greed.json vanished out
+    // from under it -- see effect_db.h. Latched into a static rather than
+    // shown only that single frame, since a message that flashes for one
+    // frame and vanishes is as good as no message at all.
+    static std::string s_effectDbStoppedMsg;
+    std::string polled = EffectDb_Poll(s_denoiserAddonDir);
+    if (!polled.empty())
+        s_effectDbStoppedMsg = polled;
+
+    if (!s_effectDbStoppedMsg.empty())
+    {
+        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s", s_effectDbStoppedMsg.c_str());
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Dismiss##effectDbStoppedMsg"))
+            s_effectDbStoppedMsg.clear();
     }
 
     //_ imgui 1.80 has no SeparatorText (added in a later version).

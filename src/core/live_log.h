@@ -156,10 +156,27 @@ void LiveLog_SetKnownGuidNames(const std::unordered_map<std::string, std::string
 void LiveLog_SetKnownGuidBehaviors(const std::unordered_map<std::string, std::string>& guidToBehavior);
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-// LiveLog_GetEntries / LiveLog_Clear
+// LiveLog_GetEntries / LiveLog_GetForScienceEntries / LiveLog_Clear
 //--------------------------------------------------------------------------------
-// The live capture store, keyed by guid_b64. Clear drops everything
-// captured so far without touching the listen toggle.
+// Two separate stores, both keyed by guid_b64:
+//
+//  - LiveLog_GetEntries: the ordinary display fold, subject to
+//    s_typeEnabled ("Types logged") and hideKnown -- what the Live Log
+//    panel normally shows.
+//  - LiveLog_GetForScienceEntries: the effect db's own capture stream,
+//    mirrored exactly -- self (caster) events only, every type
+//    regardless of "Types logged", only while EffectDb_IsEnabled(). Not
+//    filtered by hideKnown either, since that filter is about *this
+//    user's own sin JSON*, an unrelated concern to what the db is
+//    recording. Every guid that ever appears here already has an
+//    EFFECTS row by construction (see EffectDb_IsKnownGuid) -- it got
+//    here because the same event that updated this map also fed
+//    EffectDb_RecordEvent.
+//
+// Clear drops both stores (and both firstSeenSeq counters) without
+// touching the listen toggle or the effect db itself -- this only
+// clears the on-screen lists, never anything on disk.
 //--------------------------------------------------------------------------------
 const std::unordered_map<std::string, LiveLogEntry>& LiveLog_GetEntries();
+const std::unordered_map<std::string, LiveLogEntry>& LiveLog_GetForScienceEntries();
 void LiveLog_Clear();

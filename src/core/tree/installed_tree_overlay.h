@@ -19,7 +19,8 @@
 
 #pragma once
 
-#include "merge.h" //. nlohmann::ordered_json, MergePlan
+#include "effect_db.h" //. EffectDbEffect
+#include "merge.h"      //. nlohmann::ordered_json, MergePlan
 
 #include <string>
 #include <vector>
@@ -65,3 +66,34 @@ nlohmann::ordered_json BuildDiffOverlayTree(const nlohmann::ordered_json& instal
 // the installed file itself, not a pending update.
 //--------------------------------------------------------------------------------
 nlohmann::ordered_json BuildDuplicateOverlayTree(const nlohmann::ordered_json& installed, const std::vector<std::string>& dupeGuids);
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// BuildEffectDbOverlayTree
+//--------------------------------------------------------------------------------
+// Deep-copies `installed` and adds one synthetic effect node, tagged
+// "__vfxd_db_only", per guid in `dbEffects` that ISN'T already a real
+// effect somewhere in `installed` -- a guid that's already JSON-backed
+// just gets skipped here entirely, it's not this overlay's concern.
+//
+// Placed at each db-only guid's own categoryPath (see effect_db.h's
+// EffectDb_SetCategoryPath), materializing categories that don't exist
+// in `installed` yet exactly the way BuildDiffOverlayTree already does
+// for a pending update's brand-new categories (same
+// FindOrCreateDiffCategory helper, same "__vfxd_virtual" tag on any
+// category it has to create) -- one guid with an empty categoryPath
+// (never placed by a drag yet) falls into a synthetic "Unrecognized
+// (for science)" bucket at the root instead of being dropped.
+//
+// Meant to be called on `installed` for whichever sin "for science"
+// promotion always targets (Greed) -- see effect_db.h on why promotion
+// has no per-guid file choice to make. Calling it against a different
+// sin isn't wrong, exactly, it's just modeling a placement decision that
+// promotion would never actually honor.
+//
+// outAddedCount, if non-null, receives how many db-only nodes were
+// actually added (i.e. excluding guids skipped as already JSON-backed) --
+// lets a caller drive an "any db-only content shown" legend line without
+// re-querying the db itself every frame just to find out.
+//--------------------------------------------------------------------------------
+nlohmann::ordered_json BuildEffectDbOverlayTree(const nlohmann::ordered_json& installed, const std::vector<EffectDbEffect>& dbEffects,
+                                                 size_t* outAddedCount = nullptr);
