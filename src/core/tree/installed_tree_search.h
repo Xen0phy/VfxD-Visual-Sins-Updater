@@ -27,6 +27,7 @@
 #include "merge.h" //. nlohmann::ordered_json
 
 #include <string>
+#include <unordered_map>
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // ContainsCI
@@ -88,6 +89,69 @@ bool CategorySubtreeMatchesSearch(const nlohmann::ordered_json& category, const 
 bool CategoryHasDescendantMatch(const nlohmann::ordered_json& category, const std::string& queryLower);
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// CategoryMatchCache / EffectMatchCache / BuildCategoryMatchCache / Cached*
+//--------------------------------------------------------------------------------
+// CategorySubtreeMatchesSearch/CategoryHasDescendantMatch above are each
+// independently recursive, and effect matching means lowercasing/scanning
+// name, description, and every GUID -- calling any of these directly per
+// node/effect, every frame a search stays active, costs O(size x depth)
+// for categories, or re-scans every effect needlessly (the query hasn't
+// changed between frames).
+//
+// These caches hold the same answers per node, built in one bottom-up
+// pass (each node/effect visited once) so top-down lookups are O(1).
+// Keyed by each json node's own address -- safe to rebuild fresh every
+// frame, so nothing here is cached *across* frames.
+//--------------------------------------------------------------------------------
+struct CategoryMatchResult
+{
+    bool subtreeMatches      = false;   //. CategorySubtreeMatchesSearch's answer
+    bool hasDescendantMatch  = false;   //. CategoryHasDescendantMatch's answer
+};
+
+//_ Same idea as CategoryMatchResult, but for a leaf effect node (see the
+// group comment above).
+struct EffectMatchResult
+{
+    bool matches       = false;   //. EffectMatchesSearch's answer (name/hidden)
+    bool hiddenMatches = false;   //. EffectHiddenContentMatches's answer (description/GUIDs only)
+};
+
+using CategoryMatchCache = std::unordered_map<const void*, CategoryMatchResult>;
+using EffectMatchCache   = std::unordered_map<const void*, EffectMatchResult>;
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// BuildCategoryMatchCache
+//--------------------------------------------------------------------------------
+// Populates `categoryCache`/`effectCache` for `category`, every effect
+// directly inside it, and everything beneath it, in one bottom-up pass.
+// Rebuild fresh whenever the query or tree contents change -- cheap
+// enough to do every frame while a search is active.
+//--------------------------------------------------------------------------------
+void BuildCategoryMatchCache(const nlohmann::ordered_json& category,
+                              const std::string& queryLower,
+                              CategoryMatchCache& categoryCache,
+                              EffectMatchCache& effectCache);
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// CachedSubtreeMatches / CachedHasDescendantMatch / CachedEffectMatches /
+// CachedEffectHiddenMatches
+//--------------------------------------------------------------------------------
+// O(1) reads from caches already populated by BuildCategoryMatchCache for
+// this exact node. Falls back to the direct (uncached, but always
+// correct) functions above if the node isn't present, so a stale/partial
+// cache never produces a wrong answer -- only ever a slower one.
+//--------------------------------------------------------------------------------
+bool CachedSubtreeMatches(const nlohmann::ordered_json& category, const std::string& queryLower,
+                           const CategoryMatchCache& cache);
+bool CachedHasDescendantMatch(const nlohmann::ordered_json& category, const std::string& queryLower,
+                               const CategoryMatchCache& cache);
+bool CachedEffectMatches(const nlohmann::ordered_json& effect, const std::string& queryLower,
+                          const EffectMatchCache& cache);
+bool CachedEffectHiddenMatches(const nlohmann::ordered_json& effect, const std::string& queryLower,
+                                const EffectMatchCache& cache);
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // SilentlyCloseSubtree / SilentlyCloseChildren
 //--------------------------------------------------------------------------------
 // A category/effect's forced-open state only gets set on the frame the
@@ -102,8 +166,8 @@ bool CategoryHasDescendantMatch(const nlohmann::ordered_json& category, const st
 // drawn) and writing "closed" into ImGui's per-ID storage for every node
 // underneath, using the render pass's own ID scheme (PushID(index) for
 // siblings, GetID(name)/GetID("effect") for a category/effect). Only
-// worth calling on the frame the query changed -- see addon.cpp's
-// s_treeSearchQueryChanged comment for why.
+// worth calling on the frame the query changed -- see
+// installed_tree_view.cpp's s_treeSearchQueryChanged comment for why.
 //--------------------------------------------------------------------------------
 void SilentlyCloseSubtree(const nlohmann::ordered_json& category);
 void SilentlyCloseChildren(const nlohmann::ordered_json& category);

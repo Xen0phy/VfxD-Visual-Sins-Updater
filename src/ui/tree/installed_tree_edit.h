@@ -114,7 +114,8 @@ const std::string& GetEditResultMessage();
 bool AnyEditInFlight();
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-// BeginCategoryEdit / CancelCategoryEdit / RenderCategoryEditor / ApplyPendingCategoryRename
+// BeginCategoryEdit / CancelCategoryEdit / RenderCategoryEditor /
+// ApplyPendingCategoryRename
 //--------------------------------------------------------------------------------
 // Category editing -- name and description, same "description" key as
 // effects, still a smaller sibling of the effect editor further down:
@@ -144,7 +145,8 @@ bool IsCategoryRenameUnderPath(const std::string& sinName, const std::vector<int
 bool IsCategoryRenameActive();
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-// BeginCreateCategory / CancelCreateCategory / RenderCreateCategoryEditor / ApplyPendingCreateCategory
+// BeginCreateCategory / CancelCreateCategory / RenderCreateCategoryEditor /
+// ApplyPendingCreateCategory
 //--------------------------------------------------------------------------------
 // Rendered inside the parent category's TreeNode (same idea as
 // category rename above), so -- unlike a delete confirmation -- this
@@ -238,19 +240,16 @@ bool IsEffectEditActive();
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // BeginDbRename / CancelDbRename / RenderDbRenameEditor / ApplyPendingDbRename
 //--------------------------------------------------------------------------------
-// Rename for a "for science" database entry that has NO installed-sin JSON
+// Rename for a "for science" database entry with NO installed-sin JSON
 // counterpart yet (a "__vfxd_db_only" node -- see RenderCategoryTree's
 // effIsDbOnly branch). Writes only to the effect database
 // (EffectDb_SetName), never to any sin file. A guid that's already
 // JSON-backed uses the ordinary effect editor instead
 // (BeginEdit/RenderEffectEditor/ApplyPendingEdit), which now also syncs
-// the effect database's name for any guid it recognizes as already known
-// there -- see ApplyPendingEdit's own comment; that's what makes a rename
-// on a JSON+database guid write both places, and a JSON-only guid write
-// only JSON. Identity here is the guid itself, not a (sinName, path,
-// index) triple, since a db-only node has no stable JSON position. Render
-// only records the pending save; Apply re-applies EffectDb_SetName, safe
-// to call unconditionally every frame.
+// the effect database's name for any guid it recognizes there -- see
+// ApplyPendingEdit's own comment. Identity here is the guid itself, not
+// a (sinName, path, index) triple, since a db-only node has no stable
+// JSON position.
 //--------------------------------------------------------------------------------
 void BeginDbRename(const std::string& guid_b64, const std::string& currentName);
 void CancelDbRename();
@@ -269,18 +268,17 @@ bool IsDbRenameActive();
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // QueuePromoteToJson / ApplyPendingPromote
 //--------------------------------------------------------------------------------
-// "Add to JSON" -- the promotion action. Always targets Greed (see effect_db.h on why promotion has
-// no per-guid file choice). Writes a plain new effect -- name, single-guid
-// "guids" array -- at the db entry's own category_path (see
-// EffectDb_SetCategoryPath), materializing that category chain for real if
-// it doesn't exist on disk yet, or into the same "Unrecognized (for
-// science)" bucket BuildEffectDbOverlayTree already displays it under if
-// category_path was never set. No-ops (with a result message) if the guid
-// is no longer known to the database, or already has a real JSON entry
-// somewhere in Greed. Queue only records which guid; Apply re-looks-up its
-// current name/category fresh from the database rather than trusting
-// anything captured at click time, and is safe to call unconditionally
-// every frame, same shape as every other queued job here.
+// "Add to JSON" -- the promotion action. Always targets Greed (see
+// effect_db.h on why promotion has no per-guid file choice). Writes a
+// plain new effect -- name, single-guid "guids" array -- at the db
+// entry's own category_path (see EffectDb_SetCategoryPath), materializing
+// that category chain for real if it doesn't exist on disk yet, or into
+// the "Unrecognized (for science)" bucket BuildEffectDbOverlayTree
+// already displays it under if category_path was never set. No-ops (with
+// a result message) if the guid is no longer known to the database, or
+// already has a real JSON entry somewhere in Greed. Queue only records
+// the guid; Apply re-looks-up its current name/category fresh from the
+// database rather than trusting anything captured at click time.
 //--------------------------------------------------------------------------------
 void QueuePromoteToJson(const std::string& guid_b64);
 void ApplyPendingPromote();
@@ -322,28 +320,23 @@ const DbOnlyGuidDragPayload& GetDbOnlyGuidDragPayload();
 // QueueDbCategoryPlacement / ApplyPendingDbCategoryPlacement
 //--------------------------------------------------------------------------------
 // Drag-and-drop category placement for a db-only node, dropped onto a
-// category row in the tree.
-// Writes only EffectDb_SetCategoryPath -- same "db-only = db-only"
-// split as BeginDbRename, never touches any sin file since there's
-// nothing in JSON to place for a guid with no JSON entry. Not a
-// Begin/Cancel/Render trio -- there's no inline editor, dropping IS the
-// action, same shape as QueuePromoteToJson. `categoryPath` is the
-// destination category's name path, root to the dropped-on category
-// inclusive (RenderCategoryTree's namePathSoFar, not the index-based
-// pathSoFar -- EffectDb_SetCategoryPath and BuildEffectDbOverlayTree
-// both key placement by category name, not index). Queue records the
-// guid, destination path, and a copy of the drag payload's effectName
-// (for the result message -- see DbCategoryPlacementJob); Apply
-// re-applies EffectDb_SetCategoryPath once the whole tree has finished
-// rendering this frame, safe to call unconditionally every frame like
-// every other queued job here. No-ops (with a result message) if the
-// guid is no longer known to the database.
+// category row in the tree. Writes only EffectDb_SetCategoryPath -- same
+// "db-only = db-only" split as BeginDbRename, never touches any sin file.
+// Not a Begin/Cancel/Render trio -- dropping IS the action, same shape as
+// QueuePromoteToJson. `categoryPath` is the destination category's name
+// path, root to the dropped-on category inclusive (RenderCategoryTree's
+// namePathSoFar, not the index-based pathSoFar -- placement is keyed by
+// name, not index). Queue records the guid, destination path, and a copy
+// of the drag payload's effectName (for the result message -- see
+// DbCategoryPlacementJob). No-ops (with a result message) if the guid is
+// no longer known to the database.
 //--------------------------------------------------------------------------------
 void QueueDbCategoryPlacement(const std::string& guid_b64, const std::vector<std::string>& categoryPath);
 void ApplyPendingDbCategoryPlacement();
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-// BeginDeleteConfirm / CancelDeleteConfirm / RenderDeleteConfirm / ApplyPendingDelete
+// BeginDeleteConfirm / CancelDeleteConfirm / RenderDeleteConfirm /
+// ApplyPendingDelete
 //--------------------------------------------------------------------------------
 // Shared by effects and categories via `isCategory` -- a category
 // delete also re-checks it's still empty at apply time. `path` is the
@@ -362,7 +355,8 @@ void RenderDeleteConfirm();
 void ApplyPendingDelete();
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-// IsDeletingThisCategory / IsDeletingThisEffect / IsDeleteConfirmActive / IsDeleteConfirmUnderPath
+// IsDeletingThisCategory / IsDeletingThisEffect / IsDeleteConfirmActive /
+// IsDeleteConfirmUnderPath
 //--------------------------------------------------------------------------------
 // True for the pending confirmation matching exactly this category, or
 // this effect (containing-category path + index), or one active
@@ -389,9 +383,8 @@ inline constexpr int kEffectDragMarker = 1;
 // sinName         which sin file the dragged effect belongs to
 // originalPath    containing category's identity at drag time
 // effectName      display name, used for messages
-// originalIndex   position within originalPath's "effects" array --
-//                 the real identity, since sibling effects can share
-//                 a name
+// originalIndex   position within originalPath's "effects" array -- the
+//                 real identity, since sibling effects can share a name
 //--------------------------------------------------------------------------------
 // Exposed as a struct (rather than one getter per field) since
 // RenderCategoryTree's drop-target logic reads several fields
@@ -425,13 +418,9 @@ const EffectDragPayload& GetEffectDragPayload();
 // effectName          display name, for messages
 // originalIndex       position within originalPath's "effects" array
 // destinationPath     drop target category's identity
-// destinationIndex    -1 for "append" (dropped on the category's own
-//                     row), else the sibling index -- within the
-//                     destination "effects" array as captured at drop
-//                     time, before any erase runs -- to land
-//                     immediately above; see ApplyPendingMove for the
-//                     erase-shift reconciliation when
-//                     originalPath == destinationPath
+// destinationIndex    -1 for "append" (dropped on the category itself);
+//                     else the drop-time sibling index to land above --
+//                     see ApplyPendingMove for erase-shift reconciliation
 //--------------------------------------------------------------------------------
 struct EffectMoveJob
 {
@@ -465,9 +454,8 @@ inline constexpr int kGuidDragMarker = 1;
 //--------------------------------------------------------------------------------
 // sinName         which sin file the dragged GUID's effect belongs to
 // originalPath    that effect's containing category's identity
-// originalIndex   that effect's position within originalPath's
-//                 "effects" array -- together with originalPath, the
-//                 source effect's real identity
+// originalIndex   that effect's position within originalPath's "effects"
+//                 array -- together with originalPath, its real identity
 // effectName      source effect's display name, used for messages
 // guid            the actual GUID string being moved
 //--------------------------------------------------------------------------------
@@ -501,9 +489,8 @@ const GuidDragPayload& GetGuidDragPayload();
 // originalPath/Index       source effect's identity (see GuidDragPayload)
 // effectName               source effect's display name, for messages
 // guid                     the GUID being moved
-// destinationPath/Index    target effect's identity, captured at drop
-//                          time -- any effect row in the same sin file,
-//                          open or collapsed, is a valid target
+// destinationPath/Index    target effect's identity at drop time -- any
+//                          effect row in the same sin file is a valid target
 // destinationEffectName    target effect's display name, for messages
 //--------------------------------------------------------------------------------
 struct GuidMergeJob
@@ -546,7 +533,8 @@ void ApplyPendingGuidMerge();
 int CountEmptyGuidEffects();
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-// BeginDeleteEmptyConfirm / CancelDeleteEmptyConfirm / RenderDeleteEmptyConfirm / IsDeleteEmptyConfirmActive
+// BeginDeleteEmptyConfirm / CancelDeleteEmptyConfirm /
+// RenderDeleteEmptyConfirm / IsDeleteEmptyConfirmActive
 //--------------------------------------------------------------------------------
 // A bulk sibling of BeginDeleteConfirm above: sweeps every empty effect
 // in every loaded sin file in one go, rather than one at a time. Render

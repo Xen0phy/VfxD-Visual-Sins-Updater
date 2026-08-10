@@ -251,10 +251,8 @@ static CreateCategoryJob s_pendingCreateCategory;
 // CategoryDragPayload
 //--------------------------------------------------------------------------------
 // sinName    which sin file the dragged category belongs to
-// path       this category's own identity, root -> ... -> this
-//            category, inclusive -- path.back() is its index within its
-//            parent's "categories" array, path.begin()..end()-1 is that
-//            parent's own path
+// path       this category's own identity, root -> ... -> this category,
+//            inclusive (path.back() is its index in the parent's array)
 //--------------------------------------------------------------------------------
 // Payload for dragging a category itself, as opposed to an effect -- same
 // "ImGui's payload is just a fixed-size marker, the real data lives in a
@@ -275,11 +273,9 @@ static const int           kCategoryDragMarker = 1; //. placeholder payload byte
 // sinName             which sin file to reorder in
 // originalPath        this category's own identity at drag time -- see
 //                      CategoryDragPayload::path
-// destinationIndex     -1 for "append" (dropped on the shared parent's
-//                      own row), else the sibling index -- within that
-//                      same parent's "categories" array as captured at
-//                      drop time, before the source erase -- to land
-//                      immediately above; see ApplyPendingCategoryMove
+// destinationIndex     -1 for "append" (dropped on the shared parent);
+//                      else the drop-time sibling index to land above --
+//                      see ApplyPendingCategoryMove
 //--------------------------------------------------------------------------------
 // Reorder-only (see installed_tree_edit.h): a category's destination is
 // always its own current parent's "categories" array, so unlike an
@@ -632,14 +628,12 @@ void ApplyPendingCategoryMove()
 //--------------------------------------------------------------------------------
 // active           whether an effect edit is currently open
 // sinName          which sin file the edited effect belongs to
-// originalPath     containing category's identity: root -> immediate
-//                  parent, each element that level's index within its
-//                  parent's "categories" array (see FindCategoryByPath)
+// originalPath     containing category's identity, root -> immediate
+//                  parent (see FindCategoryByPath)
 // originalName     effect's name at BeginEdit time -- for display and
 //                  as a sanity check on save
-// originalIndex    this effect's position within originalPath's
-//                  "effects" array at BeginEdit time -- the actual
-//                  identity key, since sibling effects can share a name
+// originalIndex    this effect's position within originalPath's "effects"
+//                  array -- the identity key, since siblings can share a name
 // nameBuf/descBuf/guidsBuf   edit buffers (guidsBuf: one guid per line)
 //--------------------------------------------------------------------------------
 struct EditState
@@ -770,9 +764,10 @@ void RenderEffectEditor()
             job.newDescription  = s_edit.descBuf;
             job.newGuids        = SplitLines(s_edit.guidsBuf);
 
+            //_ Ends edit mode -- this node may move/disappear on reload.
             s_pendingSave    = std::move(job);
             s_hasPendingSave = true;
-            s_edit.active    = false; //. the node this refers to may move/disappear on the next reload
+            s_edit.active    = false;
         }
     }
     ImGui::SameLine();
@@ -830,7 +825,7 @@ void ApplyPendingEdit()
 
     //_ A rename here is meant to write both places when a guid is known
     // to both (see effect_db.h's EffectDb_SetName). A guid the db has
-    // never seen is left alone -- only existing rows are updated, never new ones created.
+    // never seen is left alone -- only existing rows update, never new ones.
     for (const auto& guid : job.newGuids)
         if (EffectDb_IsKnownGuid(guid))
             EffectDb_SetName(guid, job.newName);
@@ -937,9 +932,10 @@ void RenderDbRenameEditor()
             job.guid_b64 = s_dbRename.guid_b64;
             job.newName  = trimmedName;
 
+            //_ Ends edit mode -- this node may move/disappear on reload.
             s_pendingDbRename    = std::move(job);
             s_hasPendingDbRename = true;
-            s_dbRename.active    = false; //. the node this refers to may move/disappear on the next reload
+            s_dbRename.active    = false;
         }
     }
     ImGui::SameLine();
@@ -1084,7 +1080,8 @@ void ApplyPendingPromote()
     if (JsonHasGuid(root, guid_b64))
     {
         s_editResultMessage = "Add to JSON: already has a JSON entry in Greed.";
-        InvalidateInstalledTree(); //. the on-screen db-only node is stale -- force a rebuild
+        //_ Force a rebuild -- the on-screen db-only node is stale.
+        InvalidateInstalledTree();
         return;
     }
 
@@ -1132,10 +1129,8 @@ const DbOnlyGuidDragPayload& GetDbOnlyGuidDragPayload()
 // guid_b64        the db-only guid being placed
 // categoryPath    destination category's name path -- see
 //                 QueueDbCategoryPlacement's own comment
-// effectName      display name, for the result message -- captured here
-//                 at Queue time rather than read back from the live drag
-//                 payload at Apply time, same "don't trust a stale
-//                 snapshot read later" reasoning as every other job here
+// effectName      display name, for the result message -- captured at
+//                 Queue time, not re-read from the drag payload at Apply
 //--------------------------------------------------------------------------------
 struct DbCategoryPlacementJob
 {
@@ -1172,7 +1167,7 @@ void ApplyPendingDbCategoryPlacement()
 
     //_ Same reasoning as ApplyPendingDbRename: the overlay cache doesn't
     // react to the generation bump on its own (see OverlayCacheEntry),
-    // but this is a deliberate, user-dragged action, so force the rebuild explicitly.
+    // but this is a deliberate, user-dragged action -- force the rebuild.
     InvalidateInstalledTree();
 }
 
@@ -1183,11 +1178,9 @@ void ApplyPendingDbCategoryPlacement()
 // isCategory     true for a category delete, false for an effect delete
 // sinName        which sin file the target belongs to
 // path           effect: containing category's identity; category: this
-//                category's OWN identity, inclusive (see EditState's
-//                originalPath field)
+//                category's OWN identity (see EditState's originalPath)
 // index          effect index within path's "effects" array (see
-//                EditState's originalIndex field); unused for a
-//                category delete
+//                EditState's originalIndex); unused for a category delete
 // displayName    just for the confirmation text/messages
 //--------------------------------------------------------------------------------
 // Rendered inline right next to the item's own row (see the "-"
@@ -1352,7 +1345,7 @@ void ApplyPendingDelete()
     {
         //_ Same indexed-by-path-and-index lookup as ApplyPendingEdit. Once
         // found, re-resolve the category for an erasable iterator --
-        // guaranteed to succeed since FindEffectByPath just verified path/index/name.
+        // guaranteed since FindEffectByPath just verified path/index/name.
         std::string findError;
         if (!FindEffectByPath(root, job.path, job.index, job.name, job.name, &findError))
         {

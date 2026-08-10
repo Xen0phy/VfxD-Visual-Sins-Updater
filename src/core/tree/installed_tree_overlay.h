@@ -1,11 +1,13 @@
 //################################################################################
 // installed_tree_overlay.h
 //--------------------------------------------------------------------------------
-// JoinPath()                  joins a category path into "A / B" for display
-// BuildDiffOverlayTree()      tags a copy of `installed` with a pending
-//                              update's diff (rework/merge/insert/move)
-// BuildDuplicateOverlayTree() tags a copy of `installed` with duplicate-guid
-//                              markers
+// JoinPath()                   joins a category path into "A / B" for display
+// BuildDiffOverlayTree()       tags a copy of `installed` with a pending
+//                               update's diff (rework/merge/insert/move)
+// BuildDuplicateOverlayTree()  tags a copy of `installed` with duplicate-guid
+//                               markers
+// BuildEffectDbOverlayTree()   tags a copy of `installed` with db-only /
+//                               db-enriched effects from "for science" capture
 //--------------------------------------------------------------------------------
 // Pure data-transformation over an installed sin's JSON, split out of
 // addon.cpp. No shared state, no ImGui calls -- every function here takes
@@ -20,7 +22,7 @@
 #pragma once
 
 #include "effect_db.h" //. EffectDbEffect
-#include "merge.h"      //. nlohmann::ordered_json, MergePlan
+#include "merge.h"     //. nlohmann::ordered_json, MergePlan
 
 #include <string>
 #include <vector>
@@ -70,30 +72,17 @@ nlohmann::ordered_json BuildDuplicateOverlayTree(const nlohmann::ordered_json& i
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // BuildEffectDbOverlayTree
 //--------------------------------------------------------------------------------
-// Deep-copies `installed` and adds one synthetic effect node, tagged
-// "__vfxd_db_only", per guid in `dbEffects` that ISN'T already a real
-// effect somewhere in `installed` -- a guid that's already JSON-backed
-// just gets skipped here entirely, it's not this overlay's concern.
+// Deep-copies `installed` and overlays "for science" capture data from
+// `dbEffects`: a guid with no existing JSON entry gets a synthetic
+// "__vfxd_db_only" node placed at its categoryPath (materializing
+// missing categories as needed, same as BuildDiffOverlayTree; an
+// unplaced guid falls into a root "Unrecognized (for science)" bucket).
+// A guid that's already a real JSON entry keeps its node untouched and
+// instead gets the capture data attached under "__vfxd_db_by_guid".
 //
-// Placed at each db-only guid's own categoryPath (see effect_db.h's
-// EffectDb_SetCategoryPath), materializing categories that don't exist
-// in `installed` yet exactly the way BuildDiffOverlayTree already does
-// for a pending update's brand-new categories (same
-// FindOrCreateDiffCategory helper, same "__vfxd_virtual" tag on any
-// category it has to create) -- one guid with an empty categoryPath
-// (never placed by a drag yet) falls into a synthetic "Unrecognized
-// (for science)" bucket at the root instead of being dropped.
-//
-// Meant to be called on `installed` for whichever sin "for science"
-// promotion always targets (Greed) -- see effect_db.h on why promotion
-// has no per-guid file choice to make. Calling it against a different
-// sin isn't wrong, exactly, it's just modeling a placement decision that
-// promotion would never actually honor.
-//
-// outAddedCount, if non-null, receives how many db-only nodes were
-// actually added (i.e. excluding guids skipped as already JSON-backed) --
-// lets a caller drive an "any db-only content shown" legend line without
-// re-querying the db itself every frame just to find out.
+// Meant to target whichever sin "for science" promotion always uses
+// (Greed) -- see effect_db.h. `outAddedCount`, if non-null, receives how
+// many synthetic nodes were added (enriched-in-place nodes don't count).
 //--------------------------------------------------------------------------------
 nlohmann::ordered_json BuildEffectDbOverlayTree(const nlohmann::ordered_json& installed, const std::vector<EffectDbEffect>& dbEffects,
                                                  size_t* outAddedCount = nullptr);

@@ -13,136 +13,138 @@ namespace fs = std::filesystem;
 
 namespace
 {
-    bool                           s_installedTreeLoaded = false;
-    std::vector<InstalledSinFile>  s_installedSins;
 
-    //_ sinName -> parsed file, only present if it parsed OK.
-    std::unordered_map<std::string, nlohmann::ordered_json> s_installedJson;
+bool                           s_installedTreeLoaded = false;
+std::vector<InstalledSinFile>  s_installedSins;
 
-    //_ Bumped every time s_installedJson is (re)loaded -- see
-    // GetInstalledTreeGeneration's doc comment in the header for why.
-    int s_installedTreeGeneration = 0;
+//_ sinName -> parsed file, only present if it parsed OK.
+std::unordered_map<std::string, nlohmann::ordered_json> s_installedJson;
 
-    //_ Set once via InstalledTreeStore_SetApi (from Addon_Init), to the
-    // same AddonAPI_t entry.cpp got from Nexus -- only used for aApi->Log
-    // on SaveInstalledSinFile's write-failure path.
-    AddonAPI_t* s_api = nullptr;
+//_ Bumped every time s_installedJson is (re)loaded -- see
+// GetInstalledTreeGeneration's doc comment in the header for why.
+int s_installedTreeGeneration = 0;
 
-    std::unordered_map<std::string, std::vector<std::string>> s_duplicateGuidsBySin;
+//_ Set once via InstalledTreeStore_SetApi (from Addon_Init), to the
+// same AddonAPI_t entry.cpp got from Nexus -- only used for aApi->Log
+// on SaveInstalledSinFile's write-failure path.
+AddonAPI_t* s_api = nullptr;
 
-    //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    // ToCrlf
-    //--------------------------------------------------------------------------------
-    // nlohmann::json::dump() always emits bare '\n', but every VfxDenoiser
-    // file shipped/edited in the wild uses CRLF. Converting here keeps a
-    // saved file's line endings consistent with what it had on disk before
-    // the edit, instead of silently flipping the whole file to LF the
-    // first time someone edits a single effect.
-    //--------------------------------------------------------------------------------
-    std::string ToCrlf(const std::string& lfText)
+std::unordered_map<std::string, std::vector<std::string>> s_duplicateGuidsBySin;
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// ToCrlf
+//--------------------------------------------------------------------------------
+// nlohmann::json::dump() always emits bare '\n', but every VfxDenoiser
+// file shipped/edited in the wild uses CRLF. Converting here keeps a
+// saved file's line endings consistent with what it had on disk before
+// the edit, instead of silently flipping the whole file to LF the
+// first time someone edits a single effect.
+//--------------------------------------------------------------------------------
+std::string ToCrlf(const std::string& lfText)
+{
+    std::string out;
+    out.reserve(lfText.size() + lfText.size() / 20);
+    for (char c : lfText)
     {
-        std::string out;
-        out.reserve(lfText.size() + lfText.size() / 20);
-        for (char c : lfText)
+        if (c == '\n')
+            out += '\r';
+        out += c;
+    }
+    return out;
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// CollectGuidNamesRecursive
+//--------------------------------------------------------------------------------
+// Recursively walks every effect anywhere under `category`, keeping
+// each effect's name alongside its guids -- see CollectGuidNameMap.
+//--------------------------------------------------------------------------------
+void CollectGuidNamesRecursive(const nlohmann::ordered_json& category,
+                                std::unordered_map<std::string, std::string>& out)
+{
+    if (category.contains("effects") && category["effects"].is_array())
+    {
+        for (const auto& eff : category["effects"])
         {
-            if (c == '\n')
-                out += '\r';
-            out += c;
+            if (!eff.contains("guids") || !eff["guids"].is_array() ||
+                !eff.contains("name") || !eff["name"].is_string())
+                continue;
+
+            std::string name = eff["name"].get<std::string>();
+            for (const auto& g : eff["guids"])
+                if (g.is_string())
+                    out[g.get<std::string>()] = name;
         }
-        return out;
     }
 
-    //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    // CollectGuidNamesRecursive
-    //--------------------------------------------------------------------------------
-    // Recursively walks every effect anywhere under `category`, keeping
-    // each effect's name alongside its guids -- see CollectGuidNameMap.
-    //--------------------------------------------------------------------------------
-    void CollectGuidNamesRecursive(const nlohmann::ordered_json& category,
+    if (category.contains("categories") && category["categories"].is_array())
+        for (const auto& sub : category["categories"])
+            CollectGuidNamesRecursive(sub, out);
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// FormatBehaviors
+//--------------------------------------------------------------------------------
+// Flattens one effect's "behaviors" array into a single display
+// string. An effect can legitimately carry more than one behavior at
+// once (e.g. Hide for Others + Show for Self), so entries are joined
+// with "; " rather than assuming exactly one.
+//--------------------------------------------------------------------------------
+std::string FormatBehaviors(const nlohmann::ordered_json& behaviors)
+{
+    std::string out;
+    for (const auto& behavior : behaviors)
+    {
+        std::string type   = behavior.value("type", std::string("?"));
+        std::string caster = behavior.value("caster", std::string("?"));
+
+        std::string one;
+        if (type == "SetDuration" && behavior.contains("duration") && behavior["duration"].is_number())
+            one = "Set duration: " + std::to_string(behavior["duration"].get<double>()) + "ms for " + caster;
+        else
+            one = type + " for " + caster;
+
+        if (!out.empty())
+            out += "; ";
+        out += one;
+    }
+    return out;
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// CollectGuidBehaviorsRecursive
+//--------------------------------------------------------------------------------
+// Same recursive walk as CollectGuidNamesRecursive, but keeping each
+// effect's own formatted "behaviors" summary instead of its name --
+// see CollectGuidBehaviorMap. An effect with no "behaviors" array
+// still gets an (empty-string) entry, so a known guid is
+// distinguishable from one that's merely unconfigured.
+//--------------------------------------------------------------------------------
+void CollectGuidBehaviorsRecursive(const nlohmann::ordered_json& category,
                                     std::unordered_map<std::string, std::string>& out)
+{
+    if (category.contains("effects") && category["effects"].is_array())
     {
-        if (category.contains("effects") && category["effects"].is_array())
+        for (const auto& eff : category["effects"])
         {
-            for (const auto& eff : category["effects"])
-            {
-                if (!eff.contains("guids") || !eff["guids"].is_array() ||
-                    !eff.contains("name") || !eff["name"].is_string())
-                    continue;
+            if (!eff.contains("guids") || !eff["guids"].is_array())
+                continue;
 
-                std::string name = eff["name"].get<std::string>();
-                for (const auto& g : eff["guids"])
-                    if (g.is_string())
-                        out[g.get<std::string>()] = name;
-            }
+            std::string summary = (eff.contains("behaviors") && eff["behaviors"].is_array())
+                                        ? FormatBehaviors(eff["behaviors"])
+                                        : std::string();
+
+            for (const auto& g : eff["guids"])
+                if (g.is_string())
+                    out[g.get<std::string>()] = summary;
         }
-
-        if (category.contains("categories") && category["categories"].is_array())
-            for (const auto& sub : category["categories"])
-                CollectGuidNamesRecursive(sub, out);
     }
 
-    //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    // FormatBehaviors
-    //--------------------------------------------------------------------------------
-    // Flattens one effect's "behaviors" array into a single display
-    // string. An effect can legitimately carry more than one behavior at
-    // once (e.g. Hide for Others + Show for Self), so entries are joined
-    // with "; " rather than assuming exactly one.
-    //--------------------------------------------------------------------------------
-    std::string FormatBehaviors(const nlohmann::ordered_json& behaviors)
-    {
-        std::string out;
-        for (const auto& behavior : behaviors)
-        {
-            std::string type   = behavior.value("type", std::string("?"));
-            std::string caster = behavior.value("caster", std::string("?"));
+    if (category.contains("categories") && category["categories"].is_array())
+        for (const auto& sub : category["categories"])
+            CollectGuidBehaviorsRecursive(sub, out);
+}
 
-            std::string one;
-            if (type == "SetDuration" && behavior.contains("duration") && behavior["duration"].is_number())
-                one = "Set duration: " + std::to_string(behavior["duration"].get<double>()) + "ms for " + caster;
-            else
-                one = type + " for " + caster;
-
-            if (!out.empty())
-                out += "; ";
-            out += one;
-        }
-        return out;
-    }
-
-    //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    // CollectGuidBehaviorsRecursive
-    //--------------------------------------------------------------------------------
-    // Same recursive walk as CollectGuidNamesRecursive, but keeping each
-    // effect's own formatted "behaviors" summary instead of its name --
-    // see CollectGuidBehaviorMap. An effect with no "behaviors" array
-    // still gets an (empty-string) entry, so a known guid is
-    // distinguishable from one that's merely unconfigured.
-    //--------------------------------------------------------------------------------
-    void CollectGuidBehaviorsRecursive(const nlohmann::ordered_json& category,
-                                        std::unordered_map<std::string, std::string>& out)
-    {
-        if (category.contains("effects") && category["effects"].is_array())
-        {
-            for (const auto& eff : category["effects"])
-            {
-                if (!eff.contains("guids") || !eff["guids"].is_array())
-                    continue;
-
-                std::string summary = (eff.contains("behaviors") && eff["behaviors"].is_array())
-                                           ? FormatBehaviors(eff["behaviors"])
-                                           : std::string();
-
-                for (const auto& g : eff["guids"])
-                    if (g.is_string())
-                        out[g.get<std::string>()] = summary;
-            }
-        }
-
-        if (category.contains("categories") && category["categories"].is_array())
-            for (const auto& sub : category["categories"])
-                CollectGuidBehaviorsRecursive(sub, out);
-    }
 } //. namespace
 
 void InstalledTreeStore_SetApi(AddonAPI_t* aApi)

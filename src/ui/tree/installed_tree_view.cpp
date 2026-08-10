@@ -1,23 +1,26 @@
-//##############################################################################
+//################################################################################
 // installed_tree_view.cpp
-//------------------------------------------------------------------------------
+//--------------------------------------------------------------------------------
 // RenderInstalledEffects(dir)   draws the whole Installed Effects section
-//------------------------------------------------------------------------------
+//--------------------------------------------------------------------------------
 // Extracted from addon.cpp: RenderCategoryTree (the recursive tree renderer),
-// RenderInstalledEffects (the section wrapper), and their small leaf
-// renderers (GuidList/GuidDiff/JsonValue/Behavior/ConflictSources) are all
-// file-local -- RenderInstalledEffects is the only symbol this module
-// exposes. Reaches the editing/store/overlay/search modules only through
-// their own accessor headers, never through another module's statics.
+// RenderInstalledEffects (the section wrapper), and their supporting leaf
+// renderers (GuidList/GuidDiff/JsonValue/Behavior/ConflictSources/GroupInfo/
+// EffectDbDetail, among others) are all file-local -- RenderInstalledEffects
+// is the only symbol this module exposes. Reaches the editing/store/overlay/
+// search modules only through their own accessor headers, never through
+// another module's statics.
 //
-// Two things are cached rather than rebuilt every frame, since doing so
+// Three things are cached rather than rebuilt every frame, since doing so
 // caused a reported scrolling stall on a large tree with an overlay open:
 // s_overlayCache (one built, duplicate-guid-/pending-diff-/Greed-effect-db-
-// tagged copy of each sin file's tree, rebuilt only when its generation,
-// diff status, or effect-db generation changes), and the search box's
-// forced-open/forced-closed TreeNode state (gated by s_treeSearchQueryChanged,
-// true for exactly one frame per query change; s_treeSearchQueryLower is the
-// lowercased query every match/filter helper below compares against).
+// tagged copy of each sin file's tree, rebuilt only when its generation or
+// diff status changes -- NOT on effect-db generation alone, see "Deliberately
+// not reacting" below), s_searchCache (per-sin search-match results, see
+// SearchCacheEntry), and the search box's forced-open/forced-closed TreeNode
+// state (gated by s_treeSearchQueryChanged, true for exactly one frame per
+// query change; s_treeSearchQueryLower is the lowercased query every
+// match/filter helper below compares against).
 //
 // Drag-and-drop is reorder-only: an effect or category can move among its
 // current siblings, never to a different parent or sin file. Nothing that
@@ -43,7 +46,7 @@
 //   category_path via QueueDbCategoryPlacement. What moves is a real
 //   database row, not the overlay node -- the overlay just renders it as
 //   virtual this frame.
-//------------------------------------------------------------------------------
+//--------------------------------------------------------------------------------
 
 #include "effect_db.h"
 #include "github_update.h"
@@ -69,18 +72,18 @@
 
 namespace {
 
-//******************************************************************************
+//********************************************************************************
 // GuidListDragContext
-//------------------------------------------------------------------------------
+//--------------------------------------------------------------------------------
 // sinName/path/index   the owning effect's identity (see GuidDragPayload)
 // effectName            owning effect's display name, for messages
-//------------------------------------------------------------------------------
+//--------------------------------------------------------------------------------
 // Passed to RenderGuidList to make its rows draggable straight from the
 // read-only tree (no need to open the effect's editor first) -- nullptr
 // (the default) keeps the plain BulletText rendering RenderGuidDiff's
 // added/removed/unchanged buckets use, where dragging wouldn't make
 // sense (an "Added" bucket's GUIDs aren't actually on this effect yet).
-//------------------------------------------------------------------------------
+//--------------------------------------------------------------------------------
 struct GuidListDragContext
 {
     std::string       sinName;
@@ -89,9 +92,9 @@ struct GuidListDragContext
     std::string       effectName;
 };
 
-//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // RenderGuidList
-//------------------------------------------------------------------------------
+//--------------------------------------------------------------------------------
 // `color` is optional -- nullptr for the default text color (a plain guids
 // list), or a color to tint every bullet (e.g. kReworkColor, to set a
 // reworked effect's post-update GUIDs apart from its current ones).
@@ -99,7 +102,7 @@ struct GuidListDragContext
 // is a "VFXD_GUID" drag source (see QueueGuidMerge) instead of a plain
 // bullet; gated on !AnyEditInFlight() so it can't start a new drag while
 // some other edit is already open elsewhere.
-//------------------------------------------------------------------------------
+//--------------------------------------------------------------------------------
 void RenderGuidList(const char* label, const std::vector<std::string>& guids, const ImVec4* color = nullptr,
                      const GuidListDragContext* dragContext = nullptr)
 {
@@ -147,9 +150,9 @@ void RenderGuidList(const char* label, const std::vector<std::string>& guids, co
     ImGui::Unindent();
 }
 
-//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // RenderGuidDiff
-//------------------------------------------------------------------------------
+//--------------------------------------------------------------------------------
 // Shows only what a reworked effect's guid list would actually change to,
 // rather than the full current and post-update lists side by side -- a 1c
 // merge can fold in dozens of untouched guids (see BuildMergedRework in
@@ -157,7 +160,7 @@ void RenderGuidList(const char* label, const std::vector<std::string>& guids, co
 // Guids are an unordered identity set (see GuidDiff in merge.cpp), so this
 // is a set difference, not a positional diff; unchanged guids still get
 // listed, only added/removed ones get their own highlighted section.
-//------------------------------------------------------------------------------
+//--------------------------------------------------------------------------------
 void RenderGuidDiff(const std::vector<std::string>& oldGuids, const std::vector<std::string>& newGuids)
 {
     std::unordered_set<std::string> oldSet(oldGuids.begin(), oldGuids.end());
@@ -187,14 +190,14 @@ void RenderGuidDiff(const std::vector<std::string>& oldGuids, const std::vector<
 }
 
 
-//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // RenderJsonValue
-//------------------------------------------------------------------------------
+//--------------------------------------------------------------------------------
 // Prints one key/value pair outside the confirmed effect/category schema
 // (name/description/guids/behaviors) -- a forward-compat fallback, e.g. for
 // a field a future VfxDenoiser version adds, rendered generically by JSON
 // type so it shows up as *something* rather than silently vanishing.
-//------------------------------------------------------------------------------
+//--------------------------------------------------------------------------------
 void RenderJsonValue(const std::string& key, const nlohmann::ordered_json& value)
 {
     switch (value.type())
@@ -226,14 +229,14 @@ void RenderJsonValue(const std::string& key, const nlohmann::ordered_json& value
     }
 }
 
-//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // RenderBehavior
-//------------------------------------------------------------------------------
+//--------------------------------------------------------------------------------
 // Renders one entry of an effect's "behaviors" array. Confirmed real shape
 // (sample Collection.json): type Hide/Show/SetDuration, caster Self/
 // Others/All, plus a "duration" (ms, per VfxDenoiser's README) only when
 // type is SetDuration.
-//------------------------------------------------------------------------------
+//--------------------------------------------------------------------------------
 void RenderBehavior(const nlohmann::ordered_json& behavior)
 {
     std::string type   = behavior.value("type", std::string("?"));
@@ -260,16 +263,16 @@ void RenderBehavior(const nlohmann::ordered_json& behavior)
     }
 }
 
-//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // RenderConflictSources
-//------------------------------------------------------------------------------
+//--------------------------------------------------------------------------------
 // Renders the discarded/disagreeing settings recorded on a merge conflict
 // (see MergePlanMergeCandidate in merge.h and "__vfxd_conflict_sources" in
 // installed_tree_overlay.cpp) -- one block per other matched candidate,
 // naming which effect it came from and its own behaviors. This is what
 // "review before applying" is asking the user to look at, shown right
 // where the warning already is.
-//------------------------------------------------------------------------------
+//--------------------------------------------------------------------------------
 void RenderConflictSources(const nlohmann::ordered_json& effect)
 {
     if (!effect.contains("__vfxd_conflict_sources") || !effect["__vfxd_conflict_sources"].is_array())
@@ -299,9 +302,9 @@ void RenderConflictSources(const nlohmann::ordered_json& effect)
     }
 }
 
-//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // GroupMemberLabel
-//------------------------------------------------------------------------------
+//--------------------------------------------------------------------------------
 // A group_members row only ever stores a guid -- resolve it to the db's
 // own name for display, same "prefer the db name, fall back to the raw
 // guid" convention RenderLiveLogSection's for-science branch already
@@ -309,7 +312,7 @@ void RenderConflictSources(const nlohmann::ordered_json& effect)
 // itself (member_guid_b64 REFERENCES effects(guid_b64)), so the only
 // reason EffectDb_GetEffect would fail here is the guid never having
 // been renamed -- name is then "", and this still falls back correctly.
-//------------------------------------------------------------------------------
+//--------------------------------------------------------------------------------
 std::string GroupMemberLabel(const std::string& guid_b64)
 {
     EffectDbEffect eff{};
@@ -318,25 +321,20 @@ std::string GroupMemberLabel(const std::string& guid_b64)
     return guid_b64;
 }
 
-//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // RenderGroupInfo
-//------------------------------------------------------------------------------
-// The "group info" section RenderEffectDbDetail and (mirrored, reading
-// straight from EffectDb_GetGroupsStarted/MemberOf instead of this json)
-// live_log_ui.cpp's RenderForScienceDetail both show -- see effect_db.h's
-// group_members doc comment for what this table does and doesn't let you
-// reconstruct. `detail` is one guid's "__vfxd_db_by_guid" entry, already
-// carrying "groups": {"started": [...], "member_of": [...]} baked in by
-// BuildGroupsJson at cache-rebuild time (installed_tree_overlay.cpp) --
-// this function only renders, it never queries the db itself.
+//--------------------------------------------------------------------------------
+// The "group info" section shown here, in RenderEffectDbDetail, and
+// (mirrored, reading straight from the db) live_log_ui.cpp's
+// RenderForScienceDetail -- see effect_db.h's group_members doc comment
+// for what this table does and doesn't let you reconstruct. `detail` is
+// one guid's "__vfxd_db_by_guid" entry; this function only renders, never
+// queries the db itself.
 //
-// Two separate lists, not one merged view, because they answer different
-// questions: "started" is every distinct (duration, a4) instance this
-// guid opened, with who else showed up while it was open; "member_of" is
-// every OTHER guid's group this one got swept into. A guid can appear in
-// both (it opens its own groups sometimes, and rides along in someone
-// else's other times) -- nothing here assumes exclusivity.
-//------------------------------------------------------------------------------
+// Two separate lists, not merged: "started" is every (duration, a4)
+// instance this guid opened; "member_of" is every OTHER guid's group it
+// got swept into. A guid can appear in both.
+//--------------------------------------------------------------------------------
 void RenderGroupInfo(const nlohmann::ordered_json& detail)
 {
     if (!detail.contains("groups") || !detail["groups"].is_object())
@@ -346,8 +344,9 @@ void RenderGroupInfo(const nlohmann::ordered_json& detail)
 
     bool hasStarted   = groups.contains("started")   && groups["started"].is_array()   && !groups["started"].empty();
     bool hasMemberOf  = groups.contains("member_of") && groups["member_of"].is_array() && !groups["member_of"].empty();
+    //_ Never opened or been swept into a group -- nothing worth a section for.
     if (!hasStarted && !hasMemberOf)
-        return;   //. never opened or been swept into a group -- nothing worth a section for
+        return;
 
     if (ImGui::TreeNode("groupinfo", "Group info"))
     {
@@ -390,9 +389,9 @@ void RenderGroupInfo(const nlohmann::ordered_json& detail)
     }
 }
 
-//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // DecodeSpecOrCoreId
-//------------------------------------------------------------------------------
+//--------------------------------------------------------------------------------
 // One raw id from EffectDb_SpecOrCoreIdsInMask (1..127, see effect_db.h's
 // EffectDbSpecializationMask) -> the profession display name and
 // spec/core-build label to bucket it under in the tree. A reserved
@@ -402,7 +401,7 @@ void RenderGroupInfo(const nlohmann::ordered_json& detail)
 // through specialization_info.h, falling back to a raw "Spec #N" label if
 // the id isn't in that table yet (mirrors GetSpecializationInfo's own
 // "don't guess" contract -- see that header).
-//------------------------------------------------------------------------------
+//--------------------------------------------------------------------------------
 void DecodeSpecOrCoreId(unsigned int id, std::string& outProfName, std::string& outSpecLabel)
 {
     if (id >= kEffectDbCoreOnlyIdFloor)
@@ -417,26 +416,20 @@ void DecodeSpecOrCoreId(unsigned int id, std::string& outProfName, std::string& 
     outSpecLabel = info.name ? std::string(info.name) : ("Spec #" + std::to_string(id));
 }
 
-//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // RenderEffectDbDetail
-//------------------------------------------------------------------------------
-// The "for science" expanded view: full detail for a "__vfxd_db_only" node
-// (replaces its status/guid-list/behavior rendering), or an extra section
-// under an ordinary effect that also has capture data.
-//
-// Reads "__vfxd_db_by_guid" (guid -> {block_group, block_member, type,
-// occurrences, groups}), embedded once per cache rebuild by
-// BuildEffectDbOverlayTree. Usually one guid; a merged effect gets one
+//--------------------------------------------------------------------------------
+// The "for science" expanded view: full detail for a "__vfxd_db_only" node,
+// or an extra section under an ordinary effect with capture data. Reads
+// "__vfxd_db_by_guid" (guid -> {block_group, block_member, type,
+// occurrences, groups}), embedded per cache rebuild by
+// BuildEffectDbOverlayTree -- usually one guid; a merged effect gets one
 // header+group per guid.
 //
-// Occurrences group here as duration/a4/a6/self_mask (per-cast signature) ->
-// profession -> specialization, with races listed as siblings rather than
-// nested under profession -- one row spans every race/profession/spec ever
-// seen (see effect_db.h's EffectDbSpecializationMask).
-//
-// "groups" (group_members rows, both directions) renders separately, via
-// RenderGroupInfo -- see its own comment.
-//------------------------------------------------------------------------------
+// Occurrences group as duration/a4/a6/self_mask -> profession ->
+// specialization, races as siblings (see EffectDbSpecializationMask).
+// "groups" renders separately, via RenderGroupInfo.
+//--------------------------------------------------------------------------------
 void RenderEffectDbDetail(const nlohmann::ordered_json& effect)
 {
     if (!effect.contains("__vfxd_db_by_guid") || !effect["__vfxd_db_by_guid"].is_object()
@@ -553,27 +546,28 @@ void RenderEffectDbDetail(const nlohmann::ordered_json& effect)
     }
 }
 
-//******************************************************************************
+//********************************************************************************
 // OverlayCacheEntry
-//------------------------------------------------------------------------------
+//--------------------------------------------------------------------------------
 // generation           tree generation this copy was built from
 // diffStatus           diff status this copy was built from
-// effectDbGeneration   effect_db generation this copy was built from
-//                      (see EffectDb_GetGeneration) -- only meaningful for
-//                      whichever sin BuildEffectDbOverlayTree is actually
-//                      applied to (Greed); stays -1 (never matches, so
-//                      the check below is always true) everywhere else
+// effectDbGeneration   effect_db generation as of the last rebuild -- stored
+//                      but not itself checked for staleness (see below)
+// dbOnlyCount          number of "for science" db-only nodes folded in by
+//                      BuildEffectDbOverlayTree
 // file                 the built (dupe/diff/db-tagged) copy of the
 //                      installed tree
-//------------------------------------------------------------------------------
+// contentVersion       bumped whenever `file` is rebuilt -- lets the search
+//                      cache tell a real rebuild apart from a cache-hit frame
+//--------------------------------------------------------------------------------
 // Per-sin cache entry backing s_overlayCache -- see the file header for why
 // this cache exists. Invalidated on GetInstalledTreeGeneration() changing
-// (file reloaded/edited), the sin's own EDiffStatus changing (a diff
+// (file reloaded/edited) or the sin's own EDiffStatus changing (a diff
 // produces one MergePlan per Ready transition; a reload always passes
-// through NotLoaded/Loading first, which this also catches), or (Greed
-// only) EffectDb_GetGeneration() changing -- new capture, a rename, or a
-// drag-to-category all bump that counter, see effect_db.h.
-//------------------------------------------------------------------------------
+// through NotLoaded/Loading first, which this also catches). NOT invalidated
+// by effectDbGeneration alone changing -- see "Deliberately not reacting"
+// where this is rebuilt, below.
+//--------------------------------------------------------------------------------
 struct OverlayCacheEntry
 {
     int         generation = -1;
@@ -581,9 +575,41 @@ struct OverlayCacheEntry
     int         effectDbGeneration = -1;
     size_t      dbOnlyCount = 0;
     nlohmann::ordered_json file;
+    int contentVersion = 0;
 };
 //_ Per-sin cache of built overlay trees, keyed by sin name.
 std::unordered_map<std::string, OverlayCacheEntry> s_overlayCache;
+
+//********************************************************************************
+// SearchCacheEntry
+//--------------------------------------------------------------------------------
+// query            lowercased search query this cache was last built for
+// treeVersion      tree-content version this cache was last built for (see
+//                  fileTreeVersion below)
+// categoryCache    per-category subtree-match results (see
+//                  CategoryMatchCache in installed_tree_search.h)
+// effectCache      per-effect match results (see EffectMatchCache)
+// anyMatchInFile   whether any category/effect in this sin matched at all
+//--------------------------------------------------------------------------------
+// Per-sin CategoryMatchCache/EffectMatchCache (see installed_tree_search.h),
+// persisted across frames instead of rebuilt every frame the search box is
+// non-empty -- rebuilding meant a full ContainsCI scan (allocating +
+// lowercasing a string per name/description/GUID) over every effect,
+// every frame, on a ~20k-effect tree -- the same stall noted in the file
+// header. `query`/`treeVersion` gate the rebuild (see `searchStale`
+// below); unchanged, a lookup costs one hashmap read per sin instead of
+// an O(effect count) rescan.
+//--------------------------------------------------------------------------------
+struct SearchCacheEntry
+{
+    std::string        query;
+    long long           treeVersion = -1;   //. see fileTreeVersion below
+    CategoryMatchCache  categoryCache;
+    EffectMatchCache    effectCache;
+    bool                anyMatchInFile = false;
+};
+//_ Per-sin cache of search-match results, keyed by sin name.
+std::unordered_map<std::string, SearchCacheEntry> s_searchCache;
 
 //_ Raw ImGui input buffer for the installed-tree search box.
 char        s_treeSearchBuf[256] = {};
@@ -600,36 +626,24 @@ constexpr size_t kMinTreeSearchLength = 3;
 // (see file header for why this gates forced-open/closed calls).
 bool s_treeSearchQueryChanged = false;
 
-//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // RenderCategoryTree
-//------------------------------------------------------------------------------
+//--------------------------------------------------------------------------------
 // Recursively renders one category node -- a TreeNode per category, with
-// effects and subcategories nested underneath. `category`/`effects`/
-// `categories` mirror the JSON shape merge.cpp walks.
-//
-// `pathSoFar` (root-to-parent index path) lets right-click-to-edit re-find
-// a category/effect (see EditState::originalIndex); `myIndex` is this
-// category's own index, from the caller. `sinName` scopes edit state per
-// file. Caller must PushID a stable per-sibling key first, so same-named
-// siblings don't collide in imgui's ID stack.
-//
-// `namePathSoFar` mirrors `pathSoFar` by name instead of index -- the
-// shape EffectDb_SetCategoryPath/BuildEffectDbOverlayTree/
-// FindOrCreateRealCategory key placement by, since it survives reordering;
-// used by the db-only drag target below.
-//
-// `forceShow` is true once an ancestor already matched the search box,
-// showing this subtree unfiltered from there down (set only by this
-// function's own recursive call).
-//
-// Force-open checks below run only on the frame the search query changed
-// (not gated on search being active) -- every frame stalled scrolling on
-// a large tree; skipping them after search ends would leave
-// nodes force-open forever (see file header).
-//------------------------------------------------------------------------------
+// effects and subcategories nested underneath, mirroring the JSON shape
+// merge.cpp walks. `pathSoFar`/`myIndex`/`sinName` key edit-state lookup
+// (see EditState::originalIndex); caller must PushID a stable per-sibling
+// key first. `namePathSoFar` mirrors `pathSoFar` by name -- the shape
+// EffectDb_SetCategoryPath keys placement by, since it survives reordering
+// (used by the db-only drag target below). `forceShow` is true once an
+// ancestor already matched the search box. `matchCache`/`effectMatchCache`
+// (rebuilt fresh per frame, see BuildCategoryMatchCache) turn what would be
+// an O(size) walk per node into an O(1) lookup here.
+//--------------------------------------------------------------------------------
 void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json& category,
                          std::vector<int>& pathSoFar, std::vector<std::string>& namePathSoFar,
-                         int myIndex, bool forceShow = false)
+                         int myIndex, const CategoryMatchCache& matchCache, const EffectMatchCache& effectMatchCache,
+                         bool forceShow = false)
 {
     std::string name = category.value("name", std::string("(unnamed category)"));
     pathSoFar.push_back(myIndex);
@@ -640,7 +654,7 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
     //_ An unmatched subtree isn't drawn at all (not even collapsed). Cancel
     // any edit scoped under here first -- nothing should keep running
     // invisibly (see file header).
-    if (searchActive && !forceShow && !CategorySubtreeMatchesSearch(category, s_treeSearchQueryLower))
+    if (searchActive && !forceShow && !CachedSubtreeMatches(category, s_treeSearchQueryLower, matchCache))
     {
         if (IsCategoryRenameUnderPath(sinName, pathSoFar))
             CancelCategoryEdit();
@@ -676,7 +690,7 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
     {
         bool categoryNeedsForceOpen = searchActive &&
             (CategoryDescriptionMatches(category, s_treeSearchQueryLower) ||
-             CategoryHasDescendantMatch(category, s_treeSearchQueryLower));
+             CachedHasDescendantMatch(category, s_treeSearchQueryLower, matchCache));
         ImGui::SetNextItemOpen(categoryNeedsForceOpen, ImGuiCond_Always);
     }
 
@@ -763,8 +777,9 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
 
                 if (pathSoFar == draggedParentPath)
                 {
+                    //_ Same no-op check as the effect target's append case.
                     bool alreadyLast = category.contains("categories") && category["categories"].is_array() &&
-                                       draggedIndex == static_cast<int>(category["categories"].size()) - 1;   //. append case, same no-op check as effect target
+                                       draggedIndex == static_cast<int>(category["categories"].size()) - 1;
                     if (!alreadyLast)
                         QueueCategoryMove(GetCategoryDragSinName(), dragPath, -1);
                 }
@@ -871,7 +886,7 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                 //_ Hidden by search -- not matched by category or effect.
                 // Cancel any edit in flight (see file header) since it
                 // won't be drawn at all this frame.
-                if (searchActive && !categoryMatchesDirectly && !EffectMatchesSearch(effect, s_treeSearchQueryLower))
+                if (searchActive && !categoryMatchesDirectly && !CachedEffectMatches(effect, s_treeSearchQueryLower, effectMatchCache))
                 {
                     bool isEditingThisHidden = IsEffectBeingEdited(sinName, pathSoFar, effIndex);
                     if (isEditingThisHidden)
@@ -947,7 +962,7 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                 //_ Forced open only if it matched through hidden content
                 // (description/GUID) -- a name match is already visible on
                 // the row. Query-change gating as above (see file header).
-                bool effectNeedsForceOpen = searchActive && EffectHiddenContentMatches(effect, s_treeSearchQueryLower);
+                bool effectNeedsForceOpen = searchActive && CachedEffectHiddenMatches(effect, s_treeSearchQueryLower, effectMatchCache);
                 if (s_treeSearchQueryChanged)
                     ImGui::SetNextItemOpen(effectNeedsForceOpen, ImGuiCond_Always);
                 bool nodeOpen = ImGui::TreeNode("effect", "%s%s%s%s", effName.c_str(),
@@ -1070,7 +1085,7 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                         BeginDeleteConfirm(sinName, pathSoFar, effIndex, /*isCategory=*/false, effName);
                 }
 
-                //_ sits below the row, visible whether nodeOpen or not
+                //_ Sits below the row, visible whether nodeOpen or not.
                 if (isDeletingThisEffect)
                     RenderDeleteConfirm();
 
@@ -1138,7 +1153,7 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                                 ImGui::TextColored(kReworkColor, "Moved from \"%s\".",
                                     effect.value("__vfxd_old_category", std::string()).c_str());
 
-                            //_ what the conflict warning above asks to review
+                            //_ What the conflict warning above asks to review.
                             if (effIsConflict)
                                 RenderConflictSources(effect);
                         }
@@ -1232,7 +1247,7 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                 }
                 else if (isEditingThis)
                 {
-                    //_ collapsing mid-edit cancels it, same as the category case
+                    //_ Collapsing mid-edit cancels it, same as the category case.
                     CancelEdit();
                 }
 
@@ -1246,7 +1261,7 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
             for (const auto& sub : category["categories"])
             {
                 ImGui::PushID(i);
-                RenderCategoryTree(sinName, sub, pathSoFar, namePathSoFar, i, categoryMatchesDirectly);
+                RenderCategoryTree(sinName, sub, pathSoFar, namePathSoFar, i, matchCache, effectMatchCache, categoryMatchesDirectly);
                 ImGui::PopID();
                 ++i;
             }
@@ -1273,15 +1288,15 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
 
 } //. namespace
 
-//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // RenderInstalledEffects
-//------------------------------------------------------------------------------
+//--------------------------------------------------------------------------------
 // Draws the "Installed Effects" section: one top-level TreeNode per
 // installed sin file, each expanding into that file's real category tree
 // via RenderCategoryTree. Read-only browsing by default; right-clicking an
 // effect offers "Edit". Independent of whether a GitHub update is
 // available.
-//------------------------------------------------------------------------------
+//--------------------------------------------------------------------------------
 void RenderInstalledEffects(const std::string& denoiserAddonDir)
 {
     if (!IsInstalledTreeLoaded())
@@ -1330,12 +1345,18 @@ void RenderInstalledEffects(const std::string& denoiserAddonDir)
     if (!typedLower.empty() && typedLower.size() < kMinTreeSearchLength)
         ImGui::TextDisabled("Keep typing... (search starts at %zu characters)", kMinTreeSearchLength);
 
-    //. below the minimum, treat the query as empty (no filtering/expansion)
+    //_ Below the minimum, treat the query as empty (no filtering/expansion).
     std::string newQueryLower = (typedLower.size() >= kMinTreeSearchLength) ? typedLower : std::string();
 
-    //. see s_treeSearchQueryChanged's own comment for why this matters
+    //_ See s_treeSearchQueryChanged's own comment for why this matters.
     s_treeSearchQueryChanged = (newQueryLower != s_treeSearchQueryLower);
     s_treeSearchQueryLower   = std::move(newQueryLower);
+
+    //_ Search cleared -- drop the per-sin match caches (see
+    // SearchCacheEntry) rather than let them sit around unused; they'll
+    // rebuild fresh, lazily, next time a query goes active.
+    if (s_treeSearchQueryChanged && s_treeSearchQueryLower.empty())
+        s_searchCache.clear();
 
     if (!GetEditResultMessage().empty())
         ImGui::TextWrapped("%s", GetEditResultMessage().c_str());
@@ -1388,6 +1409,11 @@ void RenderInstalledEffects(const std::string& denoiserAddonDir)
         // picks red over orange/green. Only ever a copy -- see OverlayCacheEntry.
         const nlohmann::ordered_json* fileToRender = installedFile;
 
+        //_ Identity token for what fileToRender points at, consumed by the
+        // search cache below. Top-bit-tagged so a plain tree's generation
+        // counter can never collide with an overlay's contentVersion.
+        long long fileTreeVersion = (2LL << 32) | static_cast<unsigned int>(GetInstalledTreeGeneration());
+
         if (hasDupes || hasOverlay || isGreedSin)
         {
             EDiffStatus statusForCache = diff ? diff->status : EDiffStatus::NotLoaded;
@@ -1415,7 +1441,13 @@ void RenderInstalledEffects(const std::string& denoiserAddonDir)
                 cached.effectDbGeneration = effectDbGenNow;
                 cached.dbOnlyCount        = dbOnlyCount;
                 cached.file               = std::move(built);
+                ++cached.contentVersion;
             }
+
+            //_ Rebuilt or cache-hit, `cached.contentVersion` reflects the
+            // content actually behind `fileToRender` now -- what the
+            // search cache below needs to decide if it can reuse its work.
+            fileTreeVersion = (1LL << 32) | static_cast<unsigned int>(cached.contentVersion);
 
             fileToRender = &cached.file;
             if (isGreedSin && cached.dbOnlyCount > 0)
@@ -1435,19 +1467,59 @@ void RenderInstalledEffects(const std::string& denoiserAddonDir)
                 sin.sinName.c_str());
         }
 
-        //_ Whether this file has any match at all -- lets the root row
-        // force itself open, and lets an empty result say so further down.
+        //_ Whether this file has any match at all -- lets the root row force
+        // itself open. Built fresh once per sin per frame, O(size) bottom-up
+        // (see BuildCategoryMatchCache), and reused below by RenderCategoryTree.
         bool searchActive   = !s_treeSearchQueryLower.empty();
         bool anyMatchInFile = false;
-        if (searchActive && fileToRender->contains("categories") && (*fileToRender)["categories"].is_array())
-            for (const auto& cat : (*fileToRender)["categories"])
-                if (CategorySubtreeMatchesSearch(cat, s_treeSearchQueryLower))
-                {
-                    anyMatchInFile = true;
-                    break;
-                }
 
-        //. same query-change force-open/shut gating as RenderCategoryTree
+        //_ Unused, never-written fallbacks for the !searchActive case --
+        // RenderCategoryTree takes matchCache/effectMatchCache by reference
+        // unconditionally but only reads them when searchActive is true.
+        static const CategoryMatchCache s_emptySearchCategoryCache;
+        static const EffectMatchCache   s_emptySearchEffectCache;
+
+        const CategoryMatchCache* matchCachePtr       = &s_emptySearchCategoryCache;
+        const EffectMatchCache*   effectMatchCachePtr = &s_emptySearchEffectCache;
+
+        if (searchActive)
+        {
+            SearchCacheEntry& searchCached = s_searchCache[sin.sinName];
+
+            //_ Only rebuild when the query text or tree content this cache
+            // was built against (see fileTreeVersion above) actually
+            // changed -- otherwise a hit, O(1) instead of O(effect count).
+            bool searchStale = searchCached.query != s_treeSearchQueryLower ||
+                                searchCached.treeVersion != fileTreeVersion;
+
+            if (searchStale)
+            {
+                searchCached.categoryCache.clear();
+                searchCached.effectCache.clear();
+
+                bool anyMatch = false;
+                if (fileToRender->contains("categories") && (*fileToRender)["categories"].is_array())
+                    for (const auto& cat : (*fileToRender)["categories"])
+                    {
+                        BuildCategoryMatchCache(cat, s_treeSearchQueryLower, searchCached.categoryCache, searchCached.effectCache);
+                        if (searchCached.categoryCache[&cat].subtreeMatches)
+                            anyMatch = true;
+                    }
+
+                searchCached.query          = s_treeSearchQueryLower;
+                searchCached.treeVersion    = fileTreeVersion;
+                searchCached.anyMatchInFile = anyMatch;
+            }
+
+            anyMatchInFile      = searchCached.anyMatchInFile;
+            matchCachePtr       = &searchCached.categoryCache;
+            effectMatchCachePtr = &searchCached.effectCache;
+        }
+
+        const CategoryMatchCache& matchCache       = *matchCachePtr;
+        const EffectMatchCache&   effectMatchCache = *effectMatchCachePtr;
+
+        //_ Same query-change force-open/shut gating as RenderCategoryTree.
         if (s_treeSearchQueryChanged)
             ImGui::SetNextItemOpen(anyMatchInFile, ImGuiCond_Always);
 
@@ -1475,8 +1547,8 @@ void RenderInstalledEffects(const std::string& denoiserAddonDir)
 
         if (rootOpen)
         {
-            std::vector<int>         path;      //. this sin file's top level -- empty path
-            std::vector<std::string> namePath;  //. name-based counterpart, see RenderCategoryTree
+            std::vector<int>         path;      //. this sin's top-level path
+            std::vector<std::string> namePath;  //. name-based counterpart
 
             //_ Reorder-only (see file header): this root row is the
             // "shared parent's own row" a top-level category doesn't
@@ -1526,7 +1598,7 @@ void RenderInstalledEffects(const std::string& denoiserAddonDir)
                     for (const auto& cat : file["categories"])
                     {
                         ImGui::PushID(i);
-                        RenderCategoryTree(sin.sinName, cat, path, namePath, i);
+                        RenderCategoryTree(sin.sinName, cat, path, namePath, i, matchCache, effectMatchCache);
                         ImGui::PopID();
                         ++i;
                     }
@@ -1540,7 +1612,7 @@ void RenderInstalledEffects(const std::string& denoiserAddonDir)
         }
         else if (IsCreatingCategoryAt(sin.sinName, std::vector<int>()))
         {
-            //. collapsing hides the "+" button and prompt, so cancel it
+            //_ Collapsing hides the "+" button and prompt, so cancel it.
             CancelCreateCategory();
         }
 

@@ -18,15 +18,7 @@ namespace {
 //--------------------------------------------------------------------------------
 // guidToEffect         guid -> owning effect, over the overlay copy being built
 // guidToCategoryPath   guid -> the category path that effect currently
-//                      lives under. Populated alongside guidToEffect
-//                      purely so BuildEffectDbOverlayTree can sync an
-//                      already-JSON-known guid's REAL placement back into
-//                      effect_db's own category_path (see its use there)
-//                      -- otherwise only guids placed via a drag ever get
-//                      a category_path in the db at all, even though
-//                      most captured guids were already sitting somewhere
-//                      real in a sin file before "for science" ever saw
-//                      them.
+//                      lives under
 //--------------------------------------------------------------------------------
 // Built once up front -- O(effects) -- rather than a fresh linear scan per
 // lookup, same idea as merge.cpp's own OldIndex (see ApplyMergePlan
@@ -34,6 +26,13 @@ namespace {
 // (FindOverlayEffectLocation); once ApplyMergePlan itself got the same
 // fix, there was no reason for this preview builder, doing the same shape
 // of work against the same size of tree, to stay slow.
+//
+// guidToCategoryPath exists purely so BuildEffectDbOverlayTree can sync
+// an already-JSON-known guid's REAL placement back into effect_db's own
+// category_path (see its use there) -- otherwise only guids placed via a
+// drag ever get a category_path in the db at all, even though most
+// captured guids were already sitting somewhere real in a sin file
+// before "for science" ever saw them.
 //--------------------------------------------------------------------------------
 struct DiffGuidIndex
 {
@@ -49,6 +48,9 @@ struct DiffGuidIndex
 // push-before-recurse/pop-after shape as pathSoFar elsewhere in this
 // codebase (e.g. RenderCategoryTree), so a top-level call already
 // includes that category's own name at path[0], not just its children's.
+// The no-`pathSoFar` overload below is a convenience for the (more
+// common) case where a caller doesn't need to seed or reuse the path
+// vector itself -- both existing call sites use it unchanged.
 //--------------------------------------------------------------------------------
 void IndexDiffCategory(nlohmann::ordered_json& category, DiffGuidIndex& idx, std::vector<std::string>& pathSoFar)
 {
@@ -71,9 +73,6 @@ void IndexDiffCategory(nlohmann::ordered_json& category, DiffGuidIndex& idx, std
     pathSoFar.pop_back();
 }
 
-//_ Convenience overload for the (more common) case where a caller
-// doesn't need to seed or reuse the path vector itself -- both existing
-// call sites use this one unchanged.
 void IndexDiffCategory(nlohmann::ordered_json& category, DiffGuidIndex& idx)
 {
     std::vector<std::string> path;
@@ -239,32 +238,25 @@ bool TagDuplicateGuidEffects(nlohmann::ordered_json& category, const std::unorde
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // BuildDiffOverlayTree
 //--------------------------------------------------------------------------------
-// Mirrors ApplyMergePlan's own index-once / mutate-in-place / remove-once /
-// reinsert-once phase ordering (same pointer-invalidation hazards apply to
-// this throwaway copy as to the real oldFile), so the preview can never
-// disagree with what Apply actually produces:
-//   - every rework's survivor is found via `idx` and tagged in place --
-//     "__vfxd_rework"/"__vfxd_new_guids"/"__vfxd_old_name" (only if the
-//     name changed)/"__vfxd_merged_count"/"__vfxd_conflict" for a merge
-//   - every merged-away candidate is found via `idx` and marked for
-//     removal, since post-merge there's only ever one node left
-//   - a survivor that also moves category is marked for removal too and
-//     queued to be re-inserted at its new path afterward, tagged
-//     "__vfxd_old_category" so the detail view can say "moved from X"
-//   - a single removal pass runs once every rework has been examined,
-//     then every queued survivor is re-inserted at its destination
-//     (creating categories as needed, tagged "__vfxd_virtual")
-//   - inserts are appended under their target category path the same way,
-//     tagged "__vfxd_new"
-//   - every category's tint flag is then recomputed bottom-up (see
-//     BubbleDiffTags)
-// "__vfxd_virtual" additionally tells RenderCategoryTree to suppress the
-// right-click "Rename" menu, and "__vfxd_new"/"__vfxd_rework" suppress
-// Edit/Delete/drag on that effect -- neither has a stable real on-disk
-// position while only previewed, so acting on them now would target the
-// wrong thing once actually applied. RenderCategoryTree's "unexpected
-// field" fallback for effects explicitly skips every "__vfxd_*" marker so
-// none of them can leak into the visible field list.
+// Mirrors ApplyMergePlan's index-once/mutate-in-place/remove-once/
+// reinsert-once phase ordering (same pointer-invalidation hazards as the
+// real oldFile) so this preview can never disagree with what Apply
+// actually produces:
+//   - each rework's survivor is found via `idx`, tagged in place
+//     ("__vfxd_rework", "__vfxd_new_guids", conditionally
+//     "__vfxd_old_name"/"__vfxd_merged_count"/"__vfxd_conflict")
+//   - merged-away candidates are marked for removal via `idx`
+//   - a moving survivor is marked for removal too and queued for
+//     re-insertion at its new path ("__vfxd_old_category")
+//   - removal runs once, then queued survivors and `plan.inserts`
+//     ("__vfxd_new") are appended at their destinations, materializing
+//     categories as needed ("__vfxd_virtual")
+//   - BubbleDiffTags then recomputes every category's tint bottom-up
+//
+// "__vfxd_virtual"/"__vfxd_new"/"__vfxd_rework" suppress rename/edit/
+// delete/drag on these not-yet-real nodes; RenderCategoryTree's
+// "unexpected field" fallback skips every "__vfxd_*" marker so none leak
+// into the visible field list.
 //--------------------------------------------------------------------------------
 nlohmann::ordered_json BuildDiffOverlayTree(const nlohmann::ordered_json& installed, const MergePlan& plan)
 {
@@ -464,34 +456,17 @@ nlohmann::ordered_json BuildGroupsJson(const std::string& guid_b64)
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // BuildEffectDbOverlayTree
 //--------------------------------------------------------------------------------
-// See installed_tree_overlay.h. Reuses IndexDiffCategory (to find/skip
-// guids that are already real JSON entries) and FindOrCreateDiffCategory
-// (to place a genuinely db-only guid at its categoryPath, materializing
-// categories as needed, tagged "__vfxd_virtual" the same as a pending
-// update's brand-new category) -- both already file-local above, genuine
-// reuse rather than a third copy of the same path-walk.
+// See installed_tree_overlay.h for the contract. Reuses IndexDiffCategory
+// (find/skip already-JSON guids) and FindOrCreateDiffCategory (place a
+// db-only guid, materializing categories as needed) -- both already
+// file-local above, real reuse rather than a third copy of the same walk.
 //
-// Two distinct things happen here, not one:
-//  - A guid with NO existing JSON entry gets a full synthetic
-//    "__vfxd_db_only" node, same as before.
-//  - A guid that's ALREADY a real JSON entry does NOT get skipped --
-//    FeedEffectDb (live_log.cpp) records capture data for every
-//    self-cast effect regardless of whether it's already curated into an
-//    installed sin, so most of what "for science" actually captures
-//    during ordinary play is data about already-known effects, not novel
-//    ones. That data gets attached onto the EXISTING node under
-//    "__vfxd_db_by_guid" (no "__vfxd_db_only" tag, so it keeps its
-//    normal name/color/edit/drag/delete behavior entirely) -- an
-//    additional expandable detail section, not a takeover of the node.
-//
-// "__vfxd_db_by_guid" is an object keyed by guid, not a flat field on
-// the effect, because guidToEffect maps every guid of a multi-guid
-// (merged) effect to the SAME json object -- a flat field would silently
-// overwrite one guid's captured data with another's the moment more than
-// one of an effect's guids has separately been captured. A synthetic
-// db-only node's object always has exactly one key (it only ever has one
-// guid), but sharing the shape means RenderEffectDbDetail only needs one
-// code path for both cases.
+// "__vfxd_db_by_guid" is keyed by guid, not a flat field, because
+// guidToEffect maps every guid of a multi-guid (merged) effect to the
+// SAME json object -- a flat field would silently overwrite one guid's
+// captured data with another's. A synthetic db-only node's object always
+// has exactly one key, but sharing the shape lets RenderEffectDbDetail
+// use one code path for both cases.
 //--------------------------------------------------------------------------------
 nlohmann::ordered_json BuildEffectDbOverlayTree(const nlohmann::ordered_json& installed, const std::vector<EffectDbEffect>& dbEffects,
                                                  size_t* outAddedCount)
@@ -519,9 +494,9 @@ nlohmann::ordered_json BuildEffectDbOverlayTree(const nlohmann::ordered_json& in
         auto existingIt = idx.guidToEffect.find(dbEff.guid_b64);
         if (existingIt != idx.guidToEffect.end())
         {
-            //_ Enrich the real node in place (not skipped, not tagged
-            // "__vfxd_db_only") -- keyed by guid under "__vfxd_db_by_guid",
-            // not a flat field, since a merged effect's guids share one object.
+            //_ Enrich the real node in place -- not skipped, not tagged
+            // "__vfxd_db_only" (see the function's own comment for the
+            // "keyed by guid" shape).
             nlohmann::ordered_json& existing = *existingIt->second;
             if (!existing.contains("__vfxd_db_by_guid") || !existing["__vfxd_db_by_guid"].is_object())
                 existing["__vfxd_db_by_guid"] = nlohmann::ordered_json::object();
@@ -551,9 +526,8 @@ nlohmann::ordered_json BuildEffectDbOverlayTree(const nlohmann::ordered_json& in
         newEffect["guids"]          = nlohmann::ordered_json::array({ dbEff.guid_b64 });
         newEffect["__vfxd_db_only"] = true;
 
-        //_ Same by-guid shape as the enrichment branch above -- always
-        // exactly one key here (a synthetic node has only one guid), but
-        // it lets RenderEffectDbDetail use one loop for both cases.
+        //_ Same by-guid shape as the enrichment branch above, always
+        // exactly one key here (a synthetic node has only one guid).
         nlohmann::ordered_json byGuid = nlohmann::ordered_json::object();
         byGuid[dbEff.guid_b64] = std::move(detail);
         newEffect["__vfxd_db_by_guid"] = std::move(byGuid);

@@ -107,6 +107,77 @@ bool CategoryHasDescendantMatch(const nlohmann::ordered_json& category, const st
     return false;
 }
 
+void BuildCategoryMatchCache(const nlohmann::ordered_json& category, const std::string& queryLower,
+                              CategoryMatchCache& categoryCache, EffectMatchCache& effectCache)
+{
+    //_ Bottom-up: effects and subcategories first, so each is visited
+    // (and cached) exactly once for the whole tree -- see the group
+    // comment in installed_tree_search.h for why that matters.
+    bool anyDescendantMatches = false;
+
+    if (category.contains("effects") && category["effects"].is_array())
+        for (const auto& eff : category["effects"])
+        {
+            EffectMatchResult effResult;
+            effResult.hiddenMatches = EffectHiddenContentMatches(eff, queryLower);
+            effResult.matches       = queryLower.empty() || effResult.hiddenMatches || EffectNameMatches(eff, queryLower);
+            effectCache[&eff] = effResult;
+
+            if (effResult.matches)
+                anyDescendantMatches = true;
+        }
+
+    if (category.contains("categories") && category["categories"].is_array())
+        for (const auto& sub : category["categories"])
+        {
+            BuildCategoryMatchCache(sub, queryLower, categoryCache, effectCache);
+            if (categoryCache[&sub].subtreeMatches)
+                anyDescendantMatches = true;
+        }
+
+    CategoryMatchResult result;
+    result.hasDescendantMatch = !queryLower.empty() && anyDescendantMatches;
+    result.subtreeMatches     = queryLower.empty() || anyDescendantMatches ||
+        CategoryNameMatches(category, queryLower) || CategoryDescriptionMatches(category, queryLower);
+    categoryCache[&category] = result;
+}
+
+bool CachedSubtreeMatches(const nlohmann::ordered_json& category, const std::string& queryLower,
+                           const CategoryMatchCache& cache)
+{
+    auto it = cache.find(&category);
+    if (it != cache.end())
+        return it->second.subtreeMatches;
+    return CategorySubtreeMatchesSearch(category, queryLower); //. fallback: cache miss
+}
+
+bool CachedHasDescendantMatch(const nlohmann::ordered_json& category, const std::string& queryLower,
+                               const CategoryMatchCache& cache)
+{
+    auto it = cache.find(&category);
+    if (it != cache.end())
+        return it->second.hasDescendantMatch;
+    return CategoryHasDescendantMatch(category, queryLower); //. fallback: cache miss
+}
+
+bool CachedEffectMatches(const nlohmann::ordered_json& effect, const std::string& queryLower,
+                          const EffectMatchCache& cache)
+{
+    auto it = cache.find(&effect);
+    if (it != cache.end())
+        return it->second.matches;
+    return EffectMatchesSearch(effect, queryLower); //. fallback: cache miss
+}
+
+bool CachedEffectHiddenMatches(const nlohmann::ordered_json& effect, const std::string& queryLower,
+                                const EffectMatchCache& cache)
+{
+    auto it = cache.find(&effect);
+    if (it != cache.end())
+        return it->second.hiddenMatches;
+    return EffectHiddenContentMatches(effect, queryLower); //. fallback: cache miss
+}
+
 void SilentlyCloseChildren(const nlohmann::ordered_json& category)
 {
     if (category.contains("effects") && category["effects"].is_array())

@@ -62,12 +62,13 @@ void LoadInstalledEffectsTree(const std::string& denoiserAddonDir);
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // InvalidateInstalledTree
 //--------------------------------------------------------------------------------
-// Marks the cached tree stale, so the next IsInstalledTreeLoaded() check
-// triggers a fresh LoadInstalledEffectsTree() call instead of trusting the
-// in-memory copy. Called after any successful edit/apply/install, and
-// after a failed save (where the in-memory copy no longer matches what's
-// on disk either way) -- one named call instead of the loaded flag being
-// poked directly at every call site that needs a reload.
+// Marks the cached tree stale, so the next IsInstalledTreeLoaded() call
+// returns false and the caller reloads via LoadInstalledEffectsTree()
+// instead of trusting the in-memory copy. Called after any successful
+// edit/apply/install, and after a failed save (where the in-memory copy
+// no longer matches what's on disk either way) -- one named call instead
+// of the loaded flag being poked directly at every call site that needs
+// a reload.
 //--------------------------------------------------------------------------------
 void InvalidateInstalledTree();
 
