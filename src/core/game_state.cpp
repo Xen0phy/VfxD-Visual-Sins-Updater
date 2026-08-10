@@ -61,10 +61,10 @@ unsigned int GameState_GetMapID()
 Mumble::EProfession GameState_GetProfession()
 {
     if (GameState_IsRTAPILive())
-        return static_cast<Mumble::EProfession>(s_rtapiData->Profession);
+        return static_cast<EProfession>(s_rtapiData->Profession);
     if (s_mumbleIdentity)
         return s_mumbleIdentity->Profession;
-    return Mumble::EProfession::None;
+    return ENone;
 }
 
 unsigned int GameState_GetSpecialization()
@@ -94,17 +94,17 @@ const char* GameState_ProfessionName(Mumble::EProfession profession)
     // the enumerator spelling.
     switch (profession)
     {
-        case Mumble::EProfession::None:         return "None";
-        case Mumble::EProfession::Guardian:      return "Guardian";
-        case Mumble::EProfession::Warrior:       return "Warrior";
-        case Mumble::EProfession::Engineer:      return "Engineer";
-        case Mumble::EProfession::Ranger:        return "Ranger";
-        case Mumble::EProfession::Thief:         return "Thief";
-        case Mumble::EProfession::Elementalist:  return "Elementalist";
-        case Mumble::EProfession::Mesmer:        return "Mesmer";
-        case Mumble::EProfession::Necromancer:   return "Necromancer";
-        case Mumble::EProfession::Revenant:      return "Revenant";
-        default:                                 return "Unknown";
+        case ENone:         return "None";
+        case EGuardian:     return "Guardian";
+        case EWarrior:      return "Warrior";
+        case EEngineer:     return "Engineer";
+        case ERanger:       return "Ranger";
+        case EThief:        return "Thief";
+        case EElementalist: return "Elementalist";
+        case EMesmer:       return "Mesmer";
+        case ENecromancer:  return "Necromancer";
+        case ERevenant:     return "Revenant";
+        default:            return "Unknown";
     }
 }
 

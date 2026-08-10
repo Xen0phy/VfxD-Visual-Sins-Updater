@@ -33,9 +33,8 @@
 // (QueuePromoteToJson/ApplyPendingPromote) -- a one-click action with no
 // inline editor of its own, so it's Queue/Apply without a matching
 // Begin/Cancel/Render trio -- and drag-and-drop category placement for a
-// db-only node (QueueDbCategoryPlacement/ApplyPendingDbCategoryPlacement,
-// effect-db handoff doc TODO #2), same "dropping IS the action, no
-// editor" shape as promotion.
+// db-only node (QueueDbCategoryPlacement/ApplyPendingDbCategoryPlacement),
+// same "dropping IS the action, no editor" shape as promotion.
 //--------------------------------------------------------------------------------
 
 #pragma once
@@ -270,8 +269,7 @@ bool IsDbRenameActive();
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // QueuePromoteToJson / ApplyPendingPromote
 //--------------------------------------------------------------------------------
-// "Add to JSON" -- the promotion action from TODO #1 in the effect-db
-// handoff doc. Always targets Greed (see effect_db.h on why promotion has
+// "Add to JSON" -- the promotion action. Always targets Greed (see effect_db.h on why promotion has
 // no per-guid file choice). Writes a plain new effect -- name, single-guid
 // "guids" array -- at the db entry's own category_path (see
 // EffectDb_SetCategoryPath), materializing that category chain for real if
@@ -323,8 +321,8 @@ const DbOnlyGuidDragPayload& GetDbOnlyGuidDragPayload();
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // QueueDbCategoryPlacement / ApplyPendingDbCategoryPlacement
 //--------------------------------------------------------------------------------
-// TODO #2 from the effect-db handoff doc: drag-and-drop category
-// placement for a db-only node, dropped onto a category row in the tree.
+// Drag-and-drop category placement for a db-only node, dropped onto a
+// category row in the tree.
 // Writes only EffectDb_SetCategoryPath -- same "db-only = db-only"
 // split as BeginDbRename, never touches any sin file since there's
 // nothing in JSON to place for a guid with no JSON entry. Not a

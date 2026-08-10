@@ -18,7 +18,7 @@
 #include "imgui.h"
 #include "installed_tree_store.h"
 #include "report_ui.h"
-#include "specialization_names.h"
+#include "specialization_info.h"
 #include "ui_colors.h"
 #include "webhook_report.h"
 
@@ -37,12 +37,12 @@ constexpr Mumble::ERace kRaceValues[] = {
     Mumble::ERace::Asura, Mumble::ERace::Charr, Mumble::ERace::Human,
     Mumble::ERace::Norn,  Mumble::ERace::Sylvari,
 };
-constexpr Mumble::EProfession kProfessionValues[] = {
-    Mumble::EProfession::Guardian,     Mumble::EProfession::Warrior,
-    Mumble::EProfession::Engineer,     Mumble::EProfession::Ranger,
-    Mumble::EProfession::Thief,        Mumble::EProfession::Elementalist,
-    Mumble::EProfession::Mesmer,       Mumble::EProfession::Necromancer,
-    Mumble::EProfession::Revenant,
+constexpr EProfession kProfessionValues[] = {
+    EGuardian, EWarrior,
+    EEngineer, ERanger,
+    EThief,    EElementalist,
+    EMesmer,   ENecromancer,
+    ERevenant,
 };
 
 int RaceToIndex(Mumble::ERace race)
@@ -78,13 +78,13 @@ int RaceToIndex(Mumble::ERace race)
 //--------------------------------------------------------------------------------
 struct ReportFormRow
 {
-    char                 guid[128] = {};
-    char                 typeText[8] = {};
-    int                  mapID = 0;
-    int                  raceIndex = kRaceUnset;
-    Mumble::EProfession  profession = Mumble::EProfession::None;
-    char                 specializationText[64] = {};
-    bool                 showSpecSuggest = false;
+    char         guid[128] = {};
+    char         typeText[8] = {};
+    int          mapID = 0;
+    int          raceIndex = kRaceUnset;
+    EProfession  profession = ENone;
+    char         specializationText[64] = {};
+    bool         showSpecSuggest = false;
 };
 
 static bool                       s_reportAnonymous = false;
@@ -312,7 +312,7 @@ std::string ComposeReportGuidBlock(const std::string& guid, bool typeIsSet, int 
 
     unsigned int specId  = ResolveSpecializationId(row.specializationText);
     bool         raceSet = (row.raceIndex != kRaceUnset);
-    bool         profSet = (row.profession != Mumble::EProfession::None);
+    bool         profSet = (row.profession != ENone);
     bool         specSet = (specId != 0);
     bool         mapSet  = (row.mapID != 0);
 
@@ -445,13 +445,13 @@ void RenderReportSection(const std::string& denoiserAddonDir)
         ImGui::SameLine();
 
         ImGui::PushItemWidth(80.0f);
-        const bool  profUnset    = (row.profession == Mumble::EProfession::None);
+        const bool  profUnset    = (row.profession == ENone);
         const char* profPreview  = profUnset ? "Profession" : GameState_ProfessionName(row.profession);
         if (ImGui::BeginCombo("##combo_profession", profPreview))
         {
             if (ImGui::Selectable("Profession", profUnset))
-                row.profession = Mumble::EProfession::None;
-            for (Mumble::EProfession p : kProfessionValues)
+                row.profession = ENone;
+            for (EProfession p : kProfessionValues)
             {
                 bool selected = (row.profession == p);
                 if (ImGui::Selectable(GameState_ProfessionName(p), selected))

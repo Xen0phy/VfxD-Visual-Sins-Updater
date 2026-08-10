@@ -100,10 +100,9 @@ std::vector<Mumble::ERace> EffectDb_RacesInMask(EffectDbRaceMask mask);
 // Same "fold instead of a new row" reasoning as EffectDbRaceMask above,
 // applied to profession+specialization together rather than giving
 // profession its own independent mask, which would silently lose which
-// profession fired which spec on a multi-value row -- see
-// class-spec-bitmask-handoff.md for the full design writeup. A nonzero
+// profession fired which spec on a multi-value row. A nonzero
 // specialization id already uniquely implies its owning profession (see
-// spec_profession_table.h), so one merged mask is enough; the only gap is
+// specialization_info.h), so one merged mask is enough; the only gap is
 // specialization == 0 (core build), closed by EffectDb_SpecOrCoreId below
 // with reserved pseudo-ids at the *top* of the bit range.
 //
@@ -118,6 +117,11 @@ struct EffectDbSpecializationMask
     uint64_t hi = 0;
 };
 
+//_ Ids >= this are reserved profession-only pseudo-ids (see
+// EffectDb_SpecOrCoreId above), not real spec ids to look up in
+// specialization_info.h.
+constexpr unsigned int kEffectDbCoreOnlyIdFloor = 118;
+
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // EffectDb_SpecOrCoreId / EffectDb_SpecBit
 //--------------------------------------------------------------------------------
@@ -131,7 +135,7 @@ struct EffectDbSpecializationMask
 //--------------------------------------------------------------------------------
 inline unsigned int EffectDb_SpecOrCoreId(Mumble::EProfession prof, unsigned int specId)
 {
-    assert(specId == 0 || specId < 82); //. guard against reserved-id collision
+    assert(specId == 0 || specId < kEffectDbCoreOnlyIdFloor); //. guard against reserved-id collision
     return specId != 0
         ? specId
         : 127 - static_cast<unsigned char>(prof);
@@ -145,11 +149,6 @@ inline EffectDbSpecializationMask EffectDb_SpecBit(Mumble::EProfession prof, uns
     else          mask.hi = uint64_t{1} << (bit - 64);
     return mask;
 }
-
-//_ Ids >= this are reserved profession-only pseudo-ids (see
-// EffectDb_SpecOrCoreId above), not real spec ids to look up in
-// spec_profession_table.h.
-constexpr unsigned int kEffectDbCoreOnlyIdFloor = 118;
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // EffectDb_ProfessionFromCoreOnlyId

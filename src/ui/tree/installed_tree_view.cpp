@@ -10,18 +10,14 @@
 // exposes. Reaches the editing/store/overlay/search modules only through
 // their own accessor headers, never through another module's statics.
 //
-// s_overlayCache holds one built (duplicate-guid-, pending-diff-, and --
-// Greed only -- effect-db-tagged) copy of each sin file's tree, rebuilt
-// only when its generation, diff status, or (Greed) effect-db generation
-// changes -- rebuilding it every frame instead was the direct cause of a
-// reported scrolling stall on a large tree with an overlay open.
-//
-// The tree search box drives one lowercased query (s_treeSearchQueryLower)
-// that every match/filter helper below compares against.
-// s_treeSearchQueryChanged is true for exactly one frame per query change
-// and gates every forced-open/forced-closed TreeNode call in this file --
-// doing that work every frame instead (not just on change) was a second,
-// separate cause of the same kind of stall.
+// Two things are cached rather than rebuilt every frame, since doing so
+// caused a reported scrolling stall on a large tree with an overlay open:
+// s_overlayCache (one built, duplicate-guid-/pending-diff-/Greed-effect-db-
+// tagged copy of each sin file's tree, rebuilt only when its generation,
+// diff status, or effect-db generation changes), and the search box's
+// forced-open/forced-closed TreeNode state (gated by s_treeSearchQueryChanged,
+// true for exactly one frame per query change; s_treeSearchQueryLower is the
+// lowercased query every match/filter helper below compares against).
 //
 // Drag-and-drop is reorder-only: an effect or category can move among its
 // current siblings, never to a different parent or sin file. Nothing that
@@ -29,28 +25,23 @@
 // __vfxd_virtual) offers drag, edit, or delete -- there's no stable real
 // on-disk position/identity for it yet. Any edit/rename/delete/create state
 // scoped under a node that stops being drawn this frame (hidden by search,
-// or collapsed) is cancelled immediately rather than left running
-// invisibly.
+// or collapsed) is cancelled immediately rather than left running invisibly.
 //
-// Two exceptions to "reorder-only":
+// Two exceptions to "reorder-only", neither of which moves the node itself:
 //
 // - A single-GUID drag: a GUID's own bullet row, in the plain read-only
-//   view only, is a drag source (see the GuidListDragContext-driven
-//   branch of RenderGuidList below) -- not offered from inside the
-//   effect editor, which is back to a single "one GUID per line" textbox
-//   (see RenderEffectEditor in installed_tree_edit.cpp). That's a
-//   genuine cross-effect content move, any effect row in the same sin
-//   file is a valid target (except the one currently open for editing),
-//   and it writes straight to disk on drop -- see QueueGuidMerge.
+//   view only, is a drag source (see the GuidListDragContext-driven branch
+//   of RenderGuidList below) -- not from inside the effect editor, which
+//   is back to a single "one GUID per line" textbox (see RenderEffectEditor
+//   in installed_tree_edit.cpp). Any effect row in the same sin file is a
+//   valid target (except the one open for editing); writes straight to
+//   disk on drop -- see QueueGuidMerge.
 //
-// - A "__vfxd_db_only" node's own row (effIsDbOnly) IS a drag source,
-//   despite being overlay-only content with no stable JSON position --
-//   dragging it onto any category row (even a "__vfxd_virtual" one, see
-//   that target's own comment) sets its effect-db category_path via
-//   QueueDbCategoryPlacement, TODO #2 from the effect-db handoff doc.
-//   This doesn't contradict "nothing overlay-only offers drag": the
-//   thing being moved isn't the overlay node itself, it's a database
-//   row that's real regardless of whether the overlay renders it as
+// - A "__vfxd_db_only" node's own row (effIsDbOnly) is a drag source too,
+//   despite being overlay-only with no stable JSON position: dragging it
+//   onto any category row (even a "__vfxd_virtual" one) sets its effect-db
+//   category_path via QueueDbCategoryPlacement. What moves is a real
+//   database row, not the overlay node -- the overlay just renders it as
 //   virtual this frame.
 //------------------------------------------------------------------------------
 
@@ -62,8 +53,7 @@
 #include "installed_tree_search.h"
 #include "installed_tree_store.h"
 #include "installed_tree_view.h"
-#include "spec_profession_table.h"
-#include "specialization_names.h"
+#include "specialization_info.h"
 #include "ui_colors.h"
 
 #include <algorithm>
@@ -79,18 +69,18 @@
 
 namespace {
 
-//********************************************************************************
+//******************************************************************************
 // GuidListDragContext
-//--------------------------------------------------------------------------------
-// sinName/path/index    the owning effect's identity (see GuidDragPayload)
-// effectName             owning effect's display name, for messages
-//--------------------------------------------------------------------------------
+//------------------------------------------------------------------------------
+// sinName/path/index   the owning effect's identity (see GuidDragPayload)
+// effectName            owning effect's display name, for messages
+//------------------------------------------------------------------------------
 // Passed to RenderGuidList to make its rows draggable straight from the
 // read-only tree (no need to open the effect's editor first) -- nullptr
 // (the default) keeps the plain BulletText rendering RenderGuidDiff's
 // added/removed/unchanged buckets use, where dragging wouldn't make
 // sense (an "Added" bucket's GUIDs aren't actually on this effect yet).
-//--------------------------------------------------------------------------------
+//------------------------------------------------------------------------------
 struct GuidListDragContext
 {
     std::string       sinName;
@@ -409,9 +399,9 @@ void RenderGroupInfo(const nlohmann::ordered_json& detail)
 // pseudo-id (>= kEffectDbCoreOnlyIdFloor) decodes straight to its
 // profession via EffectDb_ProfessionFromCoreOnlyId, with no real spec
 // attached (core build, no elite spec active); anything below that decodes
-// through spec_profession_table.h/specialization_names.h, falling back to
-// a raw "Spec #N" label if the id isn't in that table yet (mirrors
-// SpecializationName's own "don't guess" contract -- see that header).
+// through specialization_info.h, falling back to a raw "Spec #N" label if
+// the id isn't in that table yet (mirrors GetSpecializationInfo's own
+// "don't guess" contract -- see that header).
 //------------------------------------------------------------------------------
 void DecodeSpecOrCoreId(unsigned int id, std::string& outProfName, std::string& outSpecLabel)
 {
@@ -422,47 +412,30 @@ void DecodeSpecOrCoreId(unsigned int id, std::string& outProfName, std::string& 
         return;
     }
 
-    outProfName = GameState_ProfessionName(SpecializationProfession(id));
-    const char* specName = SpecializationName(id);
-    outSpecLabel = specName ? std::string(specName) : ("Spec #" + std::to_string(id));
+    const SpecializationInfo info = GetSpecializationInfo(id);
+    outProfName  = GameState_ProfessionName(info.profession);
+    outSpecLabel = info.name ? std::string(info.name) : ("Spec #" + std::to_string(id));
 }
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // RenderEffectDbDetail
 //------------------------------------------------------------------------------
-// The "for science" expanded view. Called two different ways:
-//  - Full detail view for a "__vfxd_db_only" node (see the effIsDbOnly
-//    branch in RenderCategoryTree), replacing that node's status/guid-
-//    list/behavior rendering entirely.
-//  - An extra collapsible section under an ordinary, already-real
-//    effect that also happens to have "for science" capture data (see
-//    the block right after "Behaviors" in the normal-effect branch).
+// The "for science" expanded view: full detail for a "__vfxd_db_only" node
+// (replaces its status/guid-list/behavior rendering), or an extra section
+// under an ordinary effect that also has capture data.
 //
-// Either way, reads "__vfxd_db_by_guid" -- an object keyed by guid,
-// {block_group, block_member, type, occurrences, groups} per key -- that
-// BuildEffectDbOverlayTree already embedded on the node (populated once
-// per cache rebuild, not per frame -- see that function). Almost always
-// exactly one guid; a merged multi-guid effect can have more than one,
-// each rendered as its own header + group (see that function's own
-// comment on why this is keyed per-guid rather than flat).
+// Reads "__vfxd_db_by_guid" (guid -> {block_group, block_member, type,
+// occurrences, groups}), embedded once per cache rebuild by
+// BuildEffectDbOverlayTree. Usually one guid; a merged effect gets one
+// header+group per guid.
 //
-// Occurrences are grouped here at render time:
+// Occurrences group here as duration/a4/a6/self_mask (per-cast signature) ->
+// profession -> specialization, with races listed as siblings rather than
+// nested under profession -- one row spans every race/profession/spec ever
+// seen (see effect_db.h's EffectDbSpecializationMask).
 //
-//   duration/a4/a6/self_mask  (the per-cast signature, see effect_db.h)
-//     profession
-//       specialization
-//     races seen: ...
-//
-// Race and profession/specialization are both deliberately annotations on
-// the signature, not nested inside one another -- one occurrences row
-// carries every race and every profession+specialization ever seen under
-// it as sibling masks, so there's no per-sighting pairing left to nest one
-// under the other (see effect_db.h's EffectDbSpecializationMask doc
-// comment; same accepted trade already applied to race independently).
-//
-// "groups" (this guid's group_members rows, both directions) is rendered
-// separately, below the occurrences groups, by RenderGroupInfo -- see
-// that function's own doc comment.
+// "groups" (group_members rows, both directions) renders separately, via
+// RenderGroupInfo -- see its own comment.
 //------------------------------------------------------------------------------
 void RenderEffectDbDetail(const nlohmann::ordered_json& effect)
 {
@@ -632,36 +605,26 @@ bool s_treeSearchQueryChanged = false;
 //------------------------------------------------------------------------------
 // Recursively renders one category node -- a TreeNode per category, with
 // effects and subcategories nested underneath. `category`/`effects`/
-// `categories` mirror the exact JSON shape merge.cpp walks.
+// `categories` mirror the JSON shape merge.cpp walks.
 //
-// `pathSoFar` is pushed/popped in place so anything rendered inside knows
-// its own category's index path -- root to immediate parent, each element
-// that level's index in its parent's "categories" array -- which is how
-// right-click-to-edit identifies and later re-finds a category or effect
-// (see EditState::originalIndex's comment). `myIndex` is this category's
-// own position in its parent's array, supplied by the caller. `sinName`
-// scopes edit state per installed file. Caller must PushID a stable
-// per-sibling key before calling, so same-named siblings don't collide in
-// imgui's ID stack.
+// `pathSoFar` (root-to-parent index path) lets right-click-to-edit re-find
+// a category/effect (see EditState::originalIndex); `myIndex` is this
+// category's own index, from the caller. `sinName` scopes edit state per
+// file. Caller must PushID a stable per-sibling key first, so same-named
+// siblings don't collide in imgui's ID stack.
 //
-// `namePathSoFar` is pushed/popped in lockstep with `pathSoFar`, one
-// category "name" per level instead of one index -- this is the path
+// `namePathSoFar` mirrors `pathSoFar` by name instead of index -- the
 // shape EffectDb_SetCategoryPath/BuildEffectDbOverlayTree/
-// FindOrCreateRealCategory all key placement by (a category_path is
-// name-joined, not index-based, so it survives a category being
-// reordered), used by the db-only drag-and-drop category placement
-// target below.
+// FindOrCreateRealCategory key placement by, since it survives reordering;
+// used by the db-only drag target below.
 //
-// `forceShow` is true once an ancestor already matched the search box
-// directly, showing this whole subtree unfiltered from there down (like a
-// folder search that also shows everything inside a matched folder). Only
-// ever set by this function itself, on the recursive call for its own
-// subcategories.
+// `forceShow` is true once an ancestor already matched the search box,
+// showing this subtree unfiltered from there down (set only by this
+// function's own recursive call).
 //
-// Force-open checks below run only on the frame the search query changed,
-// never gated on whether a search is currently active -- running them
-// every frame instead (a full subtree walk each time) previously stalled
-// scrolling on a large tree; skipping them once search ends would leave
+// Force-open checks below run only on the frame the search query changed
+// (not gated on search being active) -- every frame stalled scrolling on
+// a large tree; skipping them after search ends would leave
 // nodes force-open forever (see file header).
 //------------------------------------------------------------------------------
 void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json& category,
@@ -818,9 +781,8 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
             }
         }
 
-        //_ TODO #2 from the effect-db handoff doc: db-only category
-        // placement. Not gated on !categoryVirtual -- a virtual
-        // category here only exists because this drop makes it real.
+        //_ Db-only category placement. Not gated on !categoryVirtual -- a
+        // virtual category here only exists because this drop makes it real.
         if (sinName == "Greed" && ImGui::AcceptDragDropPayload("VFXD_DBONLY_GUID"))
         {
             const DbOnlyGuidDragPayload& dbDragPayload = GetDbOnlyGuidDragPayload();
@@ -1061,9 +1023,8 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                     ImGui::EndDragDropSource();
                 }
 
-                //_ TODO #2 from the effect-db handoff doc: a db-only
-                // node's own drag source, for dropping onto a category
-                // row's VFXD_DBONLY_GUID accept above. Same gates as the menu below.
+                //_ A db-only node's own drag source, for dropping onto a
+                // category row's VFXD_DBONLY_GUID accept above. Same gates as the menu below.
                 if (effIsDbOnly && !dbOnlyGuid.empty() && !AnyEditInFlight() && ImGui::BeginDragDropSource())
                 {
                     BeginDbOnlyGuidDrag(dbOnlyGuid, effName);
@@ -1083,8 +1044,7 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                 }
 
                 //_ The db-only counterpart of the context menu above --
-                // was absent entirely until now (see the effect-db
-                // handoff doc's TODO #1). Same gating: known guid, no other edit in flight.
+                // was absent entirely until now. Same gating: known guid, no other edit in flight.
                 if (effIsDbOnly && !dbOnlyGuid.empty() && !AnyEditInFlight() && ImGui::BeginPopupContextItem("dbonly_ctx"))
                 {
                     if (ImGui::MenuItem("Add to JSON"))

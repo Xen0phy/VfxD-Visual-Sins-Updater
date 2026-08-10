@@ -1,8 +1,16 @@
 cmake_minimum_required(VERSION 3.20)
 
-set(CMAKE_SYSTEM_NAME Windows)
-set(CMAKE_C_COMPILER x86_64-w64-mingw32-gcc)
-set(CMAKE_CXX_COMPILER x86_64-w64-mingw32-g++)
+# Compiler/target selection now lives in the toolchain file rather than being
+# hardcoded here, so the same CMakeLists.txt builds under either backend:
+#   MinGW (default, unchanged, no -DCMAKE_TOOLCHAIN_FILE needed):
+#     cmake -B build/mingw
+#   MSVC-ABI via clang-cl + lld-link (xwin sysroot):
+#     cmake -B build/msvc -G Ninja -DCMAKE_TOOLCHAIN_FILE=toolchain-msvc-clangcl.cmake -DXWIN_SYSROOT=~/.xwin
+if(NOT CMAKE_TOOLCHAIN_FILE)
+    set(CMAKE_SYSTEM_NAME Windows)
+    set(CMAKE_C_COMPILER x86_64-w64-mingw32-gcc)
+    set(CMAKE_CXX_COMPILER x86_64-w64-mingw32-g++)
+endif()
 
 project(VfxDSinsUpdater)
 set(CMAKE_CXX_STANDARD 17)
@@ -29,27 +37,25 @@ add_custom_target(bump_rev
     VERBATIM
 )
 
-add_library(VfxDSinsUpdater SHARED
+add_library(VfxDSinsUpdater SHARED src/addon/addon.cpp
     src/addon/entry.cpp
-    src/addon/addon.cpp
-    src/core/tree/installed_tree_store.cpp
+    src/core/backup.cpp
+    src/core/effect_db.cpp
+    src/core/game_state.cpp
+    src/core/live_log.cpp
+    src/core/merge.cpp
+    src/core/sin_files.cpp
+    src/core/specialization_info.cpp
     src/core/tree/installed_tree_overlay.cpp
     src/core/tree/installed_tree_search.cpp
-    src/ui/tree/installed_tree_edit.cpp
-    src/ui/tree/installed_tree_view.cpp
-    src/ui/report_ui.cpp
+    src/core/tree/installed_tree_store.cpp
+    src/integration/github_update.cpp
+    src/integration/webhook_report.cpp
     src/ui/backups_ui.cpp
     src/ui/live_log_ui.cpp
-    src/core/sin_files.cpp
-    src/integration/github_update.cpp
-    src/core/merge.cpp
-    src/integration/webhook_report.cpp
-    src/core/backup.cpp
-    src/core/live_log.cpp
-    src/core/game_state.cpp
-    src/core/specialization_names.cpp
-    src/core/spec_profession_table.cpp
-    src/core/effect_db.cpp
+    src/ui/report_ui.cpp
+    src/ui/tree/installed_tree_edit.cpp
+    src/ui/tree/installed_tree_view.cpp
     include/imgui.cpp
     include/imgui_draw.cpp
     include/imgui_tables.cpp
@@ -77,18 +83,40 @@ set_target_properties(VfxDSinsUpdater PROPERTIES
     SUFFIX ".dll"
 )
 
-target_compile_options(VfxDSinsUpdater PRIVATE
-    -Os
-    -ffunction-sections
-    -fdata-sections
-    -fno-rtti
-)
-
-target_link_options(VfxDSinsUpdater PRIVATE
-    -static-libgcc
-    -static-libstdc++
-    -static
-    -s
-    -Wl,--gc-sections
-    -Wl,--exclude-libs,ALL
-)
+if(CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+    # clang-cl / lld-link (MSVC ABI) path.
+    # /EHsc: clang-cl disables C++ exceptions by default like cl.exe does;
+    #        nlohmann_json and imgui's asserts rely on being able to throw.
+    # /GR-:  matches -fno-rtti (RTTI stays off).
+    # /MT:   static multithreaded CRT -- the MSVC-world analogue of the
+    #        mingw -static-libgcc/-static-libstdc++/-static trio, so the
+    #        addon DLL doesn't depend on the user having the right VC++
+    #        redistributable installed.
+    # /O1:   optimize for size, matching -Os.
+    target_compile_options(VfxDSinsUpdater PRIVATE
+        /O1
+        /GR-
+        /EHsc
+        /MT
+    )
+    target_link_options(VfxDSinsUpdater PRIVATE
+        /OPT:REF   # dead code/data stripping, ~= --gc-sections
+        /OPT:ICF   # identical comdat folding, extra win lld-link gives for free
+    )
+else()
+    # mingw-w64 (GNU ABI) path -- unchanged from before.
+    target_compile_options(VfxDSinsUpdater PRIVATE
+        -Os
+        -ffunction-sections
+        -fdata-sections
+        -fno-rtti
+    )
+    target_link_options(VfxDSinsUpdater PRIVATE
+        -static-libgcc
+        -static-libstdc++
+        -static
+        -s
+        -Wl,--gc-sections
+        -Wl,--exclude-libs,ALL
+    )
+endif()

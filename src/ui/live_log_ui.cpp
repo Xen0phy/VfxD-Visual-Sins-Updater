@@ -13,8 +13,7 @@
 #include "live_log_ui.h"
 #include "live_log.h"
 #include "report_ui.h"
-#include "spec_profession_table.h"
-#include "specialization_names.h"
+#include "specialization_info.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -22,6 +21,7 @@
 #include <set>
 #include <string>
 #include <tuple>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -111,12 +111,12 @@ void RenderForScienceGroupInfo(const std::string& guid_b64)
 // (>= kEffectDbCoreOnlyIdFloor) decodes straight to its profession via
 // EffectDb_ProfessionFromCoreOnlyId, with no real spec attached (core
 // build, no elite spec active); anything below that decodes through
-// spec_profession_table.h/specialization_names.h, falling back to a raw
-// "Spec #N" label if the id isn't in that table yet (mirrors
-// SpecializationName's own "don't guess" contract -- see that header).
-// Same helper installed_tree_view.cpp's RenderEffectDbDetail uses; kept
-// as its own copy here, same "no shared cache" reasoning as
-// ForScienceGroupMemberLabel below.
+// specialization_info.h, falling back to a raw "Spec #N" label if the id
+// isn't in that table yet (mirrors GetSpecializationInfo's own "don't
+// guess" contract -- see that header). Same helper
+// installed_tree_view.cpp's RenderEffectDbDetail uses; kept as its own
+// copy here, same "no shared cache" reasoning as ForScienceGroupMemberLabel
+// below.
 //--------------------------------------------------------------------------------
 void DecodeSpecOrCoreId(unsigned int id, std::string& outProfName, std::string& outSpecLabel)
 {
@@ -127,9 +127,9 @@ void DecodeSpecOrCoreId(unsigned int id, std::string& outProfName, std::string& 
         return;
     }
 
-    outProfName = GameState_ProfessionName(SpecializationProfession(id));
-    const char* specName = SpecializationName(id);
-    outSpecLabel = specName ? std::string(specName) : ("Spec #" + std::to_string(id));
+    const SpecializationInfo info = GetSpecializationInfo(id);
+    outProfName  = GameState_ProfessionName(info.profession);
+    outSpecLabel = info.name ? std::string(info.name) : ("Spec #" + std::to_string(id));
 }
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -352,8 +352,21 @@ void RenderLiveLogSection(AddonAPI_t* aApi, const std::string& denoiserAddonDir)
     //_ Same lazy-load pattern as RenderReportSection/RenderBackupsSection
     if (!IsInstalledTreeLoaded())
         LoadInstalledEffectsTree(denoiserAddonDir);
-    LiveLog_SetKnownGuidNames(CollectGuidNameMap());
-    LiveLog_SetKnownGuidBehaviors(CollectGuidBehaviorMap());
+
+    //_ Same per-frame-rebuild cost s_overlayCache's comment warns about
+    // (installed_tree_view.cpp) -- cache and gate on tree generation
+    // instead of walking every guid in every sin file each frame.
+    static std::unordered_map<std::string, std::string> s_guidNameCache;
+    static std::unordered_map<std::string, std::string> s_guidBehaviorCache;
+    static int s_guidCacheGeneration = -1;
+    if (s_guidCacheGeneration != GetInstalledTreeGeneration())
+    {
+        s_guidNameCache        = CollectGuidNameMap();
+        s_guidBehaviorCache    = CollectGuidBehaviorMap();
+        s_guidCacheGeneration  = GetInstalledTreeGeneration();
+    }
+    LiveLog_SetKnownGuidNames(s_guidNameCache);
+    LiveLog_SetKnownGuidBehaviors(s_guidBehaviorCache);
 
     //_ Tooltip text per log type; rendered in two rows of 6 below.
     static const char* const kTypeTooltips[kLiveLogTypeCount] = {

@@ -30,6 +30,21 @@
 
 #include <string>
 
+//_ Shorthand for Mumble::EProfession -- keeps profession switches/tables
+// less verbose (EGuardian instead of Mumble::EProfession::Guardian).
+using EProfession = Mumble::EProfession;
+
+constexpr EProfession ENone         = EProfession::None;
+constexpr EProfession EGuardian     = EProfession::Guardian;
+constexpr EProfession EWarrior      = EProfession::Warrior;
+constexpr EProfession EEngineer     = EProfession::Engineer;
+constexpr EProfession ERanger       = EProfession::Ranger;
+constexpr EProfession EThief        = EProfession::Thief;
+constexpr EProfession EElementalist = EProfession::Elementalist;
+constexpr EProfession EMesmer       = EProfession::Mesmer;
+constexpr EProfession ENecromancer  = EProfession::Necromancer;
+constexpr EProfession ERevenant     = EProfession::Revenant;
+
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // GameState_Init / GameState_Shutdown
 //--------------------------------------------------------------------------------
@@ -77,7 +92,7 @@ Mumble::ERace         GameState_GetRace();
 //--------------------------------------------------------------------------------
 // Human-readable names for the two enum fields Mumble.h itself already
 // names every value of -- no external ID table needed, unlike
-// Specialization (see specialization_names.h). Always returns a valid
+// Specialization (see specialization_info.h). Always returns a valid
 // non-null string, falling back to "Unknown" outside the enum's range.
 //--------------------------------------------------------------------------------
 const char* GameState_ProfessionName(Mumble::EProfession profession);
