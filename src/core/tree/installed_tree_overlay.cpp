@@ -115,6 +115,12 @@ void RemoveDiffEffects(nlohmann::ordered_json& category, const std::unordered_se
 // insert's destination. Ancestor tint ("__vfxd_hasnew"/"__vfxd_hasrework"/
 // "__vfxd_hasconflict") is NOT set here -- see BubbleDiffTags below for why
 // that's a separate bottom-up pass instead of tagged inline during creation.
+//
+// Deliberately description-agnostic, same reasoning as merge.cpp's own
+// FindOrCreateCategory: FillBlankOverlayCategoryDescriptions (run once, at
+// the very end of BuildDiffOverlayTree) is what seeds a category's
+// description, whether it's brand-new or was already sitting on disk with
+// nothing in it -- see that function's own doc.
 //--------------------------------------------------------------------------------
 nlohmann::ordered_json* FindOrCreateDiffCategory(nlohmann::ordered_json& root, const std::vector<std::string>& path)
 {
@@ -141,6 +147,71 @@ nlohmann::ordered_json* FindOrCreateDiffCategory(nlohmann::ordered_json& root, c
         cursor = next;
     }
     return cursor;
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// FillBlankOverlayCategoryDescriptions
+//--------------------------------------------------------------------------------
+// Mirrors merge.cpp's FillBlankCategoryDescriptions exactly (see its own
+// doc for the "new or pre-existing, only if currently blank" rule),
+// applied to the preview copy instead of the real file, so the tree view
+// shows a comment appearing in the SAME place ApplyMergePlan would
+// actually put one. `descriptions` is MergePlan::newCategoryDescriptions.
+//--------------------------------------------------------------------------------
+void FillBlankOverlayCategoryDescriptions(nlohmann::ordered_json& category, std::vector<std::string>& pathSoFar,
+                                           const std::unordered_map<std::string, std::string>& descriptions)
+{
+    const bool hasDesc = category.contains("description") && category["description"].is_string()
+                          && !category["description"].get<std::string>().empty();
+    if (!hasDesc)
+    {
+        auto it = descriptions.find(JoinCategoryPathKey(pathSoFar));
+        if (it != descriptions.end())
+            category["description"] = it->second;
+    }
+
+    if (category.contains("categories") && category["categories"].is_array())
+    {
+        for (auto& sub : category["categories"])
+        {
+            if (!sub.contains("name") || !sub["name"].is_string())
+                continue;
+            pathSoFar.push_back(sub["name"].get<std::string>());
+            FillBlankOverlayCategoryDescriptions(sub, pathSoFar, descriptions);
+            pathSoFar.pop_back();
+        }
+    }
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// PruneEmptyOverlayCategories
+//--------------------------------------------------------------------------------
+// Mirrors merge.cpp's PruneEmptyCategories exactly (see its own comment for
+// the post-order/top-level-exempt reasoning), applied to the preview copy
+// instead of the real file. Without this, a relocation or a merged-away
+// removal that fully vacates a subcategory left an empty, effect-less shell
+// sitting in the overlay tree -- still rendered (with 0 effects) even
+// though applying the very same plan for real prunes it away in
+// ApplyMergePlan's own phase 5. Run at the very end of BuildDiffOverlayTree,
+// after inserts/relocations have landed and before BubbleDiffTags, so the
+// preview tree can never disagree with what Apply actually produces.
+//--------------------------------------------------------------------------------
+bool PruneEmptyOverlayCategories(nlohmann::ordered_json& category)
+{
+    if (category.contains("categories") && category["categories"].is_array())
+    {
+        auto& subs = category["categories"];
+        for (size_t i = subs.size(); i-- > 0; )
+            if (PruneEmptyOverlayCategories(subs[i]))
+                subs.erase(subs.begin() + i);
+    }
+
+    const bool hasEffects =
+        category.contains("effects") && category["effects"].is_array() && !category["effects"].empty();
+    const bool hasSubcategories =
+        category.contains("categories") && category["categories"].is_array() && !category["categories"].empty();
+
+    return !hasEffects && !hasSubcategories;
 }
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -356,6 +427,23 @@ nlohmann::ordered_json BuildDiffOverlayTree(const nlohmann::ordered_json& instal
         nlohmann::ordered_json newEffect = ins.effect;
         newEffect["__vfxd_new"] = true;
         (*cursor)["effects"].push_back(std::move(newEffect));
+    }
+
+    //_ See PruneEmptyOverlayCategories' own comment -- must run before
+    // BubbleDiffTags so a pruned branch's tags never bubble to a parent
+    // that's about to lose it anyway.
+    for (auto& cat : overlay["categories"])
+        PruneEmptyOverlayCategories(cat);
+
+    //_ Backfill blank descriptions last, same ordering reason as
+    // merge.cpp's own phase 6: never write into a branch phase 5 (prune)
+    // is about to delete.
+    for (auto& cat : overlay["categories"])
+    {
+        if (!cat.contains("name") || !cat["name"].is_string())
+            continue;
+        std::vector<std::string> path{ cat["name"].get<std::string>() };
+        FillBlankOverlayCategoryDescriptions(cat, path, plan.newCategoryDescriptions);
     }
 
     for (auto& cat : overlay["categories"])

@@ -19,9 +19,7 @@
 //      guid-less same-named effects collide. Never shown in a diff.
 //
 // Matching is guid-first, name-fallback: guids are globally unique, so any
-// guid overlap unambiguously identifies the old effect(s) involved; name is
-// only consulted once guid matching finds nothing (case 2), or to tell
-// whether a single guid match (case 1) is also an unchanged identity.
+// guid overlap unambiguously identifies the old effect(s) involved.
 //
 //   1. At least one guid is claimed in oldFile (every guid on the new
 //      effect is checked, since its list can straddle more than one old
@@ -29,22 +27,25 @@
 //      old effects fold into one resulting entry; upstream's name/category
 //      always wins once guid identity is certain:
 //        a. All matched guids -> same old effect, name also matches ->
-//           rework, guids only (name/category untouched: nothing changed).
+//           rework: guids refreshed, and relocated if upstream also moved
+//           its category (name is unchanged by definition here).
 //        b. All matched guids -> same old effect, name differs -> rework,
 //           but name/category ARE overwritten from the update.
-//        c. Matched guids split across MORE THAN ONE old effect -> always
-//           merged now regardless of name: first-matched candidate
-//           survives (gets 1b's treatment against the union of every
-//           candidate's guids), every other candidate is deleted, and a
-//           behaviors disagreement between them is flagged as a conflict
-//           (display-only, never blocks applying).
-//   2. No guid overlap anywhere -> fall back to name:
-//        a. Exactly one old effect shares the name -> rework it (a full
-//           guid refresh under an unchanged name).
-//        b. No old effect shares the name -> genuinely new; inserted into
-//           whatever category newFile puts it in.
-//        c. MULTIPLE old effects share the name -> ambiguous, no guid
-//           signal to pick between them -> inserted as a new effect
+//        c. Matched guids split across MORE THAN ONE old effect -> merged
+//           into one entry regardless of name (1b's treatment against the
+//           union of every candidate's guids); every other candidate is
+//           deleted, and a behaviors mismatch between them is flagged as
+//           a conflict (display-only, never blocks applying).
+//   2. No guid overlap anywhere -> fall back to name, skipping any old
+//      effect a case-1 match already claimed elsewhere (guards a vacated
+//      name/category slot from colliding with an unrelated new effect):
+//        a. Exactly one unclaimed old effect shares the name -> rework it
+//           (a full guid refresh under an unchanged name, relocated if
+//           upstream also moved its category).
+//        b. No unclaimed old effect shares the name -> genuinely new;
+//           inserted into whatever category newFile puts it in.
+//        c. MULTIPLE unclaimed old effects share the name -> ambiguous, no
+//           guid signal to pick between them -> inserted as a new effect
 //           alongside the existing ones; nothing existing is touched.
 //
 // An old effect newFile never mentions under any shared guid or name is
@@ -56,7 +57,33 @@
 #include "nlohmann_json.hpp"
 
 #include <string>
+#include <unordered_map>
 #include <vector>
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// kCategoryPathKeySep
+//--------------------------------------------------------------------------------
+// Joins a category path into a single map key for
+// MergePlan::newCategoryDescriptions. \x1f (ASCII "unit separator") rather
+// than "/" or " / ": those are valid, observed characters inside real
+// category names (see e.g. "Combos/AoEs" in Skill Effects), so joining with
+// either risks two different paths colliding on the same key. \x1f never
+// appears in a category name in practice and isn't typable through the
+// tree-view rename UI, so it's safe as a delimiter here without needing a
+// custom vector<string> hasher.
+//--------------------------------------------------------------------------------
+inline const char kCategoryPathKeySep = '\x1f';
+
+inline std::string JoinCategoryPathKey(const std::vector<std::string>& path)
+{
+    std::string out;
+    for (size_t i = 0; i < path.size(); ++i)
+    {
+        if (i) out += kCategoryPathKeySep;
+        out += path[i];
+    }
+    return out;
+}
 
 //********************************************************************************
 // MergePlanNewEffect
@@ -130,16 +157,31 @@ struct MergePlanRework
 //********************************************************************************
 // MergePlan
 //--------------------------------------------------------------------------------
-// inserts  every case-2b new effect to add
-// reworks  every case-1/2a existing effect to update
+// inserts                  every case-2b new effect to add
+// reworks                  every case-1/2a existing effect to update
+// newCategoryDescriptions  every category in newFile that has a non-empty
+//                          "description", keyed by JoinCategoryPathKey(path)
 //--------------------------------------------------------------------------------
 // The full, human-displayable result of resolving newFile against oldFile.
 // Contains nothing for case-0 (guid-less, ignored) effects by design.
+//
+// newCategoryDescriptions exists purely so a category ApplyMergePlan/
+// BuildDiffOverlayTree has to freshly create (an insert or a relocation
+// landing somewhere that doesn't exist in oldFile/installed yet) can be
+// seeded with upstream's own description instead of coming out
+// name-only. It is intentionally NOT consulted for a category that
+// already exists on the old/installed side -- same "don't clobber a
+// locally-touched node just because upstream also set something" rule
+// BuildRework/BuildMergedRework already apply to effect fields; an
+// already-existing category's description is left exactly as the user
+// has it, blank or not. See FindOrCreateCategory (merge.cpp) and
+// FindOrCreateDiffCategory (installed_tree_overlay.cpp).
 //--------------------------------------------------------------------------------
 struct MergePlan
 {
     std::vector<MergePlanNewEffect> inserts;
     std::vector<MergePlanRework>    reworks;
+    std::unordered_map<std::string, std::string> newCategoryDescriptions;
 
     bool IsEmpty() const { return inserts.empty() && reworks.empty(); }
 };
@@ -157,10 +199,12 @@ MergePlan ResolveMergePlan(const nlohmann::ordered_json& oldFile, const nlohmann
 // ApplyMergePlan
 //--------------------------------------------------------------------------------
 // Applies a previously-resolved plan to oldFile in place: refreshes every
-// rework's guids (and, for 1b/1c, its name/category, relocating it to a
-// new category if needed), deletes every merged-away duplicate, then
-// inserts every new effect. Must run against the same oldFile the plan was
-// resolved against -- see merge.cpp for why a stale oldFile is unsafe.
+// rework's guids (and, for 1a/1b/1c/2a, its category, relocating it if
+// needed; 1b/1c also update its name), deletes every merged-away
+// duplicate, inserts every new effect, then prunes any subcategory branch
+// left fully empty by a relocation. Must run against the same oldFile the
+// plan was resolved against -- see merge.cpp for why a stale oldFile is
+// unsafe.
 //--------------------------------------------------------------------------------
 void ApplyMergePlan(nlohmann::ordered_json& oldFile, const MergePlan& plan);
 
