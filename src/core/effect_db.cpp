@@ -31,6 +31,13 @@ AddonAPI_t*  s_api = nullptr;
 bool         s_enabled = false;
 int          s_generation = 0;
 
+//_ True while a transaction opened by EffectDb_RecordEvent hasn't been
+// committed yet -- see EffectDb_FlushPendingWrites. Batches every
+// RecordEvent call between two flushes into one WAL commit instead of
+// one commit per event, so a burst of same-frame guids doesn't stall
+// the render thread with N sequential BEGIN/COMMIT round-trips.
+bool         s_txnOpen = false;
+
 sqlite3_stmt* s_insertEffectStmt      = nullptr;
 sqlite3_stmt* s_insertEffectMetaStmt  = nullptr;
 sqlite3_stmt* s_insertOccurrenceStmt  = nullptr;
@@ -344,16 +351,20 @@ bool CreateSchemaIfNeeded(std::string& outError)
 // SQLite's defaults are journal_mode=DELETE + synchronous=FULL, which means
 // every autocommitted INSERT does a blocking fsync() (plus a journal file
 // create/delete) before returning. EffectDb_RecordEvent runs on the
-// render/update thread (see file header) and issues two such autocommits per
-// captured line (one for `effects`, one for `occurrences`) -- two synchronous
-// disk syncs on the render thread per event.
+// render/update thread (see file header) and would issue two such autocommits
+// per captured line (one for `effects`, one for `occurrences`) if left at
+// SQLite's defaults -- two synchronous disk syncs on the render thread per event.
 //
 // WAL + synchronous=NORMAL removes the fsync-per-commit requirement (WAL
 // commits are a sequential append; checkpointing back into the main db file
 // happens later, off the hot path), at the cost of a crash losing the last
 // WAL-committed write -- an acceptable trade for capture data, since it can't
-// corrupt the database. Paired with wrapping RecordEvent's two inserts in one
-// explicit transaction (see below) so a single event is at most one commit.
+// corrupt the database. Originally paired with wrapping RecordEvent's inserts
+// in one explicit transaction per event; now paired with EffectDb_RecordEvent/
+// EffectDb_FlushPendingWrites batching an entire frame's worth of events into
+// one transaction instead -- see that pair's comments for why a per-event
+// commit was still stalling the render thread under a same-frame burst even
+// without the fsync.
 //--------------------------------------------------------------------------------
 bool ConfigurePragmas(std::string& outError)
 {
@@ -401,6 +412,8 @@ bool EffectDb_Open(const std::string& denoiserAddonDir, std::string& outError)
 
 void EffectDb_Close()
 {
+    EffectDb_FlushPendingWrites();   //. see that function's comment -- sqlite3_close would
+                                      //. otherwise silently roll back an open transaction
     FinalizeAllStatements();
     if (s_db) sqlite3_close(s_db);
     s_db = nullptr;
@@ -473,10 +486,16 @@ void EffectDb_RecordEvent(const EffectDbRawEvent& ev)
 {
     if (!s_enabled || !s_db) return;
 
-    //_ Both inserts below as one explicit transaction rather than two
-    // autocommits -- at most one commit (and, under WAL, one cheap WAL
-    // append rather than a blocking fsync) per captured line instead of two.
-    sqlite3_exec(s_db, "BEGIN IMMEDIATE;", nullptr, nullptr, nullptr);
+    //_ Both inserts below join whatever transaction is currently open,
+    // rather than each event opening and committing its own -- see
+    // EffectDb_FlushPendingWrites for where/when that transaction
+    // actually commits, and s_txnOpen's comment for why. Only the FIRST
+    // event since the last flush pays for a real BEGIN IMMEDIATE.
+    if (!s_txnOpen)
+    {
+        sqlite3_exec(s_db, "BEGIN IMMEDIATE;", nullptr, nullptr, nullptr);
+        s_txnOpen = true;
+    }
 
     //_ effects/effect_meta: first-seen-wins, same spirit as the old
     // INSERT OR IGNORE but now a real branch instead of one statement,
@@ -574,8 +593,30 @@ void EffectDb_RecordEvent(const EffectDbRawEvent& ev)
         else if (sqlite3_changes(s_db) > 0)
             ++s_generation;
     }
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// EffectDb_FlushPendingWrites
+//--------------------------------------------------------------------------------
+// Commits the transaction EffectDb_RecordEvent left open, if any; a cheap
+// no-op otherwise (a single boolean check). Meant to be called once per
+// real frame -- see entry.cpp's RT_PostRender registration -- so a burst
+// of same-frame RecordEvent calls collapses into a single WAL commit
+// instead of one per event. Also called from the top of EffectDb_Close():
+// sqlite3_close() implicitly rolls back an open transaction rather than
+// committing it, so skipping this there would silently drop the last
+// unflushed batch instead of writing it. Widens the existing "a crash
+// can lose the last WAL-committed write" trade-off documented in
+// ConfigurePragmas to "up to one frame's worth of writes" -- still can't
+// corrupt the db, only lose a sliver of recent capture data.
+//--------------------------------------------------------------------------------
+void EffectDb_FlushPendingWrites()
+{
+    if (!s_db || !s_txnOpen)
+        return;
 
     sqlite3_exec(s_db, "COMMIT;", nullptr, nullptr, nullptr);
+    s_txnOpen = false;
 }
 
 bool EffectDb_IsKnownGuid(const std::string& guid_b64)

@@ -388,9 +388,12 @@ std::string EffectDb_Poll(const std::string& denoiserAddonDir);
 // occurrences (see the file-level comment for what each table stores),
 // and into group_members too when ev.groupStarterGuid is non-empty. Each
 // insert is a silent no-op on a tuple that's already there, so the
-// caller never needs to pre-check for duplicates. All three happen in
-// one transaction, so a group's starter always has its own effects row
-// committed before any member row that references it.
+// caller never needs to pre-check for duplicates. All three join
+// whatever transaction is currently open (see EffectDb_FlushPendingWrites
+// for who commits it and when) rather than each call opening and
+// committing its own -- a group's starter still always has its own
+// effects row written before any member row that references it, since
+// they're the same call's writes either way.
 //
 // Caller must only ever pass self-involved events -- ev.selfMask is
 // trusted as-is, never re-derived here. It should always be
@@ -398,6 +401,19 @@ std::string EffectDb_Poll(const std::string& denoiserAddonDir);
 // for once target-watching is added.
 //--------------------------------------------------------------------------------
 void EffectDb_RecordEvent(const EffectDbRawEvent& ev);
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// EffectDb_FlushPendingWrites
+//--------------------------------------------------------------------------------
+// Commits the transaction EffectDb_RecordEvent left open, if one is
+// currently open; a cheap no-op otherwise. Meant to be called once per
+// real frame (see entry.cpp's RT_PostRender registration, which runs
+// regardless of whether the options panel is open, unlike RT_OptionsRender)
+// so a burst of same-frame RecordEvent calls collapses into a single WAL
+// commit instead of stalling the render thread with one commit per event.
+// Also called from EffectDb_Close() itself -- see that function.
+//--------------------------------------------------------------------------------
+void EffectDb_FlushPendingWrites();
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // EffectDb_IsKnownGuid

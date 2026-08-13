@@ -39,6 +39,23 @@ static AddonDefinition_t s_addonDef{};
 static AddonAPI_t*       s_api = nullptr;
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// FlushEffectDbRenderCallback
+//--------------------------------------------------------------------------------
+// Registered under RT_PostRender rather than folded into
+// OptionsRenderCallback (RT_OptionsRender) because it has to run every
+// real frame regardless of whether the options panel is open -- capture
+// keeps running with the panel closed, and EffectDb_FlushPendingWrites
+// is what commits whatever EffectDb_RecordEvent buffered up since the
+// last frame (see that pair's comments in effect_db.h/.cpp). A no-op
+// call (nothing pending) is a single boolean check, so registering it
+// unconditionally here is cheap.
+//--------------------------------------------------------------------------------
+static void FlushEffectDbRenderCallback()
+{
+    EffectDb_FlushPendingWrites();
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // AddonLoad / AddonUnload
 //--------------------------------------------------------------------------------
 // Nexus load/unload callbacks assigned into AddonDefinition_t (see
@@ -75,6 +92,7 @@ void AddonLoad(AddonAPI_t* aApi)
     Addon_Init(aApi, denoiserAddonDir, found);
 
     aApi->GUI_Register(RT_OptionsRender, OptionsRenderCallback);
+    aApi->GUI_Register(RT_PostRender, FlushEffectDbRenderCallback);
 
     if (found)
     {
@@ -89,7 +107,10 @@ void AddonLoad(AddonAPI_t* aApi)
 void AddonUnload()
 {
     if (s_api)
+    {
         s_api->GUI_Deregister(OptionsRenderCallback);
+        s_api->GUI_Deregister(FlushEffectDbRenderCallback);
+    }
 
     LiveLog_Shutdown(s_api); //. unsubscribes, stops capture if on
     EffectDb_Close();        //. finalizes prepared statements + closes the sqlite connection,
