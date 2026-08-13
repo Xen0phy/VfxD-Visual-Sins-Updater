@@ -34,6 +34,7 @@
 
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -133,6 +134,19 @@ const std::unordered_map<std::string, std::vector<std::string>>& GetDuplicateGui
 //--------------------------------------------------------------------------------
 std::unordered_map<std::string, std::string> CollectGuidNameMap();
 std::unordered_map<std::string, std::string> CollectGuidBehaviorMap();
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// CollectInstalledGuids
+//--------------------------------------------------------------------------------
+// Every guid appearing on any effect in any currently-loaded installed sin
+// file, across every sin -- the live set the DB tab's "Also installed"
+// badge cross-references against (see db_tree_view.h's BuildDbTree), as
+// opposed to `effects.in_json`, which is a presence flag an external seed
+// can set once and this addon never refreshes (see effect_db.h). Same
+// "caller is responsible for the installed tree having been loaded at
+// least once first" contract as CollectGuidNameMap/CollectGuidBehaviorMap.
+//--------------------------------------------------------------------------------
+std::unordered_set<std::string> CollectInstalledGuids();
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // SaveInstalledSinFile

@@ -32,15 +32,18 @@ bool         s_enabled = false;
 int          s_generation = 0;
 
 sqlite3_stmt* s_insertEffectStmt      = nullptr;
+sqlite3_stmt* s_insertEffectMetaStmt  = nullptr;
 sqlite3_stmt* s_insertOccurrenceStmt  = nullptr;
 sqlite3_stmt* s_insertGroupMemberStmt = nullptr;
 sqlite3_stmt* s_selectEffectStmt     = nullptr;
+sqlite3_stmt* s_selectEffectIdStmt   = nullptr;  //. guid_b64 -> effect_id, see LookupEffectId
 sqlite3_stmt* s_selectKnownStmt      = nullptr;
 sqlite3_stmt* s_selectOccurrenceStmt = nullptr;
 sqlite3_stmt* s_selectGroupsStartedStmt   = nullptr;
 sqlite3_stmt* s_selectGroupsMemberOfStmt  = nullptr;
 sqlite3_stmt* s_updateNameStmt       = nullptr;
 sqlite3_stmt* s_updateCategoryStmt   = nullptr;
+sqlite3_stmt* s_backfillCaptureStmt  = nullptr;  //. see kBackfillCapture
 
 std::chrono::steady_clock::time_point s_lastPoll{};
 
@@ -90,6 +93,28 @@ std::vector<std::string> SplitCategoryPath(const std::string& joined)
 }
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// LookupEffectId
+//--------------------------------------------------------------------------------
+// guid_b64 -> its effect_id, if guid_b64 is known at all. Shared by
+// EffectDb_RecordEvent (branches new-effect-row vs. known-guid) and
+// EffectDb_SetName/EffectDb_SetCategoryPath (resolve which effect_meta
+// row a rename/placement actually applies to -- see effect_db.h's
+// comments on both for why this is effect_id-scoped, not guid-scoped).
+//--------------------------------------------------------------------------------
+bool LookupEffectId(const std::string& guid_b64, int64_t& outEffectId)
+{
+    sqlite3_reset(s_selectEffectIdStmt);
+    sqlite3_clear_bindings(s_selectEffectIdStmt);
+    sqlite3_bind_text(s_selectEffectIdStmt, 1, guid_b64.c_str(), -1, SQLITE_TRANSIENT);
+
+    if (sqlite3_step(s_selectEffectIdStmt) != SQLITE_ROW)
+        return false;
+
+    outEffectId = sqlite3_column_int64(s_selectEffectIdStmt, 0);
+    return true;
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // FinalizeAllStatements / PrepareAllStatements
 //--------------------------------------------------------------------------------
 // One place owning every prepared statement's lifetime, paired with
@@ -101,22 +126,43 @@ std::vector<std::string> SplitCategoryPath(const std::string& joined)
 void FinalizeAllStatements()
 {
     sqlite3_finalize(s_insertEffectStmt);      s_insertEffectStmt      = nullptr;
+    sqlite3_finalize(s_insertEffectMetaStmt);  s_insertEffectMetaStmt  = nullptr;
     sqlite3_finalize(s_insertOccurrenceStmt);  s_insertOccurrenceStmt  = nullptr;
     sqlite3_finalize(s_insertGroupMemberStmt); s_insertGroupMemberStmt = nullptr;
     sqlite3_finalize(s_selectEffectStmt);      s_selectEffectStmt      = nullptr;
+    sqlite3_finalize(s_selectEffectIdStmt);   s_selectEffectIdStmt   = nullptr;
     sqlite3_finalize(s_selectKnownStmt);      s_selectKnownStmt      = nullptr;
     sqlite3_finalize(s_selectOccurrenceStmt); s_selectOccurrenceStmt = nullptr;
     sqlite3_finalize(s_selectGroupsStartedStmt);  s_selectGroupsStartedStmt  = nullptr;
     sqlite3_finalize(s_selectGroupsMemberOfStmt); s_selectGroupsMemberOfStmt = nullptr;
     sqlite3_finalize(s_updateNameStmt);       s_updateNameStmt       = nullptr;
     sqlite3_finalize(s_updateCategoryStmt);   s_updateCategoryStmt   = nullptr;
+    sqlite3_finalize(s_backfillCaptureStmt);  s_backfillCaptureStmt  = nullptr;
 }
 
 bool PrepareAllStatements(std::string& outError)
 {
+    //_ effect_id is now bound, not left for SQLite to compute -- the
+    // caller (EffectDb_RecordEvent) only ever reaches this insert after
+    // already confirming via kSelectEffectId that guid_b64 is genuinely
+    // new, so a plain INSERT (not OR IGNORE) is correct and lets a real
+    // failure surface as a real failure rather than a silent no-op.
     static const char* kInsertEffect =
-        "INSERT OR IGNORE INTO effects (guid_b64, name, block_group, block_member, type, category_path) "
-        "VALUES (?1, ?2, ?3, ?4, ?5, '')";
+        "INSERT INTO effects (guid_b64, effect_id, block_group, block_member, type) "
+        "VALUES (?1, ?2, ?3, ?4, ?5)";
+
+    //_ effect_id left NULL -- effect_meta.effect_id is INTEGER PRIMARY
+    // KEY, so SQLite auto-assigns the next rowid; EffectDb_RecordEvent
+    // reads it back via sqlite3_last_insert_rowid right after. Only ever
+    // used for a guid effect_id never allocated to it before -- capture
+    // can't know about sibling guids of the same effect (see the header's
+    // file comment), so a brand-new guid always starts as its own
+    // singleton effect_id/effect_meta row.
+    static const char* kInsertEffectMeta =
+        "INSERT INTO effect_meta (effect_id, name) VALUES (NULL, ?1)";
+
+    static const char* kSelectEffectId =
+        "SELECT effect_id FROM effects WHERE guid_b64 = ?1";
 
     //_ Upsert -- race and specialization are no longer part of the UNIQUE
     // key (see effect_db.h), so a repeat ORs their bits into the existing
@@ -138,7 +184,11 @@ bool PrepareAllStatements(std::string& outError)
         "VALUES (?1, ?2, ?3, ?4)";
 
     static const char* kSelectEffect =
-        "SELECT name, block_group, block_member, type, category_path FROM effects WHERE guid_b64 = ?1";
+        "SELECT e.effect_id, e.block_group, e.block_member, e.type, e.in_json, "
+        "       COALESCE(m.name, ''), COALESCE(m.category_path, ''), COALESCE(m.description, ''), "
+        "       COALESCE(m.behavior_type, ''), COALESCE(m.behavior_caster, ''), m.behavior_duration "
+        "FROM effects e LEFT JOIN effect_meta m ON m.effect_id = e.effect_id "
+        "WHERE e.guid_b64 = ?1";
 
     static const char* kSelectKnown =
         "SELECT 1 FROM effects WHERE guid_b64 = ?1 LIMIT 1";
@@ -162,23 +212,41 @@ bool PrepareAllStatements(std::string& outError)
         "WHERE member_guid_b64 = ?1 AND starter_guid_b64 != ?1 "
         "ORDER BY starter_guid_b64, duration, a4";
 
+    //_ Keyed by effect_id, not guid_b64 -- see effect_db.h's EffectDb_SetName
+    // comment. Caller (EffectDb_SetName) resolves guid_b64 -> effect_id
+    // via kSelectEffectId first and binds the effect_id here.
     static const char* kUpdateName =
-        "UPDATE effects SET name = ?1 WHERE guid_b64 = ?2";
+        "UPDATE effect_meta SET name = ?1 WHERE effect_id = ?2";
 
     static const char* kUpdateCategory =
-        "UPDATE effects SET category_path = ?1 WHERE guid_b64 = ?2";
+        "UPDATE effect_meta SET category_path = ?1 WHERE effect_id = ?2";
+
+    //_ Backfills block_group/block_member/type on a guid whose `effects`
+    // row already exists but was never actually captured -- i.e. an
+    // externally-seeded row still sitting at the type=-1 placeholder
+    // (see effect_db.h's EffectDbEffect::type comment and the handoff's
+    // "type sentinel changes from 0 to -1" note). The `type = -1` guard
+    // is what keeps this first-seen-wins: once a real capture has set a
+    // real type, this becomes a permanent no-op for that guid, same as
+    // the brand-new-guid path below never runs twice.
+    static const char* kBackfillCapture =
+        "UPDATE effects SET block_group = ?1, block_member = ?2, type = ?3 "
+        "WHERE guid_b64 = ?4 AND type = -1";
 
     struct { const char* sql; sqlite3_stmt** out; } stmts[] = {
         { kInsertEffect,      &s_insertEffectStmt      },
+        { kInsertEffectMeta,  &s_insertEffectMetaStmt  },
         { kInsertOccurrence,  &s_insertOccurrenceStmt  },
         { kInsertGroupMember, &s_insertGroupMemberStmt },
         { kSelectEffect,      &s_selectEffectStmt      },
+        { kSelectEffectId,   &s_selectEffectIdStmt   },
         { kSelectKnown,      &s_selectKnownStmt      },
         { kSelectOccurrence, &s_selectOccurrenceStmt },
         { kSelectGroupsStarted,  &s_selectGroupsStartedStmt  },
         { kSelectGroupsMemberOf, &s_selectGroupsMemberOfStmt },
         { kUpdateName,       &s_updateNameStmt       },
         { kUpdateCategory,   &s_updateCategoryStmt   },
+        { kBackfillCapture,  &s_backfillCaptureStmt  },
     };
 
     for (auto& s : stmts)
@@ -204,11 +272,21 @@ bool CreateSchemaIfNeeded(std::string& outError)
     static const char* kSchema =
         "CREATE TABLE IF NOT EXISTS effects ("
         "  guid_b64      TEXT PRIMARY KEY,"
-        "  name          TEXT NOT NULL DEFAULT '',"
+        "  effect_id     INTEGER NOT NULL,"
         "  block_group   TEXT NOT NULL DEFAULT '',"
         "  block_member  TEXT NOT NULL DEFAULT '',"
-        "  type          INTEGER NOT NULL DEFAULT 0,"
-        "  category_path TEXT NOT NULL DEFAULT ''"
+        "  type          INTEGER NOT NULL DEFAULT -1,"
+        "  in_json       INTEGER NOT NULL DEFAULT 0"
+        ");"
+        "CREATE INDEX IF NOT EXISTS idx_effects_effect_id ON effects(effect_id);"
+        "CREATE TABLE IF NOT EXISTS effect_meta ("
+        "  effect_id         INTEGER PRIMARY KEY,"
+        "  name              TEXT NOT NULL DEFAULT '',"
+        "  category_path     TEXT NOT NULL DEFAULT '',"
+        "  description       TEXT NOT NULL DEFAULT '',"
+        "  behavior_type     TEXT NOT NULL DEFAULT '',"
+        "  behavior_caster   TEXT NOT NULL DEFAULT '',"
+        "  behavior_duration INTEGER"
         ");"
         "CREATE TABLE IF NOT EXISTS occurrences ("
         "  guid_b64                 TEXT NOT NULL REFERENCES effects(guid_b64),"
@@ -237,6 +315,24 @@ bool CreateSchemaIfNeeded(std::string& outError)
     {
         outError = errMsg ? errMsg : "unknown schema error";
         sqlite3_free(errMsg);
+        return false;
+    }
+
+    //_ CREATE TABLE IF NOT EXISTS is a no-op against a table that already
+    // exists under the OLD (pre-effect_id) shape -- a db written by a
+    // build before this change would silently keep its old `effects`
+    // columns (no effect_id/in_json), and every prepared statement below
+    // would then fail with a confusing "no such column" instead of a
+    // clear message. Cheap direct check for the new column rather than a
+    // migration -- per the handoff, there's nothing to migrate, a
+    // mismatched file just needs to be replaced.
+    char* checkErr = nullptr;
+    if (sqlite3_exec(s_db, "SELECT effect_id, in_json FROM effects LIMIT 1;", nullptr, nullptr, &checkErr) != SQLITE_OK)
+    {
+        outError = "effect db at this path predates the effect_id schema (" +
+                   std::string(checkErr ? checkErr : "unknown error") +
+                   ") -- delete or replace vfxd_effect_db.sqlite3 with a freshly-seeded one";
+        sqlite3_free(checkErr);
         return false;
     }
     return true;
@@ -311,6 +407,14 @@ void EffectDb_Close()
     s_enabled = false;
 }
 
+bool EffectDb_EnsureOpenForBrowsing(const std::string& denoiserAddonDir, std::string& outError)
+{
+    if (s_db)
+        return true;   //. already open, whether from here or EffectDb_SetEnabled -- see this function's own comment
+
+    return EffectDb_Open(denoiserAddonDir, outError);
+}
+
 bool EffectDb_GreedFileExists(const std::string& denoiserAddonDir)
 {
     std::error_code ec;
@@ -374,18 +478,65 @@ void EffectDb_RecordEvent(const EffectDbRawEvent& ev)
     // append rather than a blocking fsync) per captured line instead of two.
     sqlite3_exec(s_db, "BEGIN IMMEDIATE;", nullptr, nullptr, nullptr);
 
-    //_ effects: first-seen-wins, INSERT OR IGNORE handles that for free
-    sqlite3_reset(s_insertEffectStmt);
-    sqlite3_clear_bindings(s_insertEffectStmt);
-    sqlite3_bind_text(s_insertEffectStmt, 1, ev.guid_b64.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(s_insertEffectStmt, 2, ev.name.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(s_insertEffectStmt, 3, ev.blockGroup.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(s_insertEffectStmt, 4, ev.blockMember.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int(s_insertEffectStmt, 5, ev.type);
-    if (sqlite3_step(s_insertEffectStmt) != SQLITE_DONE)
-        LogFailure(std::string("EffectDb_RecordEvent: effect insert failed: ") + sqlite3_errmsg(s_db));
-    else if (sqlite3_changes(s_db) > 0)
-        ++s_generation;   //. a genuinely new guid -- the tree overlay needs to pick this up
+    //_ effects/effect_meta: first-seen-wins, same spirit as the old
+    // INSERT OR IGNORE but now a real branch instead of one statement,
+    // since a brand-new guid needs a brand-new effect_id allocated (via
+    // effect_meta's autoincrement) before its effects row can even be
+    // built -- effect_id is NOT NULL there, so the two inserts can't
+    // trade places. A guid already known (whether from an earlier real
+    // capture or from an externally-seeded db -- see the handoff) never
+    // reaches the insert branch below; the insert branch is genuinely
+    // new-guid-only.
+    int64_t existingEffectId = 0;
+    if (!LookupEffectId(ev.guid_b64, existingEffectId))
+    {
+        sqlite3_reset(s_insertEffectMetaStmt);
+        sqlite3_clear_bindings(s_insertEffectMetaStmt);
+        sqlite3_bind_text(s_insertEffectMetaStmt, 1, ev.name.c_str(), -1, SQLITE_TRANSIENT);
+
+        if (sqlite3_step(s_insertEffectMetaStmt) != SQLITE_DONE)
+        {
+            LogFailure(std::string("EffectDb_RecordEvent: effect_meta insert failed: ") + sqlite3_errmsg(s_db));
+        }
+        else
+        {
+            int64_t newEffectId = sqlite3_last_insert_rowid(s_db);
+
+            sqlite3_reset(s_insertEffectStmt);
+            sqlite3_clear_bindings(s_insertEffectStmt);
+            sqlite3_bind_text(s_insertEffectStmt, 1, ev.guid_b64.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int64(s_insertEffectStmt, 2, newEffectId);
+            sqlite3_bind_text(s_insertEffectStmt, 3, ev.blockGroup.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(s_insertEffectStmt, 4, ev.blockMember.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int(s_insertEffectStmt, 5, ev.type);
+
+            if (sqlite3_step(s_insertEffectStmt) != SQLITE_DONE)
+                LogFailure(std::string("EffectDb_RecordEvent: effect insert failed: ") + sqlite3_errmsg(s_db));
+            else
+                ++s_generation;   //. a genuinely new guid -- the tree overlay needs to pick this up
+        }
+    }
+    else
+    {
+        //_ Guid already has an effects row -- either an earlier real
+        // capture, or an externally-seeded placeholder still sitting at
+        // type=-1 (see kBackfillCapture's comment). The WHERE type=-1
+        // guard makes this a true no-op once a real type has ever been
+        // written, so a placeholder's *first* live sighting fills it in
+        // and every sighting after that is inert, matching the
+        // first-seen-wins rule the rest of this table already follows.
+        sqlite3_reset(s_backfillCaptureStmt);
+        sqlite3_clear_bindings(s_backfillCaptureStmt);
+        sqlite3_bind_text(s_backfillCaptureStmt, 1, ev.blockGroup.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(s_backfillCaptureStmt, 2, ev.blockMember.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(s_backfillCaptureStmt, 3, ev.type);
+        sqlite3_bind_text(s_backfillCaptureStmt, 4, ev.guid_b64.c_str(), -1, SQLITE_TRANSIENT);
+
+        if (sqlite3_step(s_backfillCaptureStmt) != SQLITE_DONE)
+            LogFailure(std::string("EffectDb_RecordEvent: effect backfill failed: ") + sqlite3_errmsg(s_db));
+        else if (sqlite3_changes(s_db) > 0)
+            ++s_generation;   //. a placeholder guid just got its real type -- DB tab needs to pick this up
+    }
 
     //_ occurrences: race and specialization are no longer part of the
     // UNIQUE key -- a repeat tuple upserts, OR'ing ev.race's bit and the
@@ -404,6 +555,8 @@ void EffectDb_RecordEvent(const EffectDbRawEvent& ev)
     sqlite3_bind_int64(s_insertOccurrenceStmt, 8, static_cast<sqlite3_int64>(specBit.hi));
     if (sqlite3_step(s_insertOccurrenceStmt) != SQLITE_DONE)
         LogFailure(std::string("EffectDb_RecordEvent: occurrence insert failed: ") + sqlite3_errmsg(s_db));
+    else if (sqlite3_changes(s_db) > 0)
+        ++s_generation;   //. the DB tab's capture-data view needs to pick this up -- see EffectDb_GetGeneration
 
     //_ group_members: only when the caller resolved this event as part of
     // a currently-open group (see EffectDbRawEvent::groupStarterGuid's
@@ -418,6 +571,8 @@ void EffectDb_RecordEvent(const EffectDbRawEvent& ev)
         sqlite3_bind_text(s_insertGroupMemberStmt, 4, ev.guid_b64.c_str(), -1, SQLITE_TRANSIENT);
         if (sqlite3_step(s_insertGroupMemberStmt) != SQLITE_DONE)
             LogFailure(std::string("EffectDb_RecordEvent: group_members insert failed: ") + sqlite3_errmsg(s_db));
+        else if (sqlite3_changes(s_db) > 0)
+            ++s_generation;
     }
 
     sqlite3_exec(s_db, "COMMIT;", nullptr, nullptr, nullptr);
@@ -444,12 +599,18 @@ bool EffectDb_GetEffect(const std::string& guid_b64, EffectDbEffect& out)
     if (sqlite3_step(s_selectEffectStmt) != SQLITE_ROW)
         return false;
 
-    out.guid_b64     = guid_b64;
-    out.name         = reinterpret_cast<const char*>(sqlite3_column_text(s_selectEffectStmt, 0));
-    out.blockGroup   = reinterpret_cast<const char*>(sqlite3_column_text(s_selectEffectStmt, 1));
-    out.blockMember  = reinterpret_cast<const char*>(sqlite3_column_text(s_selectEffectStmt, 2));
-    out.type         = sqlite3_column_int(s_selectEffectStmt, 3);
-    out.categoryPath = SplitCategoryPath(reinterpret_cast<const char*>(sqlite3_column_text(s_selectEffectStmt, 4)));
+    out.guid_b64         = guid_b64;
+    out.effect_id         = sqlite3_column_int64(s_selectEffectStmt, 0);
+    out.blockGroup        = reinterpret_cast<const char*>(sqlite3_column_text(s_selectEffectStmt, 1));
+    out.blockMember        = reinterpret_cast<const char*>(sqlite3_column_text(s_selectEffectStmt, 2));
+    out.type               = sqlite3_column_int(s_selectEffectStmt, 3);
+    out.in_json             = sqlite3_column_int(s_selectEffectStmt, 4) != 0;
+    out.name               = reinterpret_cast<const char*>(sqlite3_column_text(s_selectEffectStmt, 5));
+    out.categoryPath       = SplitCategoryPath(reinterpret_cast<const char*>(sqlite3_column_text(s_selectEffectStmt, 6)));
+    out.description         = reinterpret_cast<const char*>(sqlite3_column_text(s_selectEffectStmt, 7));
+    out.behaviorType       = reinterpret_cast<const char*>(sqlite3_column_text(s_selectEffectStmt, 8));
+    out.behaviorCaster     = reinterpret_cast<const char*>(sqlite3_column_text(s_selectEffectStmt, 9));
+    out.behaviorDuration   = sqlite3_column_int(s_selectEffectStmt, 10);  //. NULL -> 0, only meaningful when behaviorType == "SetDuration"
     return true;
 }
 
@@ -459,8 +620,14 @@ std::vector<EffectDbEffect> EffectDb_GetAllEffects()
     if (!s_db) return out;
 
     sqlite3_stmt* stmt = nullptr;
+    //_ Same column set/order as kSelectEffect, plus guid_b64 up front --
+    // see that statement's comment for why the join is LEFT and every
+    // effect_meta column is COALESCE'd.
     static const char* kSelectAll =
-        "SELECT guid_b64, name, block_group, block_member, type, category_path FROM effects";
+        "SELECT e.guid_b64, e.effect_id, e.block_group, e.block_member, e.type, e.in_json, "
+        "       COALESCE(m.name, ''), COALESCE(m.category_path, ''), COALESCE(m.description, ''), "
+        "       COALESCE(m.behavior_type, ''), COALESCE(m.behavior_caster, ''), m.behavior_duration "
+        "FROM effects e LEFT JOIN effect_meta m ON m.effect_id = e.effect_id";
 
     if (sqlite3_prepare_v2(s_db, kSelectAll, -1, &stmt, nullptr) != SQLITE_OK)
         return out;
@@ -468,12 +635,18 @@ std::vector<EffectDbEffect> EffectDb_GetAllEffects()
     while (sqlite3_step(stmt) == SQLITE_ROW)
     {
         EffectDbEffect e;
-        e.guid_b64     = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
-        e.name         = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
-        e.blockGroup   = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
-        e.blockMember  = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
-        e.type         = sqlite3_column_int(stmt, 4);
-        e.categoryPath = SplitCategoryPath(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 5)));
+        e.guid_b64         = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        e.effect_id         = sqlite3_column_int64(stmt, 1);
+        e.blockGroup        = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+        e.blockMember        = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+        e.type               = sqlite3_column_int(stmt, 4);
+        e.in_json             = sqlite3_column_int(stmt, 5) != 0;
+        e.name               = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 6));
+        e.categoryPath       = SplitCategoryPath(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 7)));
+        e.description         = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 8));
+        e.behaviorType       = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 9));
+        e.behaviorCaster     = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 10));
+        e.behaviorDuration   = sqlite3_column_int(stmt, 11);
         out.push_back(std::move(e));
     }
 
@@ -578,12 +751,16 @@ std::vector<EffectDbGroupMembership> EffectDb_GetGroupsMemberOf(const std::strin
 
 bool EffectDb_SetName(const std::string& guid_b64, const std::string& name)
 {
-    if (!s_db || !EffectDb_IsKnownGuid(guid_b64)) return false;
+    if (!s_db) return false;
+
+    int64_t effectId = 0;
+    if (!LookupEffectId(guid_b64, effectId))
+        return false;
 
     sqlite3_reset(s_updateNameStmt);
     sqlite3_clear_bindings(s_updateNameStmt);
     sqlite3_bind_text(s_updateNameStmt, 1, name.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(s_updateNameStmt, 2, guid_b64.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(s_updateNameStmt, 2, effectId);
 
     if (sqlite3_step(s_updateNameStmt) != SQLITE_DONE)
     {
@@ -597,14 +774,18 @@ bool EffectDb_SetName(const std::string& guid_b64, const std::string& name)
 
 bool EffectDb_SetCategoryPath(const std::string& guid_b64, const std::vector<std::string>& categoryPath)
 {
-    if (!s_db || !EffectDb_IsKnownGuid(guid_b64)) return false;
+    if (!s_db) return false;
+
+    int64_t effectId = 0;
+    if (!LookupEffectId(guid_b64, effectId))
+        return false;
 
     std::string joined = JoinCategoryPath(categoryPath);
 
     sqlite3_reset(s_updateCategoryStmt);
     sqlite3_clear_bindings(s_updateCategoryStmt);
     sqlite3_bind_text(s_updateCategoryStmt, 1, joined.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(s_updateCategoryStmt, 2, guid_b64.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(s_updateCategoryStmt, 2, effectId);
 
     if (sqlite3_step(s_updateCategoryStmt) != SQLITE_DONE)
     {

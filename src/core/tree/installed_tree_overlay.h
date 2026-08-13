@@ -6,8 +6,6 @@
 //                               update's diff (rework/merge/insert/move)
 // BuildDuplicateOverlayTree()  tags a copy of `installed` with duplicate-guid
 //                               markers
-// BuildEffectDbOverlayTree()   tags a copy of `installed` with db-only /
-//                               db-enriched effects from "for science" capture
 //--------------------------------------------------------------------------------
 // Pure data-transformation over an installed sin's JSON, split out of
 // addon.cpp. No shared state, no ImGui calls -- every function here takes
@@ -21,7 +19,6 @@
 
 #pragma once
 
-#include "effect_db.h" //. EffectDbEffect
 #include "merge.h"     //. nlohmann::ordered_json, MergePlan
 
 #include <string>
@@ -68,21 +65,3 @@ nlohmann::ordered_json BuildDiffOverlayTree(const nlohmann::ordered_json& instal
 // the installed file itself, not a pending update.
 //--------------------------------------------------------------------------------
 nlohmann::ordered_json BuildDuplicateOverlayTree(const nlohmann::ordered_json& installed, const std::vector<std::string>& dupeGuids);
-
-//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-// BuildEffectDbOverlayTree
-//--------------------------------------------------------------------------------
-// Deep-copies `installed` and overlays "for science" capture data from
-// `dbEffects`: a guid with no existing JSON entry gets a synthetic
-// "__vfxd_db_only" node placed at its categoryPath (materializing
-// missing categories as needed, same as BuildDiffOverlayTree; an
-// unplaced guid falls into a root "Unrecognized (for science)" bucket).
-// A guid that's already a real JSON entry keeps its node untouched and
-// instead gets the capture data attached under "__vfxd_db_by_guid".
-//
-// Meant to target whichever sin "for science" promotion always uses
-// (Greed) -- see effect_db.h. `outAddedCount`, if non-null, receives how
-// many synthetic nodes were added (enriched-in-place nodes don't count).
-//--------------------------------------------------------------------------------
-nlohmann::ordered_json BuildEffectDbOverlayTree(const nlohmann::ordered_json& installed, const std::vector<EffectDbEffect>& dbEffects,
-                                                 size_t* outAddedCount = nullptr);

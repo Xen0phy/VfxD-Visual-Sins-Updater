@@ -40,14 +40,14 @@
 //   valid target (except the one open for editing); writes straight to
 //   disk on drop -- see QueueGuidMerge.
 //
-// - A "__vfxd_db_only" node's own row (effIsDbOnly) is a drag source too,
-//   despite being overlay-only with no stable JSON position: dragging it
-//   onto any category row (even a "__vfxd_virtual" one) sets its effect-db
-//   category_path via QueueDbCategoryPlacement. What moves is a real
-//   database row, not the overlay node -- the overlay just renders it as
-//   virtual this frame.
+// - A DB tab node's own row (effIsDbEffect) is a drag source too, despite
+//   being "__vfxd_virtual" in category terms: dragging it onto any
+//   category row within the DB tab sets its effect_meta.category_path
+//   via QueueDbEffectCategoryPlacement. What moves is a real database
+//   row, not the rendered node -- see db_tree_view.h.
 //--------------------------------------------------------------------------------
 
+#include "db_tree_view.h"
 #include "effect_db.h"
 #include "github_update.h"
 #include "imgui.h"
@@ -419,12 +419,12 @@ void DecodeSpecOrCoreId(unsigned int id, std::string& outProfName, std::string& 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // RenderEffectDbDetail
 //--------------------------------------------------------------------------------
-// The "for science" expanded view: full detail for a "__vfxd_db_only" node,
-// or an extra section under an ordinary effect with capture data. Reads
-// "__vfxd_db_by_guid" (guid -> {block_group, block_member, type,
-// occurrences, groups}), embedded per cache rebuild by
-// BuildEffectDbOverlayTree -- usually one guid; a merged effect gets one
-// header+group per guid.
+// The "for science" expanded view -- full capture detail for a DB tab
+// node. Reads "__vfxd_db_by_guid" (guid -> {block_group, block_member,
+// type, occurrences, groups}), embedded per rebuild by db_tree_view.cpp's
+// BuildDbTree -- usually one guid; a merged effect gets one header+group
+// per guid. Used only from the DB tab now; the JSON tab no longer carries
+// this data at all -- see EFFECT_DB_SOURCE_OF_TRUTH_HANDOFF.md.
 //
 // Occurrences group as duration/a4/a6/self_mask -> profession ->
 // specialization, races as siblings (see EffectDbSpecializationMask).
@@ -443,7 +443,7 @@ void RenderEffectDbDetail(const nlohmann::ordered_json& effect)
 
     //_ Almost always exactly one guid -- a merged effect can have
     // more than one entry if capture data exists for more than one
-    // of its guids separately (see BuildEffectDbOverlayTree).
+    // of its guids separately (see BuildDbTree).
     int guidIdx = 0;
     for (const auto& [guid, detail] : effect["__vfxd_db_by_guid"].items())
     {
@@ -551,11 +551,7 @@ void RenderEffectDbDetail(const nlohmann::ordered_json& effect)
 //--------------------------------------------------------------------------------
 // generation           tree generation this copy was built from
 // diffStatus           diff status this copy was built from
-// effectDbGeneration   effect_db generation as of the last rebuild -- stored
-//                      but not itself checked for staleness (see below)
-// dbOnlyCount          number of "for science" db-only nodes folded in by
-//                      BuildEffectDbOverlayTree
-// file                 the built (dupe/diff/db-tagged) copy of the
+// file                 the built (dupe/diff-tagged) copy of the
 //                      installed tree
 // contentVersion       bumped whenever `file` is rebuilt -- lets the search
 //                      cache tell a real rebuild apart from a cache-hit frame
@@ -564,16 +560,12 @@ void RenderEffectDbDetail(const nlohmann::ordered_json& effect)
 // this cache exists. Invalidated on GetInstalledTreeGeneration() changing
 // (file reloaded/edited) or the sin's own EDiffStatus changing (a diff
 // produces one MergePlan per Ready transition; a reload always passes
-// through NotLoaded/Loading first, which this also catches). NOT invalidated
-// by effectDbGeneration alone changing -- see "Deliberately not reacting"
-// where this is rebuilt, below.
+// through NotLoaded/Loading first, which this also catches).
 //--------------------------------------------------------------------------------
 struct OverlayCacheEntry
 {
     int         generation = -1;
     EDiffStatus diffStatus = EDiffStatus::NotLoaded;
-    int         effectDbGeneration = -1;
-    size_t      dbOnlyCount = 0;
     nlohmann::ordered_json file;
     int contentVersion = 0;
 };
@@ -796,12 +788,13 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
             }
         }
 
-        //_ Db-only category placement. Not gated on !categoryVirtual -- a
-        // virtual category here only exists because this drop makes it real.
-        if (sinName == "Greed" && ImGui::AcceptDragDropPayload("VFXD_DBONLY_GUID"))
+        //_ DB tab's own category placement. Not gated on !categoryVirtual --
+        // a virtual category here only exists because this drop makes it
+        // real, scoped to the DB tab's sentinel sinName.
+        if (sinName == kDbTabSinName && ImGui::AcceptDragDropPayload("VFXD_DB_EFFECT"))
         {
-            const DbOnlyGuidDragPayload& dbDragPayload = GetDbOnlyGuidDragPayload();
-            QueueDbCategoryPlacement(dbDragPayload.guid_b64, namePathSoFar);
+            const DbEffectDragPayload& dbEffectDragPayload = GetDbEffectDragPayload();
+            QueueDbEffectCategoryPlacement(dbEffectDragPayload.effectId, dbEffectDragPayload.guids, namePathSoFar);
         }
 
         ImGui::EndDragDropTarget();
@@ -896,13 +889,11 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                     if (isDeletingThisHidden)
                         CancelDeleteConfirm();
 
-                    //_ A db-only node's rename is keyed by guid, not by
-                    // (sinName, path, index) -- same reasoning as
-                    // IsDbGuidBeingRenamed itself.
-                    if (effect.value("__vfxd_db_only", false) &&
-                        effect.contains("guids") && effect["guids"].is_array() && !effect["guids"].empty() &&
-                        effect["guids"][0].is_string() && IsDbGuidBeingRenamed(effect["guids"][0].get<std::string>()))
-                        CancelDbRename();
+                    //_ A DB tab node's rename is keyed by effect_id, not
+                    // (sinName, path, index) -- see db_tree_view.h.
+                    if (effect.value("__vfxd_db_effect", false) &&
+                        IsDbEffectBeingRenamed(effect.value("effect_id", int64_t(0))))
+                        CancelDbEffectRename();
 
                     //_ Not visited this frame -- on a query change, reset
                     // this effect's own stored open state too.
@@ -929,16 +920,17 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                 bool effIsNew      = effect.value("__vfxd_new", false);
                 bool effIsRework   = effect.value("__vfxd_rework", false);
                 bool effIsConflict = effect.value("__vfxd_conflict", false);
-                bool effIsDbOnly   = effect.value("__vfxd_db_only", false);
+                bool effIsDbEffect = effect.value("__vfxd_db_effect", false);
 
-                //_ A synthetic db-only node always has exactly one guid --
-                // see BuildEffectDbOverlayTree. That guid is this node's
-                // whole identity below, since it has no stable JSON (path, index) position.
-                std::string dbOnlyGuid;
-                if (effIsDbOnly && effect.contains("guids") && effect["guids"].is_array() &&
-                    !effect["guids"].empty() && effect["guids"][0].is_string())
-                    dbOnlyGuid = effect["guids"][0].get<std::string>();
-                bool isDbRenamingThis = !dbOnlyGuid.empty() && IsDbGuidBeingRenamed(dbOnlyGuid);
+                //_ A DB tab node's identity is effect_id, not a single guid --
+                // see db_tree_view.h. guids here can be more than one.
+                int64_t dbEffectId = effIsDbEffect ? effect.value("effect_id", int64_t(0)) : 0;
+                std::vector<std::string> dbEffectGuids;
+                if (effIsDbEffect && effect.contains("guids") && effect["guids"].is_array())
+                    for (const auto& g : effect["guids"])
+                        if (g.is_string())
+                            dbEffectGuids.push_back(g.get<std::string>());
+                bool isDbEffectRenamingThis = effIsDbEffect && IsDbEffectBeingRenamed(dbEffectId);
 
                 //_ Hollowed out by a GUID drag-merge, or by deleting the
                 // last GUID by hand -- see "Delete Empty" below. Alpha-dimmed
@@ -956,7 +948,7 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                     ImGui::PushStyleColor(ImGuiCol_Text, kNewColor);
                 else if (effIsRework)
                     ImGui::PushStyleColor(ImGuiCol_Text, kReworkColor);
-                else if (effIsDbOnly)
+                else if (effIsDbEffect)
                     ImGui::PushStyleColor(ImGuiCol_Text, kDbOnlyColor);
 
                 //_ Forced open only if it matched through hidden content
@@ -967,10 +959,10 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                     ImGui::SetNextItemOpen(effectNeedsForceOpen, ImGuiCond_Always);
                 bool nodeOpen = ImGui::TreeNode("effect", "%s%s%s%s", effName.c_str(),
                                                 isEditingThis ? " (editing)" : "",
-                                                isDbRenamingThis ? " (renaming)" : "",
+                                                isDbEffectRenamingThis ? " (renaming)" : "",
                                                 effIsEmptyGuids ? " (empty)" : "");
 
-                if (effIsDupe || effIsNew || effIsRework || effIsConflict || effIsDbOnly)
+                if (effIsDupe || effIsNew || effIsRework || effIsConflict || effIsDbEffect)
                     ImGui::PopStyleColor();
                 if (effIsEmptyGuids)
                     ImGui::PopStyleVar();
@@ -978,7 +970,7 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                 //_ Places a dragged effect immediately above this row --
                 // complements the category-row target above so together
                 // they cover every position; skipped for an overlay-only effect.
-                if (!effIsNew && !effIsRework && !effIsDbOnly && ImGui::BeginDragDropTarget())
+                if (!effIsNew && !effIsRework && !effIsDbEffect && ImGui::BeginDragDropTarget())
                 {
                     if (ImGui::AcceptDragDropPayload("VFXD_EFFECT"))
                     {
@@ -1030,7 +1022,7 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                 //_ Not offered on an overlay-only effect, same reasoning as
                 // the drop target above. Gated on AnyEditInFlight so a drag
                 // can't start mid-edit elsewhere.
-                if (!effIsNew && !effIsRework && !effIsDbOnly && !AnyEditInFlight() && ImGui::BeginDragDropSource())
+                if (!effIsNew && !effIsRework && !effIsDbEffect && !AnyEditInFlight() && ImGui::BeginDragDropSource())
                 {
                     BeginEffectDrag(sinName, pathSoFar, effName, effIndex);
                     ImGui::SetDragDropPayload("VFXD_EFFECT", &kEffectDragMarker, sizeof(kEffectDragMarker));
@@ -1038,12 +1030,12 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                     ImGui::EndDragDropSource();
                 }
 
-                //_ A db-only node's own drag source, for dropping onto a
-                // category row's VFXD_DBONLY_GUID accept above. Same gates as the menu below.
-                if (effIsDbOnly && !dbOnlyGuid.empty() && !AnyEditInFlight() && ImGui::BeginDragDropSource())
+                //_ The DB tab's own drag source -- see kDbTabSinName's
+                // accept in this function's category-level drop target above.
+                if (effIsDbEffect && !dbEffectGuids.empty() && !AnyEditInFlight() && ImGui::BeginDragDropSource())
                 {
-                    BeginDbOnlyGuidDrag(dbOnlyGuid, effName);
-                    ImGui::SetDragDropPayload("VFXD_DBONLY_GUID", &kDbOnlyGuidDragMarker, sizeof(kDbOnlyGuidDragMarker));
+                    BeginDbEffectDrag(dbEffectId, dbEffectGuids, effName);
+                    ImGui::SetDragDropPayload("VFXD_DB_EFFECT", &kDbEffectDragMarker, sizeof(kDbEffectDragMarker));
                     ImGui::Text("Move \"%s\"", effName.c_str());
                     ImGui::EndDragDropSource();
                 }
@@ -1051,28 +1043,27 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                 //_ Only offered when no edit is in flight anywhere, and
                 // never on an overlay-only effect -- nothing at
                 // pathSoFar/effIndex is guaranteed to be it until applied.
-                if (!effIsNew && !effIsRework && !effIsDbOnly && !AnyEditInFlight() && ImGui::BeginPopupContextItem("effect_ctx"))
+                if (!effIsNew && !effIsRework && !effIsDbEffect && !AnyEditInFlight() && ImGui::BeginPopupContextItem("effect_ctx"))
                 {
                     if (ImGui::MenuItem("Edit"))
                         BeginEdit(sinName, pathSoFar, effIndex, effect);
                     ImGui::EndPopup();
                 }
 
-                //_ The db-only counterpart of the context menu above --
-                // was absent entirely until now. Same gating: known guid, no other edit in flight.
-                if (effIsDbOnly && !dbOnlyGuid.empty() && !AnyEditInFlight() && ImGui::BeginPopupContextItem("dbonly_ctx"))
+                //_ The DB tab's own context menu -- no "Add to JSON": SQL
+                // is the source of truth here, there's nothing to promote
+                // (see EFFECT_DB_SOURCE_OF_TRUTH_HANDOFF.md).
+                if (effIsDbEffect && !dbEffectGuids.empty() && !AnyEditInFlight() && ImGui::BeginPopupContextItem("dbeffect_ctx"))
                 {
-                    if (ImGui::MenuItem("Add to JSON"))
-                        QueuePromoteToJson(dbOnlyGuid);
                     if (ImGui::MenuItem("Rename"))
-                        BeginDbRename(dbOnlyGuid, effName);
+                        BeginDbEffectRename(dbEffectId, dbEffectGuids, effName);
                     ImGui::EndPopup();
                 }
 
                 //_ Never grayed out for emptiness (unlike a category) --
                 // only while some other edit/delete/create/rename is in
                 // flight elsewhere. Not offered on an overlay-only effect.
-                if (!effIsNew && !effIsRework && !effIsDbOnly)
+                if (!effIsNew && !effIsRework && !effIsDbEffect)
                 {
                     bool deleteDisabled = AnyEditInFlight() && !isDeletingThisEffect;
                     ImGui::SameLine();
@@ -1095,13 +1086,48 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                     {
                         RenderEffectEditor();
                     }
-                    else if (isDbRenamingThis)
+                    else if (isDbEffectRenamingThis)
                     {
-                        RenderDbRenameEditor();
+                        RenderDbEffectRenameEditor();
                     }
-                    else if (effIsDbOnly)
+                    else if (effIsDbEffect)
                     {
-                        RenderEffectDbDetail(effect);
+                        if (effect.value("in_json", false))
+                            ImGui::TextDisabled("Also installed (also exists in a loaded sin file).");
+
+                        if (effect.contains("description") && effect["description"].is_string())
+                        {
+                            std::string desc = effect["description"].get<std::string>();
+                            if (!desc.empty())
+                                ImGui::TextWrapped("%s", desc.c_str());
+                        }
+
+                        //_ No GuidListDragContext -- per-guid drag/merge is a
+                        // JSON-tab concept (see QueueGuidMerge); the DB tab
+                        // only ever moves a whole effect_id at once.
+                        RenderGuidList("guids", dbEffectGuids);
+
+                        if (effect.contains("behaviors") && effect["behaviors"].is_array())
+                        {
+                            ImGui::TextDisabled("Behaviors (owned by VfxDenoiser):");
+                            for (const auto& behavior : effect["behaviors"])
+                                RenderBehavior(behavior);
+                        }
+
+                        //_ The capture data itself -- see db_tree_view.cpp's
+                        // BuildDbTree for where "__vfxd_db_by_guid" comes from.
+                        // This is the whole reason the DB tab exists: every
+                        // guid's block/type/occurrence/group history, not just
+                        // its curated name/category.
+                        if (effect.contains("__vfxd_db_by_guid") && effect["__vfxd_db_by_guid"].is_object()
+                            && !effect["__vfxd_db_by_guid"].empty())
+                        {
+                            if (ImGui::TreeNode("effectdb_detail", "Capture data"))
+                            {
+                                RenderEffectDbDetail(effect);
+                                ImGui::TreePop();
+                            }
+                        }
                     }
                     else
                     {
@@ -1211,21 +1237,6 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                                 RenderBehavior(behavior);
                         }
 
-                        //_ Present whenever "for science" has captured data for
-                        // this guid -- most of what gets captured during play.
-                        // Collapsed by default, like other optional blocks.
-                        if (effect.contains("__vfxd_db_by_guid") && effect["__vfxd_db_by_guid"].is_object()
-                            && !effect["__vfxd_db_by_guid"].empty())
-                        {
-                            if (ImGui::TreeNode("effectdb_detail", "\"For science\" data"))
-                            {
-                                ImGui::PushStyleColor(ImGuiCol_Text, kDbOnlyColor);
-                                RenderEffectDbDetail(effect);
-                                ImGui::PopStyleColor();
-                                ImGui::TreePop();
-                            }
-                        }
-
                         //_ Anything beyond the confirmed schema is
                         // unexpected -- surface it rather than drop it.
                         for (const auto& [key, value] : effect.items())
@@ -1236,8 +1247,7 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                                 || key == "__vfxd_dupe_guid" || key == "__vfxd_hasdupe"
                                 || key == "__vfxd_old_name" || key == "__vfxd_old_category"
                                 || key == "__vfxd_merged_count" || key == "__vfxd_conflict"
-                                || key == "__vfxd_conflict_sources" || key == "__vfxd_db_only"
-                                || key == "__vfxd_db_by_guid")
+                                || key == "__vfxd_conflict_sources")
                                 continue;
                             RenderJsonValue(key, value);
                         }
@@ -1287,80 +1297,16 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
 }
 
 } //. namespace
-
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-// RenderInstalledEffects
+// RenderJsonTabContent
 //--------------------------------------------------------------------------------
-// Draws the "Installed Effects" section: one top-level TreeNode per
-// installed sin file, each expanding into that file's real category tree
-// via RenderCategoryTree. Read-only browsing by default; right-clicking an
-// effect offers "Edit". Independent of whether a GitHub update is
-// available.
+// The JSON tab's content -- one top-level TreeNode per installed sin file, each
+// expanding into that file's real category tree via RenderCategoryTree. Split out
+// of RenderInstalledEffects so it can sit inside its own tab item, alongside
+// RenderDbTabContent's "Database" tab -- see EFFECT_DB_SOURCE_OF_TRUTH_HANDOFF.md.
 //--------------------------------------------------------------------------------
-void RenderInstalledEffects(const std::string& denoiserAddonDir)
+void RenderJsonTabContent()
 {
-    if (!IsInstalledTreeLoaded())
-        LoadInstalledEffectsTree(denoiserAddonDir);
-
-    if (ImGui::Button("Refresh##installed_tree"))
-        LoadInstalledEffectsTree(denoiserAddonDir);
-
-    ImGui::SameLine();
-    //_ Greyed out while another edit's in flight, same as the per-effect
-    // "-" delete button -- not gated on there being anything empty yet,
-    // that's re-checked when the confirm itself renders (see below).
-    {
-        bool deleteEmptyDisabled = AnyEditInFlight() && !IsDeleteEmptyConfirmActive();
-        if (deleteEmptyDisabled)
-            ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.5f);
-        bool deleteEmptyClicked = ImGui::Button("Delete Empty##installed_tree");
-        if (deleteEmptyDisabled)
-            ImGui::PopStyleVar();
-        if (deleteEmptyClicked && !deleteEmptyDisabled)
-            BeginDeleteEmptyConfirm();
-    }
-    if (IsDeleteEmptyConfirmActive())
-        RenderDeleteEmptyConfirm();
-
-    ImGui::TextDisabled("Drag an effect onto a category to move it to the end of that category,\n"
-                         "or onto another effect to place it just above that one.\n"
-                         "Categories can be dragged only to reorder them in the same parent category.\n"
-                         "GUIDs can be dragged onto other effects.\n"
-                         "Right-click unfolded effects or categories to edit them.");
-
-    //_ Recomputes the lowercased query RenderCategoryTree's matching
-    // helpers compare against; the actual filtering happens down there.
-    ImGui::InputTextWithHint("##installed_tree_search", "Search name / category / description / GUID...",
-                              s_treeSearchBuf, sizeof(s_treeSearchBuf));
-    if (s_treeSearchBuf[0] != '\0')
-    {
-        ImGui::SameLine();
-        if (ImGui::SmallButton("Clear##installed_tree_search"))
-            s_treeSearchBuf[0] = '\0';
-    }
-    std::string typedLower = s_treeSearchBuf;
-    std::transform(typedLower.begin(), typedLower.end(), typedLower.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-
-    if (!typedLower.empty() && typedLower.size() < kMinTreeSearchLength)
-        ImGui::TextDisabled("Keep typing... (search starts at %zu characters)", kMinTreeSearchLength);
-
-    //_ Below the minimum, treat the query as empty (no filtering/expansion).
-    std::string newQueryLower = (typedLower.size() >= kMinTreeSearchLength) ? typedLower : std::string();
-
-    //_ See s_treeSearchQueryChanged's own comment for why this matters.
-    s_treeSearchQueryChanged = (newQueryLower != s_treeSearchQueryLower);
-    s_treeSearchQueryLower   = std::move(newQueryLower);
-
-    //_ Search cleared -- drop the per-sin match caches (see
-    // SearchCacheEntry) rather than let them sit around unused; they'll
-    // rebuild fresh, lazily, next time a query goes active.
-    if (s_treeSearchQueryChanged && s_treeSearchQueryLower.empty())
-        s_searchCache.clear();
-
-    if (!GetEditResultMessage().empty())
-        ImGui::TextWrapped("%s", GetEditResultMessage().c_str());
-
     if (GetInstalledSins().empty())
     {
         ImGui::TextDisabled("No Visual Sins effect files found in VfxDenoiser's folder.");
@@ -1373,7 +1319,6 @@ void RenderInstalledEffects(const std::string& denoiserAddonDir)
     std::vector<SinDiffInfo> diffs = GetSinDiffInfo();
     bool anyOverlayShown  = false;
     bool anyConflictShown = false;
-    bool anyDbOnlyShown   = false;
 
     for (const auto& sin : GetInstalledSins())
     {
@@ -1398,12 +1343,6 @@ void RenderInstalledEffects(const std::string& denoiserAddonDir)
         auto        dupIt    = duplicateGuidsBySin.find(sin.sinName);
         bool        hasDupes = dupIt != duplicateGuidsBySin.end() && !dupIt->second.empty();
 
-        //_ "For science" promotion always targets Greed (see
-        // effect_db.h) -- not gated on EffectDb_IsEnabled(), so
-        // captured data still renders with capture toggled off.
-        bool isGreedSin      = (sin.sinName == "Greed");
-        int  effectDbGenNow  = isGreedSin ? EffectDb_GetGeneration() : -1;
-
         //_ Duplicate-guid tagging first (a property of the file itself), then
         // the pending-update diff on the same copy -- both can coexist; RenderCategoryTree
         // picks red over orange/green. Only ever a copy -- see OverlayCacheEntry.
@@ -1414,14 +1353,11 @@ void RenderInstalledEffects(const std::string& denoiserAddonDir)
         // counter can never collide with an overlay's contentVersion.
         long long fileTreeVersion = (2LL << 32) | static_cast<unsigned int>(GetInstalledTreeGeneration());
 
-        if (hasDupes || hasOverlay || isGreedSin)
+        if (hasDupes || hasOverlay)
         {
             EDiffStatus statusForCache = diff ? diff->status : EDiffStatus::NotLoaded;
             OverlayCacheEntry& cached = s_overlayCache[sin.sinName];
 
-            //_ Deliberately not reacting to effectDbGenNow changing on
-            // its own -- capture runs fully in the background with zero
-            // rebuild cost, picked up on the next unrelated rebuild.
             bool stale = cached.generation != GetInstalledTreeGeneration() || cached.diffStatus != statusForCache;
 
             if (stale)
@@ -1432,15 +1368,9 @@ void RenderInstalledEffects(const std::string& denoiserAddonDir)
                 if (hasOverlay)
                     built = BuildDiffOverlayTree(built, diff->plan);
 
-                size_t dbOnlyCount = cached.dbOnlyCount;
-                if (isGreedSin)
-                    built = BuildEffectDbOverlayTree(built, EffectDb_GetAllEffects(), &dbOnlyCount);
-
-                cached.generation         = GetInstalledTreeGeneration();
-                cached.diffStatus         = statusForCache;
-                cached.effectDbGeneration = effectDbGenNow;
-                cached.dbOnlyCount        = dbOnlyCount;
-                cached.file               = std::move(built);
+                cached.generation = GetInstalledTreeGeneration();
+                cached.diffStatus = statusForCache;
+                cached.file       = std::move(built);
                 ++cached.contentVersion;
             }
 
@@ -1450,8 +1380,6 @@ void RenderInstalledEffects(const std::string& denoiserAddonDir)
             fileTreeVersion = (1LL << 32) | static_cast<unsigned int>(cached.contentVersion);
 
             fileToRender = &cached.file;
-            if (isGreedSin && cached.dbOnlyCount > 0)
-                anyDbOnlyShown = true;
             if (hasOverlay)
             {
                 anyOverlayShown = true;
@@ -1627,13 +1555,6 @@ void RenderInstalledEffects(const std::string& denoiserAddonDir)
         if (anyConflictShown)
             ImGui::TextColored(kDuplicateColor, "* Merged effects had different settings -- review before applying");
     }
-    if (anyDbOnlyShown)
-    {
-        ImGui::Spacing();
-        ImGui::TextColored(kDbOnlyColor,
-            "* Only in the \"for science\" database -- not yet added to Greed. Right-click to add to JSON or rename, "
-            "or drag onto a category to place it there.");
-    }
     if (!GetDuplicateGuidsBySin().empty())
     {
         bool anyDupes = false;
@@ -1645,9 +1566,262 @@ void RenderInstalledEffects(const std::string& denoiserAddonDir)
             ImGui::TextColored(kDuplicateColor, "* Duplicate GUID shared with another installed effect -- resolve before updating");
         }
     }
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// RenderDbTabContent
+//--------------------------------------------------------------------------------
+// The Database tab's content -- fully independent of RenderJsonTabContent (see
+// EFFECT_DB_SOURCE_OF_TRUTH_HANDOFF.md's "Building the DB tab"). Ensures the db
+// is open for browsing on its own -- see EffectDb_EnsureOpenForBrowsing's own
+// comment on why this can't just rely on EffectDb_SetEnabled (the "for science"
+// capture toggle): a populated vfxd_effect_db.sqlite3 must be browsable here
+// whether or not capture has ever been turned on this session.
+//--------------------------------------------------------------------------------
+void RenderDbTabContent(const std::string& denoiserAddonDir)
+{
+    {
+        std::string openErr;
+        if (!EffectDb_EnsureOpenForBrowsing(denoiserAddonDir, openErr))
+        {
+            ImGui::TextColored(ImVec4(0.9f, 0.4f, 0.4f, 1.0f), "Couldn't open the effect database: %s", openErr.c_str());
+            return;
+        }
+    }
+
+    //_ Own tree cache (rebuilt only when EffectDb_GetGeneration() actually
+    // changed, same "deliberately not reacting to every generation bump"
+    // spirit as OverlayCacheEntry above, except this IS the effect db's
+    // own view, so it's the one place that's correct to react to). Reuses
+    // s_searchCache under kDbTabSinName as its key -- same map, same
+    // entry type, nothing DB-tab-specific needed there.
+    ImGui::PushID(kDbTabSinName);
+    ImGui::Spacing();
+    ImGui::Separator();
+
+    static nlohmann::ordered_json s_dbTabTree;
+    static int                     s_dbTabTreeGeneration         = -1;
+    static int                     s_dbTabInstalledTreeGeneration = -1;
+    static int                     s_dbTabTreeContentVersion      = 0;
+    static size_t                   s_dbTabEffectCount             = 0;
+
+    //_ Rebuilds on either generation moving -- effect_db's own (a real
+    // capture/rename/placement happened) or the installed tree's (the
+    // "in_json" badge below needs the freshly-loaded guid set, since it's
+    // cross-referenced live rather than trusted off effects.in_json --
+    // see BuildDbTree's header comment). GetInstalledTreeGeneration()
+    // only ever moves on a load RenderInstalledEffects already guarantees
+    // happened before this function runs (first-open lazy load, or the
+    // shared "Refresh" button both tabs sit under), so no separate
+    // "when does this recompute" trigger is needed here.
+    int dbGenNow        = EffectDb_GetGeneration();
+    int installedGenNow = GetInstalledTreeGeneration();
+    if (dbGenNow != s_dbTabTreeGeneration || installedGenNow != s_dbTabInstalledTreeGeneration)
+    {
+        std::vector<EffectDbEffect> allEffects     = EffectDb_GetAllEffects();
+        std::unordered_set<std::string> installedGuids = CollectInstalledGuids();
+        s_dbTabEffectCount              = allEffects.size();
+        s_dbTabTree                     = BuildDbTree(allEffects, installedGuids);
+        s_dbTabTreeGeneration           = dbGenNow;
+        s_dbTabInstalledTreeGeneration  = installedGenNow;
+        ++s_dbTabTreeContentVersion;
+    }
+
+    long long dbTreeVersion = (3LL << 32) | static_cast<unsigned int>(s_dbTabTreeContentVersion);
+
+    bool searchActive   = !s_treeSearchQueryLower.empty();
+    bool anyMatchInFile = false;
+
+    static const CategoryMatchCache s_emptySearchCategoryCache;
+    static const EffectMatchCache   s_emptySearchEffectCache;
+    const CategoryMatchCache* matchCachePtr       = &s_emptySearchCategoryCache;
+    const EffectMatchCache*   effectMatchCachePtr = &s_emptySearchEffectCache;
+
+    if (searchActive)
+    {
+        SearchCacheEntry& searchCached = s_searchCache[kDbTabSinName];
+        bool searchStale = searchCached.query != s_treeSearchQueryLower ||
+                            searchCached.treeVersion != dbTreeVersion;
+
+        if (searchStale)
+        {
+            searchCached.categoryCache.clear();
+            searchCached.effectCache.clear();
+
+            bool anyMatch = false;
+            if (s_dbTabTree.contains("categories") && s_dbTabTree["categories"].is_array())
+                for (const auto& cat : s_dbTabTree["categories"])
+                {
+                    BuildCategoryMatchCache(cat, s_treeSearchQueryLower, searchCached.categoryCache, searchCached.effectCache);
+                    if (searchCached.categoryCache[&cat].subtreeMatches)
+                        anyMatch = true;
+                }
+
+            searchCached.query          = s_treeSearchQueryLower;
+            searchCached.treeVersion    = dbTreeVersion;
+            searchCached.anyMatchInFile = anyMatch;
+        }
+
+        anyMatchInFile      = searchCached.anyMatchInFile;
+        matchCachePtr       = &searchCached.categoryCache;
+        effectMatchCachePtr = &searchCached.effectCache;
+    }
+
+    const CategoryMatchCache& matchCache       = *matchCachePtr;
+    const EffectMatchCache&   effectMatchCache = *effectMatchCachePtr;
+
+    if (s_treeSearchQueryChanged)
+        ImGui::SetNextItemOpen(anyMatchInFile, ImGuiCond_Always);
+
+    bool dbRootOpen = ImGui::TreeNode("db_root", "Effect Database (%d effects)",
+                                       static_cast<int>(s_dbTabEffectCount));
+
+    if (!dbRootOpen && s_treeSearchQueryChanged)
+    {
+        ImGui::PushID("db_root");
+        if (s_dbTabTree.contains("categories") && s_dbTabTree["categories"].is_array())
+        {
+            int i = 0;
+            for (const auto& cat : s_dbTabTree["categories"])
+            {
+                ImGui::PushID(i);
+                SilentlyCloseSubtree(cat);
+                ImGui::PopID();
+                ++i;
+            }
+        }
+        ImGui::PopID();
+    }
+
+    if (dbRootOpen)
+    {
+        ImGui::TextDisabled("Read from the effect database directly -- no JSON file involved.\n"
+                             "Right-click an effect to rename it; drag it onto a category to move it.");
+
+        std::vector<int>         path;
+        std::vector<std::string> namePath;
+
+        if (s_dbTabTree.contains("categories") && s_dbTabTree["categories"].is_array())
+        {
+            if (searchActive && !anyMatchInFile)
+            {
+                ImGui::TextDisabled("(no matches)");
+            }
+            else
+            {
+                int i = 0;
+                for (const auto& cat : s_dbTabTree["categories"])
+                {
+                    ImGui::PushID(i);
+                    RenderCategoryTree(kDbTabSinName, cat, path, namePath, i, matchCache, effectMatchCache);
+                    ImGui::PopID();
+                    ++i;
+                }
+            }
+        }
+        else
+        {
+            ImGui::TextDisabled("(no effects known to the database yet)");
+        }
+        ImGui::TreePop();
+    }
+
+    ImGui::PopID();
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// RenderInstalledEffects
+//--------------------------------------------------------------------------------
+// Draws the "Installed Effects" section: a shared header (Refresh, Delete
+// Empty, search box, edit-result message), then a tab bar splitting the
+// content into "JSON" (RenderJsonTabContent -- one top-level TreeNode per
+// installed sin file) and "Database" (RenderDbTabContent -- the effect_id
+// tree read straight from effect_db, see EFFECT_DB_SOURCE_OF_TRUTH_HANDOFF.md).
+// The two tabs are fully independent; neither reads or writes the other.
+//--------------------------------------------------------------------------------
+void RenderInstalledEffects(const std::string& denoiserAddonDir)
+{
+    if (!IsInstalledTreeLoaded())
+        LoadInstalledEffectsTree(denoiserAddonDir);
+
+    if (ImGui::Button("Refresh##installed_tree"))
+        LoadInstalledEffectsTree(denoiserAddonDir);
+
+    ImGui::SameLine();
+    //_ Greyed out while another edit's in flight, same as the per-effect
+    // "-" delete button -- not gated on there being anything empty yet,
+    // that's re-checked when the confirm itself renders (see below).
+    {
+        bool deleteEmptyDisabled = AnyEditInFlight() && !IsDeleteEmptyConfirmActive();
+        if (deleteEmptyDisabled)
+            ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.5f);
+        bool deleteEmptyClicked = ImGui::Button("Delete Empty##installed_tree");
+        if (deleteEmptyDisabled)
+            ImGui::PopStyleVar();
+        if (deleteEmptyClicked && !deleteEmptyDisabled)
+            BeginDeleteEmptyConfirm();
+    }
+    if (IsDeleteEmptyConfirmActive())
+        RenderDeleteEmptyConfirm();
+
+    ImGui::TextDisabled("Drag an effect onto a category to move it to the end of that category,\n"
+                         "or onto another effect to place it just above that one.\n"
+                         "Categories can be dragged only to reorder them in the same parent category.\n"
+                         "GUIDs can be dragged onto other effects.\n"
+                         "Right-click unfolded effects or categories to edit them.");
+
+    //_ Recomputes the lowercased query RenderCategoryTree's matching
+    // helpers compare against; the actual filtering happens down there.
+    ImGui::InputTextWithHint("##installed_tree_search", "Search name / category / description / GUID...",
+                              s_treeSearchBuf, sizeof(s_treeSearchBuf));
+    if (s_treeSearchBuf[0] != '\0')
+    {
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Clear##installed_tree_search"))
+            s_treeSearchBuf[0] = '\0';
+    }
+    std::string typedLower = s_treeSearchBuf;
+    std::transform(typedLower.begin(), typedLower.end(), typedLower.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+    if (!typedLower.empty() && typedLower.size() < kMinTreeSearchLength)
+        ImGui::TextDisabled("Keep typing... (search starts at %zu characters)", kMinTreeSearchLength);
+
+    //_ Below the minimum, treat the query as empty (no filtering/expansion).
+    std::string newQueryLower = (typedLower.size() >= kMinTreeSearchLength) ? typedLower : std::string();
+
+    //_ See s_treeSearchQueryChanged's own comment for why this matters.
+    s_treeSearchQueryChanged = (newQueryLower != s_treeSearchQueryLower);
+    s_treeSearchQueryLower   = std::move(newQueryLower);
+
+    //_ Search cleared -- drop the per-sin match caches (see
+    // SearchCacheEntry) rather than let them sit around unused; they'll
+    // rebuild fresh, lazily, next time a query goes active.
+    if (s_treeSearchQueryChanged && s_treeSearchQueryLower.empty())
+        s_searchCache.clear();
+
+    if (!GetEditResultMessage().empty())
+        ImGui::TextWrapped("%s", GetEditResultMessage().c_str());
+
+    if (!ImGui::BeginTabBar("installed_effects_tabs"))
+        return;
+
+    if (ImGui::BeginTabItem("JSON"))
+    {
+        RenderJsonTabContent();
+        ImGui::EndTabItem();
+    }
+
+    if (ImGui::BeginTabItem("Database"))
+    {
+        RenderDbTabContent(denoiserAddonDir);
+        ImGui::EndTabItem();
+    }
+
+    ImGui::EndTabBar();
 
     //_ Deferred to here, after every category/effect array has finished
-    // iterating, so nothing is mutated mid-walk. All six called
+    // iterating, so nothing is mutated mid-walk. All eight called
     // unconditionally.
     ApplyPendingEdit();
     ApplyPendingCategoryRename();
@@ -1656,7 +1830,6 @@ void RenderInstalledEffects(const std::string& denoiserAddonDir)
     ApplyPendingDelete();
     ApplyPendingCreateCategory();
     ApplyPendingGuidMerge();
-    ApplyPendingDbRename();
-    ApplyPendingPromote();
-    ApplyPendingDbCategoryPlacement();
+    ApplyPendingDbEffectRename();
+    ApplyPendingDbEffectCategoryPlacement();
 }

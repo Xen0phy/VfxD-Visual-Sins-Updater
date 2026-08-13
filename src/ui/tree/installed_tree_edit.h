@@ -2,45 +2,50 @@
 // installed_tree_edit.h
 //--------------------------------------------------------------------------------
 // The tree-editing subsystem -- right-click-to-edit, category rename,
-// delete, create-category, effect/category drag-and-drop reordering, and
-// the effect-db "for science" rename/promotion actions -- split out of
-// addon.cpp. Seven state machines share one shape: Begin* populates
-// file-local state and marks it active, Cancel* clears it, Render* draws
-// the inline widget and only records a pending job, and Apply* consumes
-// that job once the whole tree has finished rendering for the frame, so
-// the effect/category arrays are never mutated mid-walk.
-// RenderCategoryTree/RenderInstalledEffects (still in addon.cpp) reach
-// this subsystem only through the accessor API below, never through its
-// statics directly.
+// delete, create-category, effect/category drag-and-drop reordering --
+// split out of addon.cpp. Six state machines share one shape: Begin*
+// populates file-local state and marks it active, Cancel* clears it,
+// Render* draws the inline widget and only records a pending job, and
+// Apply* consumes that job once the whole tree has finished rendering
+// for the frame, so the effect/category arrays are never mutated
+// mid-walk. RenderCategoryTree/RenderInstalledEffects (still in
+// addon.cpp) reach this subsystem only through the accessor API below,
+// never through its statics directly.
 //
-// The seven: category rename, create category, move category
+// The six: category rename, create category, move category
 // (reorder-only, via drag-and-drop), effect edit, effect/category
-// delete (shared, via the isCategory flag), effect move
-// (drag-and-drop), and db-only rename (EffectDb_SetName only, for a guid
-// with no JSON entry -- see BeginDbRename). Only one of the seven can be
-// active addon-wide at a time -- see AnyEditInFlight -- so an effect edit,
-// say, can never overlap a category rename.
+// delete (shared, via the isCategory flag), and effect move
+// (drag-and-drop). Only one of these can be active addon-wide at a
+// time -- see AnyEditInFlight -- so an effect edit, say, can never
+// overlap a category rename.
+//
+// Plus a seventh, separate from those six: the DB tab's own
+// effect_id-keyed rename (BeginDbEffectRename) -- see
+// EFFECT_DB_SOURCE_OF_TRUTH_HANDOFF.md's "Building the DB tab". Also
+// folds into AnyEditInFlight. The JSON tab's old single-guid "db-only"
+// rename/drag/promotion machinery this used to sit beside has been
+// retired -- the DB tab replaces it outright, see the handoff.
 //
 // Neither category rename nor category move offers reparenting
 // (changing a category's parent) -- see the rename group and the move
 // group below for why.
 //
-// Four things below aren't part of that shared shape: single-GUID
+// Three things below aren't part of that shared shape: single-GUID
 // drag-merge (writes straight to disk on drop, no Save click involved --
 // see QueueGuidMerge), the bulk "Delete Empty" sweep (runs inline before
 // the tree walk starts, so it doesn't need the Queue-then-Apply-after-walk
-// dance the seven above rely on), "Add to JSON" promotion
-// (QueuePromoteToJson/ApplyPendingPromote) -- a one-click action with no
-// inline editor of its own, so it's Queue/Apply without a matching
-// Begin/Cancel/Render trio -- and drag-and-drop category placement for a
-// db-only node (QueueDbCategoryPlacement/ApplyPendingDbCategoryPlacement),
-// same "dropping IS the action, no editor" shape as promotion.
+// dance the six above rely on), and the DB tab's own drag-and-drop
+// category placement (QueueDbEffectCategoryPlacement/
+// ApplyPendingDbEffectCategoryPlacement) -- dropping IS the action, no
+// editor of its own, so it's Queue/Apply without a matching
+// Begin/Cancel/Render trio.
 //--------------------------------------------------------------------------------
 
 #pragma once
 
 #include "core/merge.h" //. nlohmann::ordered_json
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -238,101 +243,78 @@ bool IsEffectEditUnderPath(const std::string& sinName, const std::vector<int>& p
 bool IsEffectEditActive();
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-// BeginDbRename / CancelDbRename / RenderDbRenameEditor / ApplyPendingDbRename
+// BeginDbEffectRename / CancelDbEffectRename / RenderDbEffectRenameEditor /
+// ApplyPendingDbEffectRename
 //--------------------------------------------------------------------------------
-// Rename for a "for science" database entry with NO installed-sin JSON
-// counterpart yet (a "__vfxd_db_only" node -- see RenderCategoryTree's
-// effIsDbOnly branch). Writes only to the effect database
-// (EffectDb_SetName), never to any sin file. A guid that's already
-// JSON-backed uses the ordinary effect editor instead
-// (BeginEdit/RenderEffectEditor/ApplyPendingEdit), which now also syncs
-// the effect database's name for any guid it recognizes there -- see
-// ApplyPendingEdit's own comment. Identity here is the guid itself, not
-// a (sinName, path, index) triple, since a db-only node has no stable
-// JSON position.
+// The DB tab's own rename. Keyed by effect_id, not a guid or a
+// (sinName, path, index) triple, since that's the DB tab's actual
+// identity -- one node can hold several guids.
+// effect_id, not a guid or a (sinName, path, index) triple, since that's
+// the DB tab's actual identity -- one node can hold several guids.
+// `guids` is carried purely for display (RenderGuidList) and for which
+// guid to hand EffectDb_SetName (any one works: it resolves to effect_id
+// internally and updates every sibling, see effect_db.h). Never touches
+// any sin file, in either direction.
 //--------------------------------------------------------------------------------
-void BeginDbRename(const std::string& guid_b64, const std::string& currentName);
-void CancelDbRename();
-void RenderDbRenameEditor();
-void ApplyPendingDbRename();
+void BeginDbEffectRename(int64_t effectId, const std::vector<std::string>& guids, const std::string& currentName);
+void CancelDbEffectRename();
+void RenderDbEffectRenameEditor();
+void ApplyPendingDbEffectRename();
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-// IsDbGuidBeingRenamed / IsDbRenameActive
+// IsDbEffectBeingRenamed / IsDbEffectRenameActive
 //--------------------------------------------------------------------------------
-// True for the db-only rename targeting exactly this guid, and for one
-// active anywhere -- respectively. The latter feeds AnyEditInFlight.
+// True for the DB-tab rename targeting exactly this effect_id, and for
+// one active anywhere -- respectively. The latter feeds AnyEditInFlight.
 //--------------------------------------------------------------------------------
-bool IsDbGuidBeingRenamed(const std::string& guid_b64);
-bool IsDbRenameActive();
+bool IsDbEffectBeingRenamed(int64_t effectId);
+bool IsDbEffectRenameActive();
 
-//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-// QueuePromoteToJson / ApplyPendingPromote
-//--------------------------------------------------------------------------------
-// "Add to JSON" -- the promotion action. Always targets Greed (see
-// effect_db.h on why promotion has no per-guid file choice). Writes a
-// plain new effect -- name, single-guid "guids" array -- at the db
-// entry's own category_path (see EffectDb_SetCategoryPath), materializing
-// that category chain for real if it doesn't exist on disk yet, or into
-// the "Unrecognized (for science)" bucket BuildEffectDbOverlayTree
-// already displays it under if category_path was never set. No-ops (with
-// a result message) if the guid is no longer known to the database, or
-// already has a real JSON entry somewhere in Greed. Queue only records
-// the guid; Apply re-looks-up its current name/category fresh from the
-// database rather than trusting anything captured at click time.
-//--------------------------------------------------------------------------------
-void QueuePromoteToJson(const std::string& guid_b64);
-void ApplyPendingPromote();
-
-//_ Payload marker for a db-only node drag -- same "bytes are just a type
+//_ Payload marker for a DB-tab effect drag -- same "bytes are just a type
 // marker" convention as kEffectDragMarker above.
-inline constexpr int kDbOnlyGuidDragMarker = 1;
+inline constexpr int kDbEffectDragMarker = 1;
 
 //********************************************************************************
-// DbOnlyGuidDragPayload
+// DbEffectDragPayload
 //--------------------------------------------------------------------------------
-// guid_b64      the db-only guid being dragged -- its whole identity,
-//               same "no stable JSON position" reasoning as BeginDbRename
+// effectId      the effect_id being dragged -- its whole identity
+// guids         every guid sharing that effect_id, carried along so the
+//               drop handler can write via any one of them
 // effectName    display name, for messages
 //--------------------------------------------------------------------------------
-// Always implicitly scoped to Greed (see effect_db.h on why "for
-// science" placement has no per-sin choice), so unlike EffectDragPayload
-// there's no sinName field to carry.
-//--------------------------------------------------------------------------------
-struct DbOnlyGuidDragPayload
+struct DbEffectDragPayload
 {
-    std::string guid_b64;
-    std::string effectName;
+    int64_t                  effectId = 0;
+    std::vector<std::string> guids;
+    std::string               effectName;
 };
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-// BeginDbOnlyGuidDrag / GetDbOnlyGuidDragPayload
+// BeginDbEffectDrag / GetDbEffectDragPayload
 //--------------------------------------------------------------------------------
-// Records the current db-only-node drag payload -- call every frame the
-// drag is held, from inside a "__vfxd_db_only" effect row's own
-// BeginDragDropSource (installed_tree_view.cpp's RenderCategoryTree).
-// GetDbOnlyGuidDragPayload is only meaningful from inside a
-// BeginDragDropTarget block that just accepted "VFXD_DBONLY_GUID".
+// Records the current DB-tab effect drag payload -- call every frame the
+// drag is held, from inside the DB tab's own effect row rendering
+// (installed_tree_view.cpp's RenderCategoryTree, effIsDbEffect branch).
+// GetDbEffectDragPayload is only meaningful from inside a
+// BeginDragDropTarget block that just accepted "VFXD_DB_EFFECT".
 //--------------------------------------------------------------------------------
-void BeginDbOnlyGuidDrag(const std::string& guid_b64, const std::string& effectName);
-const DbOnlyGuidDragPayload& GetDbOnlyGuidDragPayload();
+void BeginDbEffectDrag(int64_t effectId, const std::vector<std::string>& guids, const std::string& effectName);
+const DbEffectDragPayload& GetDbEffectDragPayload();
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-// QueueDbCategoryPlacement / ApplyPendingDbCategoryPlacement
+// QueueDbEffectCategoryPlacement / ApplyPendingDbEffectCategoryPlacement
 //--------------------------------------------------------------------------------
-// Drag-and-drop category placement for a db-only node, dropped onto a
-// category row in the tree. Writes only EffectDb_SetCategoryPath -- same
-// "db-only = db-only" split as BeginDbRename, never touches any sin file.
-// Not a Begin/Cancel/Render trio -- dropping IS the action, same shape as
-// QueuePromoteToJson. `categoryPath` is the destination category's name
-// path, root to the dropped-on category inclusive (RenderCategoryTree's
-// namePathSoFar, not the index-based pathSoFar -- placement is keyed by
-// name, not index). Queue records the guid, destination path, and a copy
-// of the drag payload's effectName (for the result message -- see
-// DbCategoryPlacementJob). No-ops (with a result message) if the guid is
-// no longer known to the database.
+// Drag-and-drop category placement for a DB tab node, dropped onto a
+// category row within the DB tab's own tree. Writes only
+// EffectDb_SetCategoryPath (via any one of the effect's guids -- see
+// BeginDbEffectRename's comment on why that's correct here), never any
+// sin file. Not a Begin/Cancel/Render trio -- dropping IS the action, same
+// shape as QueueGuidMerge elsewhere in this file. No-ops (with a result
+// message) if every guid the drag started with has since stopped being
+// known to the database.
 //--------------------------------------------------------------------------------
-void QueueDbCategoryPlacement(const std::string& guid_b64, const std::vector<std::string>& categoryPath);
-void ApplyPendingDbCategoryPlacement();
+void QueueDbEffectCategoryPlacement(int64_t effectId, const std::vector<std::string>& guids, const std::vector<std::string>& categoryPath);
+void ApplyPendingDbEffectCategoryPlacement();
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // BeginDeleteConfirm / CancelDeleteConfirm / RenderDeleteConfirm /

@@ -145,6 +145,36 @@ void CollectGuidBehaviorsRecursive(const nlohmann::ordered_json& category,
             CollectGuidBehaviorsRecursive(sub, out);
 }
 
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// CollectInstalledGuidsRecursive
+//--------------------------------------------------------------------------------
+// Same recursive walk as CollectGuidNamesRecursive/CollectGuidBehaviorsRecursive,
+// keeping just the guid itself -- see CollectInstalledGuids. No name/behavior
+// requirement on the effect the way the other two collectors incidentally have
+// (they skip an effect missing "name"/anything to summarize); a guid counts as
+// installed as soon as it's present in a "guids" array, full stop.
+//--------------------------------------------------------------------------------
+void CollectInstalledGuidsRecursive(const nlohmann::ordered_json& category,
+                                     std::unordered_set<std::string>& out)
+{
+    if (category.contains("effects") && category["effects"].is_array())
+    {
+        for (const auto& eff : category["effects"])
+        {
+            if (!eff.contains("guids") || !eff["guids"].is_array())
+                continue;
+
+            for (const auto& g : eff["guids"])
+                if (g.is_string())
+                    out.insert(g.get<std::string>());
+        }
+    }
+
+    if (category.contains("categories") && category["categories"].is_array())
+        for (const auto& sub : category["categories"])
+            CollectInstalledGuidsRecursive(sub, out);
+}
+
 } //. namespace
 
 void InstalledTreeStore_SetApi(AddonAPI_t* aApi)
@@ -249,6 +279,18 @@ std::unordered_map<std::string, std::string> CollectGuidBehaviorMap()
         if (file.contains("categories") && file["categories"].is_array())
             for (const auto& cat : file["categories"])
                 CollectGuidBehaviorsRecursive(cat, out);
+    }
+    return out;
+}
+
+std::unordered_set<std::string> CollectInstalledGuids()
+{
+    std::unordered_set<std::string> out;
+    for (const auto& [sinName, file] : s_installedJson)
+    {
+        if (file.contains("categories") && file["categories"].is_array())
+            for (const auto& cat : file["categories"])
+                CollectInstalledGuidsRecursive(cat, out);
     }
     return out;
 }

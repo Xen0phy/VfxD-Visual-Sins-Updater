@@ -9,7 +9,7 @@
 // needed (raw static reads in addon.cpp became accessor calls).
 //--------------------------------------------------------------------------------
 
-#include "effect_db.h"              //. EffectDb_SetName, EffectDb_GetEffect, EffectDb_IsKnownGuid
+#include "effect_db.h"              //. EffectDb_SetName, EffectDb_SetCategoryPath, EffectDb_GetEffect
 #include "imgui.h"
 #include "installed_tree_edit.h"
 #include "installed_tree_overlay.h" //. JoinPath
@@ -823,101 +823,103 @@ void ApplyPendingEdit()
     if (!TrySaveOrReport(job.sinName, "Edit applied"))
         return;
 
-    //_ A rename here is meant to write both places when a guid is known
-    // to both (see effect_db.h's EffectDb_SetName). A guid the db has
-    // never seen is left alone -- only existing rows update, never new ones.
-    for (const auto& guid : job.newGuids)
-        if (EffectDb_IsKnownGuid(guid))
-            EffectDb_SetName(guid, job.newName);
-
+    //_ Deliberately does NOT touch effect_db/SQL. Under the effect_id
+    // rework (see EFFECT_DB_SOURCE_OF_TRUTH_HANDOFF.md), SQL is the sole
+    // source of truth for name/category -- this tab edits JSON only, the
+    // DB tab edits SQL only, and neither reads or writes the other. This
+    // used to call EffectDb_SetName here as a "write both places" step;
+    // that's exactly the direction the rework removes.
     s_editResultMessage = "Saved changes to \"" + job.newName + "\".";
     InvalidateInstalledTree(); //. force reload on next expand
 }
 
 //********************************************************************************
-// DbRenameState
+// DbEffectRenameState
 //--------------------------------------------------------------------------------
-// active         whether a db-only rename is currently open
-// guid_b64       the guid being renamed -- its own identity, since a
-//                db-only node has no stable JSON (sinName, path, index)
+// active         whether a DB-tab rename is currently open
+// effectId       the effect_id being renamed -- its own identity, not a
+//                guid or a (sinName, path, index) triple
+// guids          every guid sharing effectId, for the "renaming N guids"
+//                message and for which guid to hand EffectDb_SetName
 // originalName   for display
 // nameBuf        edit buffer
 //--------------------------------------------------------------------------------
-// Sibling of EditState, but scoped to guids with no real JSON entry (a
-// "__vfxd_db_only" node -- see RenderCategoryTree's effIsDbOnly branch).
-// Only ever writes EffectDb_SetName; never touches any sin file, since
-// there's no JSON entry here to write. A guid that already has a JSON
-// entry uses BeginEdit/RenderEffectEditor/ApplyPendingEdit instead, which
-// syncs the database name itself -- see that function's own comment.
+// The DB tab's own rename -- see installed_tree_edit.h's comment on this
+// being the seventh, separate state machine.
 //--------------------------------------------------------------------------------
-struct DbRenameState
+struct DbEffectRenameState
 {
-    bool        active = false;
-    std::string guid_b64;
-    std::string originalName;
+    bool                      active = false;
+    int64_t                   effectId = 0;
+    std::vector<std::string> guids;
+    std::string                originalName;
 
     char nameBuf[256] = {};
 };
-static DbRenameState s_dbRename;
+static DbEffectRenameState s_dbEffectRename;
 
 //********************************************************************************
-// DbRenameSaveJob
+// DbEffectRenameSaveJob
 //--------------------------------------------------------------------------------
-// guid_b64/newName   see DbRenameState's own fields above
+// effectId/guids/newName   see DbEffectRenameState's own fields above
 //--------------------------------------------------------------------------------
-// Set by the Save button; consumed once, after the whole tree has finished
-// rendering for this frame, same deferred-apply shape as every other job
-// here even though EffectDb_SetName doesn't touch anything this frame's
-// tree walk is iterating over -- keeping the shape uniform is worth more
-// than the (nonexistent) mid-walk hazard it would avoid.
+// Same deferred-apply shape as every other job here -- see
+// DbRenameSaveJob's own comment on why the shape stays uniform even
+// though nothing about this write depends on the tree walk in progress.
 //--------------------------------------------------------------------------------
-struct DbRenameSaveJob
+struct DbEffectRenameSaveJob
 {
-    std::string guid_b64;
-    std::string newName;
+    int64_t                  effectId = 0;
+    std::vector<std::string> guids;
+    std::string                newName;
 };
-static bool          s_hasPendingDbRename = false;
-static DbRenameSaveJob s_pendingDbRename;
+static bool                  s_hasPendingDbEffectRename = false;
+static DbEffectRenameSaveJob s_pendingDbEffectRename;
 
-void BeginDbRename(const std::string& guid_b64, const std::string& currentName)
+void BeginDbEffectRename(int64_t effectId, const std::vector<std::string>& guids, const std::string& currentName)
 {
-    s_dbRename.active       = true;
-    s_dbRename.guid_b64     = guid_b64;
-    s_dbRename.originalName = currentName;
+    s_dbEffectRename.active       = true;
+    s_dbEffectRename.effectId     = effectId;
+    s_dbEffectRename.guids        = guids;
+    s_dbEffectRename.originalName = currentName;
 
-    std::snprintf(s_dbRename.nameBuf, sizeof(s_dbRename.nameBuf), "%s", currentName.c_str());
+    std::snprintf(s_dbEffectRename.nameBuf, sizeof(s_dbEffectRename.nameBuf), "%s", currentName.c_str());
 
     s_editResultMessage.clear();
 }
 
-void CancelDbRename()
+void CancelDbEffectRename()
 {
-    s_dbRename.active = false;
+    s_dbEffectRename.active = false;
     s_editResultMessage.clear();
 }
 
-bool IsDbGuidBeingRenamed(const std::string& guid_b64)
+bool IsDbEffectBeingRenamed(int64_t effectId)
 {
-    return s_dbRename.active && s_dbRename.guid_b64 == guid_b64;
+    return s_dbEffectRename.active && s_dbEffectRename.effectId == effectId;
 }
 
-bool IsDbRenameActive()
+bool IsDbEffectRenameActive()
 {
-    return s_dbRename.active;
+    return s_dbEffectRename.active;
 }
 
-void RenderDbRenameEditor()
+void RenderDbEffectRenameEditor()
 {
     const float kFieldWidth = 250.0f;
 
-    ImGui::TextDisabled("Renaming this guid in the \"for science\" database only -- it has no JSON entry.");
+    if (s_dbEffectRename.guids.size() > 1)
+        ImGui::TextDisabled("Renaming this effect in the database -- applies to all %zu of its guids.",
+                             s_dbEffectRename.guids.size());
+    else
+        ImGui::TextDisabled("Renaming this effect in the database only.");
 
     ImGui::SetNextItemWidth(kFieldWidth);
-    ImGui::InputText("Name", s_dbRename.nameBuf, sizeof(s_dbRename.nameBuf));
+    ImGui::InputText("Name", s_dbEffectRename.nameBuf, sizeof(s_dbEffectRename.nameBuf));
 
     if (ImGui::Button("Save"))
     {
-        std::string trimmedName = s_dbRename.nameBuf;
+        std::string trimmedName = s_dbEffectRename.nameBuf;
         size_t start = trimmedName.find_first_not_of(" \t\r\n");
         size_t end   = trimmedName.find_last_not_of(" \t\r\n");
         trimmedName  = (start == std::string::npos) ? std::string() : trimmedName.substr(start, end - start + 1);
@@ -928,247 +930,96 @@ void RenderDbRenameEditor()
         }
         else
         {
-            DbRenameSaveJob job;
-            job.guid_b64 = s_dbRename.guid_b64;
-            job.newName  = trimmedName;
-
-            //_ Ends edit mode -- this node may move/disappear on reload.
-            s_pendingDbRename    = std::move(job);
-            s_hasPendingDbRename = true;
-            s_dbRename.active    = false;
+            s_pendingDbEffectRename.effectId = s_dbEffectRename.effectId;
+            s_pendingDbEffectRename.guids    = s_dbEffectRename.guids;
+            s_pendingDbEffectRename.newName  = trimmedName;
+            s_hasPendingDbEffectRename       = true;
+            s_dbEffectRename.active          = false;
         }
     }
     ImGui::SameLine();
     if (ImGui::Button("Cancel"))
-        CancelDbRename();
+        CancelDbEffectRename();
 }
 
-void ApplyPendingDbRename()
+void ApplyPendingDbEffectRename()
 {
-    if (!s_hasPendingDbRename)
+    if (!s_hasPendingDbEffectRename)
         return;
-    s_hasPendingDbRename = false;
+    s_hasPendingDbEffectRename = false;
 
-    const DbRenameSaveJob& job = s_pendingDbRename;
+    const DbEffectRenameSaveJob& job = s_pendingDbEffectRename;
 
-    if (!EffectDb_SetName(job.guid_b64, job.newName))
+    //_ Any one guid works -- EffectDb_SetName resolves to effect_id
+    // internally and updates every sibling row, not just the one bound
+    // here (see effect_db.h). job.guids can't be empty: BeginDbEffectRename
+    // is only ever called from a real DB tab node, which always has at
+    // least one guid by construction (see BuildDbTree).
+    if (job.guids.empty() || !EffectDb_SetName(job.guids.front(), job.newName))
     {
-        s_editResultMessage = "Rename failed: this guid is no longer known to the effect database.";
+        s_editResultMessage = "Rename failed: this effect is no longer known to the effect database.";
         return;
     }
 
     s_editResultMessage = "Renamed to \"" + job.newName + "\" in the effect database.";
-
-    //_ The overlay cache deliberately doesn't react to effect-db
-    // generation bumps alone (see OverlayCacheEntry) -- but this is a
-    // deliberate, user-clicked action, same trigger category as "pressing Refresh".
-    InvalidateInstalledTree();
+    //_ Deliberately NOT InvalidateInstalledTree() -- that's the JSON
+    // tab's overlay cache, which this never touches. The DB tab tracks
+    // its own rebuild-on-generation-change, see installed_tree_view.cpp.
 }
 
 //********************************************************************************
-// PromoteToJsonJob
+// DbEffectDragPayload storage
 //--------------------------------------------------------------------------------
-// guid_b64   the db-only guid being promoted
-//--------------------------------------------------------------------------------
-// Deliberately just the guid -- name/category_path are re-looked-up fresh
-// from the database at Apply time (see ApplyPendingPromote) rather than
-// carried from click time, same "re-find, don't trust a stale snapshot"
-// reasoning as every other ApplyPending* here.
-//--------------------------------------------------------------------------------
-struct PromoteToJsonJob
-{
-    std::string guid_b64;
-};
-static bool           s_hasPendingPromote = false;
-static PromoteToJsonJob s_pendingPromote;
+static DbEffectDragPayload s_dbEffectDragPayload;
 
-void QueuePromoteToJson(const std::string& guid_b64)
+void BeginDbEffectDrag(int64_t effectId, const std::vector<std::string>& guids, const std::string& effectName)
 {
-    s_pendingPromote.guid_b64 = guid_b64;
-    s_hasPendingPromote       = true;
+    s_dbEffectDragPayload.effectId   = effectId;
+    s_dbEffectDragPayload.guids      = guids;
+    s_dbEffectDragPayload.effectName = effectName;
 }
 
-//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-// JsonHasGuid
-//--------------------------------------------------------------------------------
-// True if `guid` already appears on some effect anywhere under `category`.
-// Guards ApplyPendingPromote against double-adding the same guid -- e.g.
-// two "Add to JSON" clicks queued in the same frame, or a guid that was
-// already promoted (by hand, or by a previous promote) since the db-only
-// node currently on screen was last built.
-//--------------------------------------------------------------------------------
-bool JsonHasGuid(const nlohmann::ordered_json& category, const std::string& guid)
+const DbEffectDragPayload& GetDbEffectDragPayload()
 {
-    if (category.contains("effects") && category["effects"].is_array())
-        for (const auto& eff : category["effects"])
-            if (eff.contains("guids") && eff["guids"].is_array())
-                for (const auto& g : eff["guids"])
-                    if (g.is_string() && g.get<std::string>() == guid)
-                        return true;
-
-    if (category.contains("categories") && category["categories"].is_array())
-        for (const auto& sub : category["categories"])
-            if (JsonHasGuid(sub, guid))
-                return true;
-
-    return false;
+    return s_dbEffectDragPayload;
 }
 
-//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-// FindOrCreateRealCategory
-//--------------------------------------------------------------------------------
-// Same name-path walk as installed_tree_overlay.cpp's file-local
-// FindOrCreateDiffCategory, but over a real, mutable sin file rather than a
-// display-only overlay copy -- so a category this creates is a genuine new
-// category on disk, not tagged "__vfxd_virtual". Not shared code with that
-// function since one writes a throwaway display copy and the other writes
-// what SaveInstalledSinFile is about to persist; conflating "virtual for
-// display" and "real on save" into one flag-driven function seemed more
-// error-prone than two short, single-purpose ones.
-//--------------------------------------------------------------------------------
-nlohmann::ordered_json* FindOrCreateRealCategory(nlohmann::ordered_json& root, const std::vector<std::string>& path)
+struct DbEffectCategoryPlacementJob
 {
-    nlohmann::ordered_json* cursor = &root;
-    for (const auto& segment : path)
-    {
-        if (!cursor->contains("categories") || !(*cursor)["categories"].is_array())
-            (*cursor)["categories"] = nlohmann::ordered_json::array();
-
-        nlohmann::ordered_json* next = nullptr;
-        for (auto& sub : (*cursor)["categories"])
-            if (sub.value("name", std::string()) == segment) { next = &sub; break; }
-
-        if (!next)
-        {
-            nlohmann::ordered_json newCat;
-            newCat["name"]       = segment;
-            newCat["categories"] = nlohmann::ordered_json::array();
-            newCat["effects"]    = nlohmann::ordered_json::array();
-            (*cursor)["categories"].push_back(std::move(newCat));
-            next = &(*cursor)["categories"].back();
-        }
-        cursor = next;
-    }
-    return cursor;
-}
-
-void ApplyPendingPromote()
-{
-    if (!s_hasPendingPromote)
-        return;
-    s_hasPendingPromote = false;
-
-    const std::string guid_b64 = s_pendingPromote.guid_b64;
-
-    EffectDbEffect dbEff;
-    if (!EffectDb_GetEffect(guid_b64, dbEff))
-    {
-        s_editResultMessage = "Add to JSON failed: this guid is no longer known to the effect database.";
-        return;
-    }
-
-    //_ Promotion always targets Greed -- see effect_db.h on why there's no
-    // per-guid file choice to make here.
-    nlohmann::ordered_json* rootPtr = FindInstalledJsonMutable("Greed");
-    if (!rootPtr)
-    {
-        s_editResultMessage = "Add to JSON failed: VfxD_Greed.json is no longer loaded.";
-        return;
-    }
-    nlohmann::ordered_json& root = *rootPtr;
-
-    if (JsonHasGuid(root, guid_b64))
-    {
-        s_editResultMessage = "Add to JSON: already has a JSON entry in Greed.";
-        //_ Force a rebuild -- the on-screen db-only node is stale.
-        InvalidateInstalledTree();
-        return;
-    }
-
-    //_ Same fallback bucket BuildEffectDbOverlayTree already displays an
-    // unplaced guid under -- see its own kUnplacedBucket.
-    static const std::vector<std::string> kUnplacedBucket = { "Unrecognized (for science)" };
-    const std::vector<std::string>& path = dbEff.categoryPath.empty() ? kUnplacedBucket : dbEff.categoryPath;
-
-    nlohmann::ordered_json* cat = FindOrCreateRealCategory(root, path);
-    if (!cat->contains("effects") || !(*cat)["effects"].is_array())
-        (*cat)["effects"] = nlohmann::ordered_json::array();
-
-    //_ Falls back to the guid itself when unnamed -- same reasoning as
-    // BuildEffectDbOverlayTree's own newEffect["name"] fallback.
-    std::string finalName = dbEff.name.empty() ? guid_b64 : dbEff.name;
-
-    nlohmann::ordered_json newEffect;
-    newEffect["name"]  = finalName;
-    newEffect["guids"] = nlohmann::ordered_json::array({ guid_b64 });
-    (*cat)["effects"].push_back(std::move(newEffect));
-
-    if (!TrySaveOrReport("Greed", "Added to JSON"))
-        return;
-
-    s_editResultMessage = "Added \"" + finalName + "\" to Greed's JSON.";
-    InvalidateInstalledTree(); //. force reload on next expand
-}
-
-static DbOnlyGuidDragPayload s_dbOnlyDragPayload;
-
-void BeginDbOnlyGuidDrag(const std::string& guid_b64, const std::string& effectName)
-{
-    s_dbOnlyDragPayload.guid_b64   = guid_b64;
-    s_dbOnlyDragPayload.effectName = effectName;
-}
-
-const DbOnlyGuidDragPayload& GetDbOnlyGuidDragPayload()
-{
-    return s_dbOnlyDragPayload;
-}
-
-//********************************************************************************
-// DbCategoryPlacementJob
-//--------------------------------------------------------------------------------
-// guid_b64        the db-only guid being placed
-// categoryPath    destination category's name path -- see
-//                 QueueDbCategoryPlacement's own comment
-// effectName      display name, for the result message -- captured at
-//                 Queue time, not re-read from the drag payload at Apply
-//--------------------------------------------------------------------------------
-struct DbCategoryPlacementJob
-{
-    std::string              guid_b64;
+    int64_t                  effectId = 0;
+    std::vector<std::string> guids;
     std::vector<std::string> categoryPath;
-    std::string              effectName;
+    std::string                effectName;
 };
-static bool                   s_hasPendingDbCategoryPlacement = false;
-static DbCategoryPlacementJob s_pendingDbCategoryPlacement;
+static bool                          s_hasPendingDbEffectCategoryPlacement = false;
+static DbEffectCategoryPlacementJob s_pendingDbEffectCategoryPlacement;
 
-void QueueDbCategoryPlacement(const std::string& guid_b64, const std::vector<std::string>& categoryPath)
+void QueueDbEffectCategoryPlacement(int64_t effectId, const std::vector<std::string>& guids, const std::vector<std::string>& categoryPath)
 {
-    s_pendingDbCategoryPlacement.guid_b64     = guid_b64;
-    s_pendingDbCategoryPlacement.categoryPath = categoryPath;
-    s_pendingDbCategoryPlacement.effectName   = s_dbOnlyDragPayload.effectName;
-    s_hasPendingDbCategoryPlacement           = true;
+    s_pendingDbEffectCategoryPlacement.effectId     = effectId;
+    s_pendingDbEffectCategoryPlacement.guids        = guids;
+    s_pendingDbEffectCategoryPlacement.categoryPath = categoryPath;
+    s_pendingDbEffectCategoryPlacement.effectName   = s_dbEffectDragPayload.effectName;
+    s_hasPendingDbEffectCategoryPlacement           = true;
 }
 
-void ApplyPendingDbCategoryPlacement()
+void ApplyPendingDbEffectCategoryPlacement()
 {
-    if (!s_hasPendingDbCategoryPlacement)
+    if (!s_hasPendingDbEffectCategoryPlacement)
         return;
-    s_hasPendingDbCategoryPlacement = false;
+    s_hasPendingDbEffectCategoryPlacement = false;
 
-    const DbCategoryPlacementJob& job = s_pendingDbCategoryPlacement;
+    const DbEffectCategoryPlacementJob& job = s_pendingDbEffectCategoryPlacement;
 
-    if (!EffectDb_SetCategoryPath(job.guid_b64, job.categoryPath))
+    if (job.guids.empty() || !EffectDb_SetCategoryPath(job.guids.front(), job.categoryPath))
     {
-        s_editResultMessage = "Category placement failed: this guid is no longer known to the effect database.";
+        s_editResultMessage = "Category placement failed: this effect is no longer known to the effect database.";
         return;
     }
 
     s_editResultMessage = "Moved \"" + job.effectName + "\" to " + JoinPath(job.categoryPath) + ".";
-
-    //_ Same reasoning as ApplyPendingDbRename: the overlay cache doesn't
-    // react to the generation bump on its own (see OverlayCacheEntry),
-    // but this is a deliberate, user-dragged action -- force the rebuild.
-    InvalidateInstalledTree();
+    //_ See ApplyPendingDbEffectRename's comment -- no InvalidateInstalledTree
+    // here either, same reasoning.
 }
 
 //********************************************************************************
@@ -1732,5 +1583,6 @@ bool AnyEditInFlight()
 {
     return IsEffectEditActive() || IsCategoryRenameActive() ||
            IsDeleteConfirmActive() || IsCreateCategoryActive() ||
-           IsDeleteEmptyConfirmActive() || IsDbRenameActive();
+           IsDeleteEmptyConfirmActive() ||
+           IsDbEffectRenameActive();
 }

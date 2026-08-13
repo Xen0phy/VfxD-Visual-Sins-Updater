@@ -17,8 +17,6 @@ namespace {
 // DiffGuidIndex
 //--------------------------------------------------------------------------------
 // guidToEffect         guid -> owning effect, over the overlay copy being built
-// guidToCategoryPath   guid -> the category path that effect currently
-//                      lives under
 //--------------------------------------------------------------------------------
 // Built once up front -- O(effects) -- rather than a fresh linear scan per
 // lookup, same idea as merge.cpp's own OldIndex (see ApplyMergePlan
@@ -26,18 +24,10 @@ namespace {
 // (FindOverlayEffectLocation); once ApplyMergePlan itself got the same
 // fix, there was no reason for this preview builder, doing the same shape
 // of work against the same size of tree, to stay slow.
-//
-// guidToCategoryPath exists purely so BuildEffectDbOverlayTree can sync
-// an already-JSON-known guid's REAL placement back into effect_db's own
-// category_path (see its use there) -- otherwise only guids placed via a
-// drag ever get a category_path in the db at all, even though most
-// captured guids were already sitting somewhere real in a sin file
-// before "for science" ever saw them.
 //--------------------------------------------------------------------------------
 struct DiffGuidIndex
 {
     std::unordered_map<std::string, nlohmann::ordered_json*> guidToEffect;
-    std::unordered_map<std::string, std::vector<std::string>> guidToCategoryPath;
 };
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -61,10 +51,7 @@ void IndexDiffCategory(nlohmann::ordered_json& category, DiffGuidIndex& idx, std
             if (eff.contains("guids") && eff["guids"].is_array())
                 for (auto& g : eff["guids"])
                     if (g.is_string())
-                    {
-                        idx.guidToEffect[g.get<std::string>()]       = &eff;
-                        idx.guidToCategoryPath[g.get<std::string>()] = pathSoFar;
-                    }
+                        idx.guidToEffect[g.get<std::string>()] = &eff;
 
     if (category.contains("categories") && category["categories"].is_array())
         for (auto& sub : category["categories"])
@@ -467,163 +454,5 @@ nlohmann::ordered_json BuildDuplicateOverlayTree(const nlohmann::ordered_json& i
         for (auto& cat : overlay["categories"])
             TagDuplicateGuidEffects(cat, dset);
 
-    return overlay;
-}
-
-//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-// BuildOccurrencesJson
-//--------------------------------------------------------------------------------
-// EffectDb_GetOccurrences(guid), reshaped into the flat JSON array
-// RenderEffectDbDetail groups at render time. Shared by both branches of
-// BuildEffectDbOverlayTree below -- a db-only guid and an already-
-// JSON-backed guid that also has capture data both need exactly this.
-// specialization_ids is pre-unpacked (see EffectDb_SpecOrCoreIdsInMask) so
-// the render-time consumer never touches EffectDbSpecializationMask's
-// lo/hi words directly.
-//--------------------------------------------------------------------------------
-nlohmann::ordered_json BuildOccurrencesJson(const std::string& guid_b64)
-{
-    nlohmann::ordered_json occurrences = nlohmann::ordered_json::array();
-    for (const auto& occ : EffectDb_GetOccurrences(guid_b64))
-    {
-        nlohmann::ordered_json o;
-        o["duration"]           = occ.duration;
-        o["a4"]                 = occ.a4;
-        o["a6"]                 = occ.a6;
-        o["self_mask"]          = static_cast<int>(occ.self_mask);
-        o["race_mask"]          = occ.raceMask;
-        //_ Flattened to a plain array of raw ids (1..127, see effect_db.h's
-        // EffectDbSpecializationMask) rather than the lo/hi words -- easier
-        // for the render-time consumer to iterate without redoing the unpack.
-        o["specialization_ids"] = EffectDb_SpecOrCoreIdsInMask(occ.specializationMask);
-        occurrences.push_back(std::move(o));
-    }
-    return occurrences;
-}
-
-//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-// BuildGroupsJson
-//--------------------------------------------------------------------------------
-// EffectDb_GetGroupsStarted/EffectDb_GetGroupsMemberOf(guid), reshaped
-// into the flat JSON RenderEffectDbDetail reads at render time -- same
-// "bake it into the cache once per rebuild, not once per frame" shape as
-// BuildOccurrencesJson right above. Two arrays under one object so the
-// tree's render side can tell "guids this one swept up when it opened a
-// group" apart from "groups this one got swept into" without a second
-// lookup.
-//--------------------------------------------------------------------------------
-nlohmann::ordered_json BuildGroupsJson(const std::string& guid_b64)
-{
-    nlohmann::ordered_json groups;
-
-    nlohmann::ordered_json started = nlohmann::ordered_json::array();
-    for (const auto& inst : EffectDb_GetGroupsStarted(guid_b64))
-    {
-        nlohmann::ordered_json s;
-        s["duration"] = inst.duration;
-        s["a4"]       = inst.a4;
-        s["members"]  = inst.memberGuids;
-        started.push_back(std::move(s));
-    }
-    groups["started"] = std::move(started);
-
-    nlohmann::ordered_json memberOf = nlohmann::ordered_json::array();
-    for (const auto& m : EffectDb_GetGroupsMemberOf(guid_b64))
-    {
-        nlohmann::ordered_json mo;
-        mo["starter_guid_b64"] = m.starterGuid_b64;
-        mo["duration"]         = m.duration;
-        mo["a4"]               = m.a4;
-        memberOf.push_back(std::move(mo));
-    }
-    groups["member_of"] = std::move(memberOf);
-
-    return groups;
-}
-
-//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-// BuildEffectDbOverlayTree
-//--------------------------------------------------------------------------------
-// See installed_tree_overlay.h for the contract. Reuses IndexDiffCategory
-// (find/skip already-JSON guids) and FindOrCreateDiffCategory (place a
-// db-only guid, materializing categories as needed) -- both already
-// file-local above, real reuse rather than a third copy of the same walk.
-//
-// "__vfxd_db_by_guid" is keyed by guid, not a flat field, because
-// guidToEffect maps every guid of a multi-guid (merged) effect to the
-// SAME json object -- a flat field would silently overwrite one guid's
-// captured data with another's. A synthetic db-only node's object always
-// has exactly one key, but sharing the shape lets RenderEffectDbDetail
-// use one code path for both cases.
-//--------------------------------------------------------------------------------
-nlohmann::ordered_json BuildEffectDbOverlayTree(const nlohmann::ordered_json& installed, const std::vector<EffectDbEffect>& dbEffects,
-                                                 size_t* outAddedCount)
-{
-    nlohmann::ordered_json overlay = installed;
-    if (!overlay.contains("categories") || !overlay["categories"].is_array())
-        overlay["categories"] = nlohmann::ordered_json::array();
-
-    DiffGuidIndex idx;
-    for (auto& cat : overlay["categories"])
-        IndexDiffCategory(cat, idx);
-
-    static const std::vector<std::string> kUnplacedBucket = { "Unrecognized (for science)" };
-
-    size_t added = 0;
-    for (const auto& dbEff : dbEffects)
-    {
-        nlohmann::ordered_json detail;
-        detail["block_group"]  = dbEff.blockGroup;
-        detail["block_member"] = dbEff.blockMember;
-        detail["type"]         = dbEff.type;
-        detail["occurrences"]  = BuildOccurrencesJson(dbEff.guid_b64);
-        detail["groups"]       = BuildGroupsJson(dbEff.guid_b64);
-
-        auto existingIt = idx.guidToEffect.find(dbEff.guid_b64);
-        if (existingIt != idx.guidToEffect.end())
-        {
-            //_ Enrich the real node in place -- not skipped, not tagged
-            // "__vfxd_db_only" (see the function's own comment for the
-            // "keyed by guid" shape).
-            nlohmann::ordered_json& existing = *existingIt->second;
-            if (!existing.contains("__vfxd_db_by_guid") || !existing["__vfxd_db_by_guid"].is_object())
-                existing["__vfxd_db_by_guid"] = nlohmann::ordered_json::object();
-            existing["__vfxd_db_by_guid"][dbEff.guid_b64] = std::move(detail);
-
-            //_ A guid that was JSON-known before capture never gets
-            // EffectDb_SetCategoryPath called (that's drag-only, for db-only
-            // guids) -- sync it here from `idx`; a no-op most rebuilds.
-            auto pathIt = idx.guidToCategoryPath.find(dbEff.guid_b64);
-            if (pathIt != idx.guidToCategoryPath.end() && pathIt->second != dbEff.categoryPath)
-                EffectDb_SetCategoryPath(dbEff.guid_b64, pathIt->second);
-
-            continue;
-        }
-
-        const std::vector<std::string>& path = dbEff.categoryPath.empty() ? kUnplacedBucket : dbEff.categoryPath;
-        nlohmann::ordered_json* cursor = FindOrCreateDiffCategory(overlay, path);
-
-        if (!cursor->contains("effects") || !(*cursor)["effects"].is_array())
-            (*cursor)["effects"] = nlohmann::ordered_json::array();
-
-        nlohmann::ordered_json newEffect;
-        //_ Falls back to the guid itself when name is "" (an unnamed
-        // type 1/11 marker row, or simply never renamed) -- an empty
-        // tree label would be worse than a guid-shaped one.
-        newEffect["name"]           = dbEff.name.empty() ? dbEff.guid_b64 : dbEff.name;
-        newEffect["guids"]          = nlohmann::ordered_json::array({ dbEff.guid_b64 });
-        newEffect["__vfxd_db_only"] = true;
-
-        //_ Same by-guid shape as the enrichment branch above, always
-        // exactly one key here (a synthetic node has only one guid).
-        nlohmann::ordered_json byGuid = nlohmann::ordered_json::object();
-        byGuid[dbEff.guid_b64] = std::move(detail);
-        newEffect["__vfxd_db_by_guid"] = std::move(byGuid);
-
-        (*cursor)["effects"].push_back(std::move(newEffect));
-        ++added;
-    }
-
-    if (outAddedCount) *outAddedCount = added;
     return overlay;
 }

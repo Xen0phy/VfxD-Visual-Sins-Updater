@@ -19,11 +19,15 @@
 // sense that matters here), or free-text notes (decided against -- too
 // much upkeep for a background capture tool).
 //
-// Backed by a single SQLite file (see EffectDb_Open), holding three
-// tables: effects (one row per identity, first-seen-wins on
-// guid_b64/block/type -- a later sighting never overwrites them, since
+// Backed by a single SQLite file (see EffectDb_Open), holding four
+// tables: effects (one row per guid, first-seen-wins on
+// guid/block/type -- a later sighting never overwrites them, since
 // that would paper over a real finding about the identity rather than
-// record one), occurrences (one row per distinct tuple per guid, race and
+// record one), effect_meta (one row per effect_id -- see below -- holding
+// the name/category/description/behavior-default fields that used to
+// live on effects directly; several guids of one merged effect share a
+// single effect_meta row rather than each carrying their own copy),
+// occurrences (one row per distinct tuple per guid, race and
 // profession+specialization each folded into their own bitmask rather
 // than one row per combination -- see EffectDbRaceMask and
 // EffectDbSpecializationMask), and group_members (which type:1/11 "starter" guid
@@ -35,11 +39,24 @@
 // a live type:1/11 run, and (duration, a4) pairs get reused across
 // unrelated effects, so grouping occurrences by a shared (duration, a4)
 // would silently merge data that was never actually together. See
-// EffectDb_RecordEvent for how all three tables are written, and
+// EffectDb_RecordEvent for how all four tables are written, and
 // EffectDb_GetGroupsStarted / EffectDb_GetGroupsMemberOf for how
 // group_members is read back as a raw membership browse -- not pattern
 // detection, which occurrence data is deliberately kept out of (see this
 // module's own design discussion).
+//
+// effect_id / effect_meta: a guid alone isn't the right identity to hang
+// a name/category on -- a single curated effect can be backed by several
+// guids at once (see EFFECT_DB_SOURCE_OF_TRUTH_HANDOFF.md), and keying
+// name/category storage by guid let those diverge even in a single-user
+// local db. Every effects row carries an effect_id; every guid that's
+// really "the same effect" shares one. This db's own capture never knows
+// about that grouping on its own (a captured event only ever carries one
+// guid) -- a brand-new guid always starts as its own singleton effect_id.
+// Real multi-guid grouping is decided by whatever populated this db's
+// effect_meta rows in the first place (see the handoff doc's "Where
+// effect_id comes from" -- this is intentionally out of this module's
+// scope).
 //--------------------------------------------------------------------------------
 
 #pragma once
@@ -215,17 +232,32 @@ struct EffectDbRawEvent
 //********************************************************************************
 // EffectDbEffect / EffectDbOccurrence
 //--------------------------------------------------------------------------------
-// Read-side mirrors of the two tables above, for the tree overlay and the
+// Read-side mirrors of the tables above, for the tree overlay and the
 // "for science" detail view to consume without touching SQL directly.
+// name/categoryPath/description/behavior* all come from effect_meta via
+// effect_id -- a join, from this struct's perspective, not a second call.
 //--------------------------------------------------------------------------------
 struct EffectDbEffect
 {
     std::string guid_b64;
+    int64_t     effect_id = 0;   //. shared by every guid of one effect -- see file header
     std::string name;
     std::string blockGroup;
     std::string blockMember;
-    int         type = 0;
+    int         type = -1;       //. -1 = not yet captured, see effect_db.cpp's schema note
+    bool        in_json = false; //. presence-only; never written by this module, see effect_db.cpp
+
     std::vector<std::string> categoryPath;  //. empty = not yet placed anywhere
+    std::string description;
+
+    //_ '' = no default set. Only behaviorType/behaviorCaster are
+    // meaningful text values; behaviorDuration only means anything when
+    // behaviorType == "SetDuration" (same sentinel-by-emptiness
+    // convention as everywhere else in this struct, not a separate
+    // has-value flag).
+    std::string behaviorType;
+    std::string behaviorCaster;
+    int         behaviorDuration = 0;
 };
 
 struct EffectDbOccurrence
@@ -286,6 +318,24 @@ void EffectDb_SetApi(AddonAPI_t* aApi);
 //--------------------------------------------------------------------------------
 bool EffectDb_Open(const std::string& denoiserAddonDir, std::string& outError);
 void EffectDb_Close();
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// EffectDb_EnsureOpenForBrowsing
+//--------------------------------------------------------------------------------
+// The DB tab's own entry point -- opens the database if it isn't already,
+// WITHOUT going through EffectDb_SetEnabled's gates. Deliberately doesn't
+// require EffectDb_GreedFileExists (a db can be real and populated with
+// capture toggled off, or even with no Greed.json at all -- see
+// EFFECT_DB_SOURCE_OF_TRUTH_HANDOFF.md: the db is meant to be authoritative
+// on its own, independent of "for science" being on), and doesn't touch
+// s_enabled either way -- browsing the DB tab must never silently turn
+// capture on, and toggling capture off later must not close a connection
+// the DB tab still needs open. A no-op if already open (from either this
+// or EffectDb_SetEnabled -- whichever got there first owns the connection,
+// both read the same file). Returns false (outError filled) only on a
+// real open/schema failure, same as EffectDb_Open.
+//--------------------------------------------------------------------------------
+bool EffectDb_EnsureOpenForBrowsing(const std::string& denoiserAddonDir, std::string& outError);
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // EffectDb_GreedFileExists
@@ -362,18 +412,26 @@ bool EffectDb_IsKnownGuid(const std::string& guid_b64);
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // EffectDb_GetGeneration
 //--------------------------------------------------------------------------------
-// Bumped on any write that could change what a tree overlay built from
-// this data should look like: a genuinely new effect row (not a dedup
-// no-op -- see EffectDb_RecordEvent, called at high frequency), a
-// successful EffectDb_SetName, or a successful EffectDb_SetCategoryPath.
-// Deliberately NOT bumped for a new occurrence row alone -- nothing the
-// tree currently renders depends on occurrences yet, and those vary too
-// often on an already-known guid to justify rebuilding for them too.
+// Bumped on any write that could change what the DB tab's tree should
+// look like: a genuinely new effect row (not a dedup no-op -- see
+// EffectDb_RecordEvent), a successful EffectDb_SetName or
+// EffectDb_SetCategoryPath, or a real occurrence/group_members write.
+//
+// That last one used to be deliberately excluded (occurrences seemed too
+// high-frequency, and nothing rendered them yet) -- but the DB tab now
+// displays occurrence/group detail directly (RenderEffectDbDetail), and
+// this is the only remaining reader of this counter (the JSON tab's old
+// overlay, which this comment used to also serve, is retired -- see
+// EFFECT_DB_SOURCE_OF_TRUTH_HANDOFF.md). Excluding occurrences meant an
+// already-known guid's fresh capture data -- the common case, since most
+// real effects arrive pre-seeded -- never showed up until something
+// unrelated happened to bump this counter. Bumping on every real write
+// is correct now that there's exactly one, cheap-to-rebuild consumer.
 //
 // Same purpose as GetInstalledTreeGeneration in installed_tree_store.h --
-// lets a cache built over this data (see BuildEffectDbOverlayTree in
-// installed_tree_overlay.h) tell "this changed" apart from "same
-// generation I already built from", without its own invalidation hook.
+// lets a cache built over this data (the DB tab's own tree) tell "this
+// changed" apart from "same generation I already built from", without
+// its own invalidation hook.
 //--------------------------------------------------------------------------------
 int EffectDb_GetGeneration();
 
@@ -424,27 +482,27 @@ std::vector<EffectDbGroupMembership> EffectDb_GetGroupsMemberOf(const std::strin
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // EffectDb_SetName
 //--------------------------------------------------------------------------------
-// Db-side half of a rename. No-op (returns false) if guid_b64 isn't
-// known yet. This does NOT touch any installed sin's JSON -- a rename of
-// a guid that also exists in an installed sin file is the one case
-// that's meant to write both places (see this module's own design
-// discussion), and the JSON half of that is the caller's job via the
-// existing FindInstalledJsonMutable/SaveInstalledSinFile path, same as
-// every other JSON edit in this addon. Calling only this function is
-// correct and sufficient for a guid that has no JSON entry at all.
+// SQL is the sole source of truth for an effect's name -- this never
+// touches, and is never touched by, any installed sin's JSON (see
+// EFFECT_DB_SOURCE_OF_TRUTH_HANDOFF.md: the JSON tab(s) and the db's own
+// view are fully independent, neither reads nor writes the other). Takes
+// a guid_b64 for caller convenience (that's what a tree click/quick-edit
+// naturally has on hand), but resolves it to that guid's effect_id first
+// and writes effect_meta -- so renaming any one guid of a multi-guid
+// effect renames the whole effect, every sibling guid included, not just
+// the one clicked. No-op (returns false) if guid_b64 isn't known yet.
 //--------------------------------------------------------------------------------
 bool EffectDb_SetName(const std::string& guid_b64, const std::string& name);
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // EffectDb_SetCategoryPath
 //--------------------------------------------------------------------------------
-// Db-only placement, e.g. from a drag-and-drop in the tree UI. Does NOT
-// write any JSON and does NOT require guid_b64 to ever be promoted --
-// this is what lets a db-only guid render in the correct spot in the
-// tree (materializing a virtual category header if categoryPath doesn't
-// exist in any installed sin yet, same shape as
-// installed_tree_overlay.cpp's FindOrCreateDiffCategory) well before, or
-// entirely without, an "add to JSON" action ever happening. No-op
-// (returns false) if guid_b64 isn't known yet.
+// SQL-only placement -- never touches, and is never touched by, any
+// installed sin's JSON (see EffectDb_SetName's comment just above; same
+// independence applies here). Resolves guid_b64 to its effect_id first
+// and writes effect_meta, so this moves the whole effect (every sibling
+// guid), not just the one clicked. Does not require guid_b64 to have
+// ever appeared in JSON at all. No-op (returns false) if guid_b64 isn't
+// known yet.
 //--------------------------------------------------------------------------------
 bool EffectDb_SetCategoryPath(const std::string& guid_b64, const std::vector<std::string>& categoryPath);
