@@ -258,6 +258,29 @@ struct EffectDbEffect
     std::string behaviorType;
     std::string behaviorCaster;
     int         behaviorDuration = 0;
+
+    //_ Externally seeded only (see EFFECT_DB_SOURCE_OF_TRUTH_HANDOFF.md's
+    // TODO_B.md item 7) -- a curated Greed-file position for generation
+    // to walk in. A capture-discovered guid gets MAX(sort_order)+1 at
+    // insert time (see effect_db.cpp's kInsertEffectMeta) so it sorts
+    // last rather than jumping ahead of curated content.
+    int sortOrder = 0;
+};
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// EffectDbCategory
+//--------------------------------------------------------------------------------
+// One row of the `categories` table -- a category's own description and
+// sort position, since neither can be recovered from effect_meta.category_path
+// alone (that's just a string on each effect row, not an entity with its
+// own identity). Externally seeded only, same as EffectDbEffect's curated
+// fields -- see EffectDb_GetAllCategories.
+//--------------------------------------------------------------------------------
+struct EffectDbCategory
+{
+    std::vector<std::string> categoryPath;  //. full path, split on the category delimiter
+    std::string description;
+    int sortOrder = 0;
 };
 
 struct EffectDbOccurrence
@@ -461,6 +484,14 @@ int EffectDb_GetGeneration();
 //--------------------------------------------------------------------------------
 bool EffectDb_GetEffect(const std::string& guid_b64, EffectDbEffect& out);
 std::vector<EffectDbEffect> EffectDb_GetAllEffects();
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// EffectDb_GetAllCategories
+//--------------------------------------------------------------------------------
+// Full `categories` table, for SinGenerator's category-node materialization
+// (description + sort_order) -- see EffectDbCategory above.
+//--------------------------------------------------------------------------------
+std::vector<EffectDbCategory> EffectDb_GetAllCategories();
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // EffectDb_GetOccurrences

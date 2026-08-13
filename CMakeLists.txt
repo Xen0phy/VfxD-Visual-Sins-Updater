@@ -45,6 +45,7 @@ add_library(VfxDSinsUpdater SHARED src/addon/addon.cpp
     src/core/live_log.cpp
     src/core/merge.cpp
     src/core/sin_files.cpp
+    src/core/sin_generator.cpp
     src/core/specialization_info.cpp
     src/core/tree/installed_tree_overlay.cpp
     src/core/tree/installed_tree_search.cpp

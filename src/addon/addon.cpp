@@ -31,9 +31,11 @@
 #include "live_log_ui.h"
 #include "report_ui.h"
 #include "sin_files.h"
+#include "sin_generator.h"
 #include "ui_colors.h"
 
 #include <atomic>
+#include <fstream>
 #include <string>
 
 static std::string s_denoiserAddonDir;
@@ -111,6 +113,68 @@ static void RenderSinDiffStatus(const SinDiffInfo* diff)
             ImGui::TextColored(kDuplicateColor, "%d settings conflict%s -- review before applying.",
                 conflictCount, conflictCount == 1 ? "" : "s");
     }
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// RenderGenerateFromSqlButton
+//--------------------------------------------------------------------------------
+// TODO_B.md item 7's "testing-only button, not wired into the real
+// pipeline yet" -- a second button per sin column, alongside (not
+// replacing) the Install/Update button above. Opens the effect db for
+// browsing only (never enables capture -- see EffectDb_EnsureOpenForBrowsing),
+// runs SinGenerator_Generate, and writes the result to a clearly separate
+// *.from_sql.test.json path next to the real sin files -- never one of the
+// filenames sin_files.h's own scanner recognizes, so it can never be
+// picked up as a real installed file by accident. Purely for eyeballing
+// the output against the real download/generate_sins.py path before
+// anything downstream is asked to trust it.
+//--------------------------------------------------------------------------------
+static void RenderGenerateFromSqlButton(const std::string& denoiserAddonDir, const std::string& sinName)
+{
+    static std::string s_lastGenerateMsg;
+    static std::string s_lastGenerateSin;
+
+    if (ImGui::SmallButton("Generate from SQL (test)"))
+    {
+        std::string openError;
+        if (!EffectDb_EnsureOpenForBrowsing(denoiserAddonDir, openError))
+        {
+            s_lastGenerateSin = sinName;
+            s_lastGenerateMsg = "Couldn't open effect db: " + openError;
+        }
+        else
+        {
+            ESinGeneratorVariant variant = ESinGeneratorVariant::Gluttony;
+            if (sinName == "Pride")      variant = ESinGeneratorVariant::Pride;
+            else if (sinName == "Sloth") variant = ESinGeneratorVariant::Sloth;
+
+            //_ Test-button placeholder only: major/minor is the in-file
+            // {"version": {...}} object's own numbering (see
+            // sin_generator.h), a completely separate concept from
+            // installedVersion (SinUpdateInfo's filename-suffix int, used
+            // only for GitHub-diffing -- see sin_files.h). 1, 10 is a
+            // fixed placeholder, not derived from anything -- nothing in
+            // this pass defines what a SQL-generated file's version
+            // should actually be (see TODO_B.md item 7's "not decided
+            // yet" list).
+            nlohmann::ordered_json generated = SinGenerator_Generate(variant, /*major*/ 1, /*minor*/ 10);
+
+            std::string outPath = denoiserAddonDir + "/VfxD_" + sinName + ".from_sql.test.json";
+            std::ofstream out(outPath, std::ios::binary | std::ios::trunc);
+            s_lastGenerateSin = sinName;
+            if (!out)
+            {
+                s_lastGenerateMsg = "Couldn't write " + outPath;
+            }
+            else
+            {
+                out << generated.dump(2);
+                s_lastGenerateMsg = "Wrote " + outPath;
+            }
+        }
+    }
+    if (s_lastGenerateSin == sinName && !s_lastGenerateMsg.empty())
+        ImGui::TextWrapped("%s", s_lastGenerateMsg.c_str());
 }
 
 } //. namespace
@@ -243,6 +307,8 @@ static void RenderSinActionRow()
         {
             ImGui::Button("Up to date");
         }
+
+        RenderGenerateFromSqlButton(s_denoiserAddonDir, sinName);
 
         ImGui::NextColumn();
         ImGui::PopID();

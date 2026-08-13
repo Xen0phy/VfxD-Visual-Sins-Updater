@@ -96,7 +96,14 @@ CREATE TABLE effect_meta (
   description   TEXT NOT NULL DEFAULT '',
   behavior_type     TEXT NOT NULL DEFAULT '',
   behavior_caster   TEXT NOT NULL DEFAULT '',
-  behavior_duration INTEGER
+  behavior_duration INTEGER,
+  sort_order        INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE categories (
+  category_path TEXT PRIMARY KEY,
+  description   TEXT NOT NULL DEFAULT '',
+  sort_order    INTEGER NOT NULL
 );
 
 CREATE TABLE occurrences (
@@ -135,16 +142,28 @@ class Effect:
         self.behaviors = behaviors  # list[dict]
 
 
-def walk_categories(node, path_so_far, out_effects, warnings):
+def walk_categories(node, path_so_far, out_effects, out_categories, seen_categories, warnings):
     """Recurse the same shape IndexDiffCategory/RenderCategoryTree walk --
     push this category's own name, recurse into subcategories, then walk
-    this category's own effects with the now-complete path."""
+    this category's own effects with the now-complete path.
+
+    out_categories collects (path_tuple, description) in first-reference
+    DFS order -- the same "materialize on first reference" order
+    sin_generator.cpp's FindOrCreateCategory uses when it later walks SQL
+    rows back out in sort_order, so a category's sort_order here has to
+    be assigned at the moment its path is first seen, not at the moment
+    an effect happens to land in it (a category can be entered via a
+    subcategory before it ever gets a direct effect)."""
     name = node.get("name")
     if name is not None:
         path_so_far = path_so_far + [name]
+        path_tuple = tuple(path_so_far)
+        if path_tuple not in seen_categories:
+            seen_categories.add(path_tuple)
+            out_categories.append((path_tuple, node.get("description", "") or ""))
 
     for sub in node.get("categories", []) or []:
-        walk_categories(sub, path_so_far, out_effects, warnings)
+        walk_categories(sub, path_so_far, out_effects, out_categories, seen_categories, warnings)
 
     for eff in node.get("effects", []) or []:
         guids = eff.get("guids") or []
@@ -165,10 +184,12 @@ def walk_categories(node, path_so_far, out_effects, warnings):
 
 def build_effects(root_categories):
     out_effects = []
+    out_categories = []
+    seen_categories = set()
     warnings = []
     for cat in root_categories:
-        walk_categories(cat, [], out_effects, warnings)
-    return out_effects, warnings
+        walk_categories(cat, [], out_effects, out_categories, seen_categories, warnings)
+    return out_effects, out_categories, warnings
 
 
 def main():
@@ -196,7 +217,7 @@ def main():
         print("error: input JSON has no top-level \"categories\" array -- is this a VfxD file?", file=sys.stderr)
         sys.exit(1)
 
-    effects, walk_warnings = build_effects(data["categories"])
+    effects, categories, walk_warnings = build_effects(data["categories"])
 
     # ---- integrity check: a guid must belong to exactly one effect ----
     guid_owner = {}
@@ -246,6 +267,9 @@ def main():
     print(f"  effects to write: {len(kept_effects)}")
     total_guids = sum(len(e.guids) for e in kept_effects)
     print(f"  total guid rows to write: {total_guids}")
+    print(f"  categories found (first-reference order): {len(categories)}")
+    with_cat_desc = sum(1 for _, d in categories if d)
+    print(f"  categories with a description: {with_cat_desc}")
     with_desc = sum(1 for e in kept_effects if e.description)
     print(f"  effects with a description: {with_desc}")
     with_one_behavior = sum(1 for e in kept_effects if len(e.behaviors) == 1)
@@ -270,8 +294,14 @@ def main():
     conn = sqlite3.connect(str(args.output))
     conn.executescript(SCHEMA)
 
+    for order, (path_tuple, description) in enumerate(categories):
+        conn.execute(
+            "INSERT INTO categories (category_path, description, sort_order) VALUES (?, ?, ?)",
+            (CATEGORY_DELIM.join(path_tuple), description, order),
+        )
+
     next_effect_id = 1
-    for eff in kept_effects:
+    for sort_order, eff in enumerate(kept_effects):
         effect_id = next_effect_id
         next_effect_id += 1
 
@@ -289,9 +319,9 @@ def main():
 
         conn.execute(
             "INSERT INTO effect_meta (effect_id, name, category_path, description, "
-            "behavior_type, behavior_caster, behavior_duration) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "behavior_type, behavior_caster, behavior_duration, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (effect_id, eff.name, category_path, eff.description,
-             behavior_type, behavior_caster, behavior_duration),
+             behavior_type, behavior_caster, behavior_duration, sort_order),
         )
 
         for g in eff.guids:
@@ -305,7 +335,7 @@ def main():
     conn.close()
 
     print(f"\nWrote {args.output} "
-          f"({len(kept_effects)} effects, {total_guids} guid rows).")
+          f"({len(kept_effects)} effects, {total_guids} guid rows, {len(categories)} categories).")
 
 
 if __name__ == "__main__":

@@ -165,8 +165,16 @@ bool PrepareAllStatements(std::string& outError)
     // can't know about sibling guids of the same effect (see the header's
     // file comment), so a brand-new guid always starts as its own
     // singleton effect_id/effect_meta row.
+    //_ sort_order stamped as MAX(sort_order)+1 at insert time (TODO_B.md
+    // item 7's "not-yet-curated capture can't jump ahead of real content"
+    // rule) -- a brand-new capture-discovered guid was never in the
+    // curated source Greed used to seed this db, so it has no natural
+    // file position and sorts last if it's ever placed into a category.
+    // COALESCE covers the very first row ever inserted (MAX over an empty
+    // table is NULL).
     static const char* kInsertEffectMeta =
-        "INSERT INTO effect_meta (effect_id, name) VALUES (NULL, ?1)";
+        "INSERT INTO effect_meta (effect_id, name, sort_order) "
+        "VALUES (NULL, ?1, (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM effect_meta))";
 
     static const char* kSelectEffectId =
         "SELECT effect_id FROM effects WHERE guid_b64 = ?1";
@@ -193,7 +201,8 @@ bool PrepareAllStatements(std::string& outError)
     static const char* kSelectEffect =
         "SELECT e.effect_id, e.block_group, e.block_member, e.type, e.in_json, "
         "       COALESCE(m.name, ''), COALESCE(m.category_path, ''), COALESCE(m.description, ''), "
-        "       COALESCE(m.behavior_type, ''), COALESCE(m.behavior_caster, ''), m.behavior_duration "
+        "       COALESCE(m.behavior_type, ''), COALESCE(m.behavior_caster, ''), m.behavior_duration, "
+        "       COALESCE(m.sort_order, 0) "
         "FROM effects e LEFT JOIN effect_meta m ON m.effect_id = e.effect_id "
         "WHERE e.guid_b64 = ?1";
 
@@ -293,7 +302,19 @@ bool CreateSchemaIfNeeded(std::string& outError)
         "  description       TEXT NOT NULL DEFAULT '',"
         "  behavior_type     TEXT NOT NULL DEFAULT '',"
         "  behavior_caster   TEXT NOT NULL DEFAULT '',"
-        "  behavior_duration INTEGER"
+        "  behavior_duration INTEGER,"
+        "  sort_order        INTEGER NOT NULL DEFAULT 0"
+        ");"
+        //_ New per TODO_B.md item 7 -- categories aren't entities anywhere
+        // else in this schema (category_path is just a string on each
+        // effect_meta row), so generation has nowhere else to read a
+        // category's own description/order from. Populated externally by
+        // the seed script only, same as effect_meta -- this module never
+        // writes a row here itself, see SinGenerator_Generate.
+        "CREATE TABLE IF NOT EXISTS categories ("
+        "  category_path TEXT PRIMARY KEY,"
+        "  description   TEXT NOT NULL DEFAULT '',"
+        "  sort_order    INTEGER NOT NULL"
         ");"
         "CREATE TABLE IF NOT EXISTS occurrences ("
         "  guid_b64                 TEXT NOT NULL REFERENCES effects(guid_b64),"
@@ -340,6 +361,21 @@ bool CreateSchemaIfNeeded(std::string& outError)
                    std::string(checkErr ? checkErr : "unknown error") +
                    ") -- delete or replace vfxd_effect_db.sqlite3 with a freshly-seeded one";
         sqlite3_free(checkErr);
+        return false;
+    }
+
+    //_ Same idea, for the sort_order column added by TODO_B.md item 7 --
+    // a db seeded before that change has effect_meta but no sort_order,
+    // and generation would otherwise fail deep inside SinGenerator_Generate
+    // instead of here. Reseeding (not a migration) is still the fix, per
+    // the handoff's "nothing to migrate" stance.
+    char* sortOrderErr = nullptr;
+    if (sqlite3_exec(s_db, "SELECT sort_order FROM effect_meta LIMIT 1;", nullptr, nullptr, &sortOrderErr) != SQLITE_OK)
+    {
+        outError = "effect db at this path predates the sort_order/categories schema (" +
+                   std::string(sortOrderErr ? sortOrderErr : "unknown error") +
+                   ") -- reseed vfxd_effect_db.sqlite3 with an up-to-date seed_effect_db.py";
+        sqlite3_free(sortOrderErr);
         return false;
     }
     return true;
@@ -652,6 +688,7 @@ bool EffectDb_GetEffect(const std::string& guid_b64, EffectDbEffect& out)
     out.behaviorType       = reinterpret_cast<const char*>(sqlite3_column_text(s_selectEffectStmt, 8));
     out.behaviorCaster     = reinterpret_cast<const char*>(sqlite3_column_text(s_selectEffectStmt, 9));
     out.behaviorDuration   = sqlite3_column_int(s_selectEffectStmt, 10);  //. NULL -> 0, only meaningful when behaviorType == "SetDuration"
+    out.sortOrder           = sqlite3_column_int(s_selectEffectStmt, 11);
     return true;
 }
 
@@ -667,7 +704,8 @@ std::vector<EffectDbEffect> EffectDb_GetAllEffects()
     static const char* kSelectAll =
         "SELECT e.guid_b64, e.effect_id, e.block_group, e.block_member, e.type, e.in_json, "
         "       COALESCE(m.name, ''), COALESCE(m.category_path, ''), COALESCE(m.description, ''), "
-        "       COALESCE(m.behavior_type, ''), COALESCE(m.behavior_caster, ''), m.behavior_duration "
+        "       COALESCE(m.behavior_type, ''), COALESCE(m.behavior_caster, ''), m.behavior_duration, "
+        "       COALESCE(m.sort_order, 0) "
         "FROM effects e LEFT JOIN effect_meta m ON m.effect_id = e.effect_id";
 
     if (sqlite3_prepare_v2(s_db, kSelectAll, -1, &stmt, nullptr) != SQLITE_OK)
@@ -688,7 +726,44 @@ std::vector<EffectDbEffect> EffectDb_GetAllEffects()
         e.behaviorType       = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 9));
         e.behaviorCaster     = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 10));
         e.behaviorDuration   = sqlite3_column_int(stmt, 11);
+        e.sortOrder           = sqlite3_column_int(stmt, 12);
         out.push_back(std::move(e));
+    }
+
+    sqlite3_finalize(stmt);
+    return out;
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// EffectDb_GetAllCategories
+//--------------------------------------------------------------------------------
+// Full `categories` table -- externally seeded only (see the schema
+// comment in CreateSchemaIfNeeded), read here purely so SinGenerator can
+// look up a category's own description/sort_order when it materializes
+// that category node, the same way BuildDbTree looks up effect_meta rows.
+// Not on the hot path (called once per Generate click, not per frame), so
+// an ad-hoc prepare/step/finalize here is fine -- same reasoning as
+// EffectDb_GetAllEffects just above.
+//--------------------------------------------------------------------------------
+std::vector<EffectDbCategory> EffectDb_GetAllCategories()
+{
+    std::vector<EffectDbCategory> out;
+    if (!s_db) return out;
+
+    sqlite3_stmt* stmt = nullptr;
+    static const char* kSelectAllCategories =
+        "SELECT category_path, description, sort_order FROM categories";
+
+    if (sqlite3_prepare_v2(s_db, kSelectAllCategories, -1, &stmt, nullptr) != SQLITE_OK)
+        return out;
+
+    while (sqlite3_step(stmt) == SQLITE_ROW)
+    {
+        EffectDbCategory c;
+        c.categoryPath = SplitCategoryPath(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0)));
+        c.description  = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        c.sortOrder     = sqlite3_column_int(stmt, 2);
+        out.push_back(std::move(c));
     }
 
     sqlite3_finalize(stmt);
