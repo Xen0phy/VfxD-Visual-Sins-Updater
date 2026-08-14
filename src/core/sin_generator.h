@@ -68,3 +68,21 @@ enum class ESinGeneratorVariant
 // separately first if "nothing to generate" needs its own message.
 //--------------------------------------------------------------------------------
 nlohmann::ordered_json SinGenerator_Generate(ESinGeneratorVariant variant, int major, int minor);
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// SinGenerator_CountEmittedGuids
+//--------------------------------------------------------------------------------
+// The guid count SinGenerator_Generate(variant, ...) would actually emit
+// for that sin -- i.e. every EffectDbEffect row that survives this
+// variant's filtering (non-empty categoryPath; for Sloth, also not under
+// a top-level "Caution" category), counted directly rather than by
+// building the full json tree. Deliberately NOT a raw
+// `SELECT COUNT(*) FROM effects`/allEffects.size() -- see
+// EFFECT_DB_D1_HANDOFF.md item 8: an effect with an empty categoryPath
+// (or, for Sloth, one under "Caution") is counted by that but excluded
+// by generation, and this is meant to match what a caller would see if
+// it actually generated the file and counted guids in the output. This
+// is the number sql_update.h's update-availability check compares
+// against a sin's installed filename version.
+//--------------------------------------------------------------------------------
+int SinGenerator_CountEmittedGuids(ESinGeneratorVariant variant);

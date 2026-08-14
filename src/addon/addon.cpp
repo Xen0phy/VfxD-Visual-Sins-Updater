@@ -31,11 +31,10 @@
 #include "live_log_ui.h"
 #include "report_ui.h"
 #include "sin_files.h"
-#include "sin_generator.h"
+#include "sql_update.h"
 #include "ui_colors.h"
 
 #include <atomic>
-#include <fstream>
 #include <string>
 
 static std::string s_denoiserAddonDir;
@@ -53,6 +52,42 @@ static std::atomic<bool> s_denoiserFound{false};
 // Installing.../Applying... instead of a generic busy state -- at most
 // one is pending, per github_update.cpp's single in-flight guard.
 static std::string s_pendingActionSin;
+
+//_ Set when the user clicks a SQL Install/Apply action so the message
+// underneath is attributed to the sin that produced it (ApplySqlUpdate/
+// InstallSqlSin are synchronous, so there's no "pending" state the way
+// the GitHub column has -- the call has already finished by the time
+// the button click is processed).
+static std::string s_lastSqlMessageSin;
+static std::string s_lastSqlMessage;
+
+//_ Cached synchronous CheckSqlUpdates() result -- see RefreshSqlSinInfo.
+// Unlike GetSinUpdateInfo()/GetCheckStatus() (github_update.h), there's
+// no background thread updating this on its own; it's refreshed lazily
+// on first render and again after anything that could have changed it
+// (a successful Install/Apply here), same "re-verify against what's
+// actually on disk" reasoning StartApplyUpdate/StartInstallSin already
+// apply to their own GitHub-sourced counterparts.
+static std::vector<SqlSinUpdateInfo> s_sqlSinInfo;
+static bool                          s_sqlSinInfoLoaded = false;
+static std::string                   s_sqlCheckError;
+
+namespace {
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// RefreshSqlSinInfo
+//--------------------------------------------------------------------------------
+// Runs CheckSqlUpdates synchronously (a local SQLite read + a filesystem
+// scan -- cheap enough to call on demand, not every frame; see
+// sql_update.h) and latches the result into the statics above.
+//--------------------------------------------------------------------------------
+static void RefreshSqlSinInfo(const std::string& denoiserAddonDir)
+{
+    s_sqlSinInfo = CheckSqlUpdates(denoiserAddonDir, s_sqlCheckError);
+    s_sqlSinInfoLoaded = true;
+}
+
+} //. namespace
 
 namespace {
 
@@ -116,65 +151,116 @@ static void RenderSinDiffStatus(const SinDiffInfo* diff)
 }
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-// RenderGenerateFromSqlButton
+// RenderSqlSinAction
 //--------------------------------------------------------------------------------
-// TODO_B.md item 7's "testing-only button, not wired into the real
-// pipeline yet" -- a second button per sin column, alongside (not
-// replacing) the Install/Update button above. Opens the effect db for
-// browsing only (never enables capture -- see EffectDb_EnsureOpenForBrowsing),
-// runs SinGenerator_Generate, and writes the result to a clearly separate
-// *.from_sql.test.json path next to the real sin files -- never one of the
-// filenames sin_files.h's own scanner recognizes, so it can never be
-// picked up as a real installed file by accident. Purely for eyeballing
-// the output against the real download/generate_sins.py path before
-// anything downstream is asked to trust it.
+// TODO_B.md item 8 / EFFECT_DB_D1_HANDOFF.md's local-db-sourced update
+// path -- the real thing item 7's old "Generate from SQL (test)" button
+// was standing in for, now mirroring the GitHub column's own Install/
+// "Update available" -> "Apply changes"/Up to date shape via
+// sql_update.h instead of github_update.h. Deliberately side by side
+// with the GitHub column above (owner's call), not replacing it -- the
+// GitHub column only goes away once D1 is fully integrated, the last
+// step in that direction, not this one.
+//
+// Unlike the GitHub column, every call here (CheckSqlUpdates/
+// LoadSqlDiff/ApplySqlUpdate/InstallSqlSin) is synchronous -- no
+// Checking.../Installing... busy state to render, the click has already
+// resolved by the time the next line runs. RenderSinDiffStatus is reused
+// as-is (it only reads a SinDiffInfo -- see sql_update.h reusing that
+// struct/EDiffStatus/ESinUpdateState from github_update.h wholesale, so
+// nothing about that function's wording needed to change for a
+// SQL-sourced diff instead of a GitHub-sourced one).
 //--------------------------------------------------------------------------------
-static void RenderGenerateFromSqlButton(const std::string& denoiserAddonDir, const std::string& sinName)
+static void RenderSqlSinAction(const std::string& denoiserAddonDir, const std::string& sinName)
 {
-    static std::string s_lastGenerateMsg;
-    static std::string s_lastGenerateSin;
+    if (!s_sqlSinInfoLoaded)
+        RefreshSqlSinInfo(denoiserAddonDir);
 
-    if (ImGui::SmallButton("Generate from SQL (test)"))
+    ImGui::TextDisabled("SQL (local db)");
+
+    if (!s_sqlCheckError.empty())
     {
-        std::string openError;
-        if (!EffectDb_EnsureOpenForBrowsing(denoiserAddonDir, openError))
+        ImGui::TextColored(ImVec4(0.9f, 0.4f, 0.4f, 1.0f), "%s", s_sqlCheckError.c_str());
+        if (ImGui::SmallButton("Retry##sqlCheck"))
+            RefreshSqlSinInfo(denoiserAddonDir);
+    }
+
+    const SqlSinUpdateInfo* info = nullptr;
+    for (const auto& s : s_sqlSinInfo)
+        if (s.sinName == sinName) { info = &s; break; }
+
+    //_ No result yet (check errored, or hasn't run) reads as NotInstalled,
+    // same fallback RenderSinActionRow uses for the GitHub column.
+    ESinUpdateState state = info ? info->state : ESinUpdateState::NotInstalled;
+
+    if (state == ESinUpdateState::NotInstalled)
+    {
+        if (ImGui::Button("Install##sql"))
         {
-            s_lastGenerateSin = sinName;
-            s_lastGenerateMsg = "Couldn't open effect db: " + openError;
+            std::string msg;
+            bool ok = InstallSqlSin(denoiserAddonDir, sinName, msg);
+            s_lastSqlMessageSin = sinName;
+            s_lastSqlMessage    = msg;
+            if (ok)
+                RefreshSqlSinInfo(denoiserAddonDir); //. re-verify against what's actually on disk
         }
-        else
+    }
+    else if (state == ESinUpdateState::UpdateAvailable)
+    {
+        if (info)
+            ImGui::Text("%d guids -> %d guids", info->installedVersion, info->latestVersion);
+
+        SinDiffInfo diff = GetSqlDiffInfo(sinName);
+
+        const char* label = "Update available";
+        bool clickable = true;
+        bool isApplyStep = false;
+        switch (diff.status)
         {
-            ESinGeneratorVariant variant = ESinGeneratorVariant::Gluttony;
-            if (sinName == "Pride")      variant = ESinGeneratorVariant::Pride;
-            else if (sinName == "Sloth") variant = ESinGeneratorVariant::Sloth;
+            case EDiffStatus::NotLoaded:
+                label = "Update available"; break;
+            case EDiffStatus::Ready:
+                label = "Apply changes"; isApplyStep = true; break;
+            case EDiffStatus::Error:
+                label = "Error -- retry"; break;
+            case EDiffStatus::Blocked:
+                label = "Blocked -- see below"; break;
+            case EDiffStatus::Loading:
+                //_ LoadSqlDiff is synchronous -- this status is never
+                // actually returned here, kept only because EDiffStatus
+                // is shared with the (async) GitHub path.
+                label = "Loading..."; clickable = false; break;
+        }
 
-            //_ Test-button placeholder only: major/minor is the in-file
-            // {"version": {...}} object's own numbering (see
-            // sin_generator.h), a completely separate concept from
-            // installedVersion (SinUpdateInfo's filename-suffix int, used
-            // only for GitHub-diffing -- see sin_files.h). 1, 10 is a
-            // fixed placeholder, not derived from anything -- nothing in
-            // this pass defines what a SQL-generated file's version
-            // should actually be (see TODO_B.md item 7's "not decided
-            // yet" list).
-            nlohmann::ordered_json generated = SinGenerator_Generate(variant, /*major*/ 1, /*minor*/ 10);
-
-            std::string outPath = denoiserAddonDir + "/VfxD_" + sinName + ".from_sql.test.json";
-            std::ofstream out(outPath, std::ios::binary | std::ios::trunc);
-            s_lastGenerateSin = sinName;
-            if (!out)
+        if (ImGui::Button((std::string(label) + "##sql").c_str()) && clickable)
+        {
+            if (isApplyStep)
             {
-                s_lastGenerateMsg = "Couldn't write " + outPath;
+                std::string msg;
+                bool ok = ApplySqlUpdate(denoiserAddonDir, sinName, msg);
+                s_lastSqlMessageSin = sinName;
+                s_lastSqlMessage    = msg;
+                if (ok)
+                    RefreshSqlSinInfo(denoiserAddonDir); //. re-verify, same as ApplyUpdate's GitHub counterpart
             }
             else
             {
-                out << generated.dump(2);
-                s_lastGenerateMsg = "Wrote " + outPath;
+                LoadSqlDiff(denoiserAddonDir, sinName);
             }
         }
+
+        SinDiffInfo diffForDisplay = GetSqlDiffInfo(sinName);
+        RenderSinDiffStatus(&diffForDisplay);
     }
-    if (s_lastGenerateSin == sinName && !s_lastGenerateMsg.empty())
-        ImGui::TextWrapped("%s", s_lastGenerateMsg.c_str());
+    //_ UpToDate falls here (Unknown too -- nothing actionable, same as
+    // the GitHub column's own fallback).
+    else
+    {
+        ImGui::Button("Up to date##sql");
+    }
+
+    if (s_lastSqlMessageSin == sinName && !s_lastSqlMessage.empty())
+        ImGui::TextWrapped("%s", s_lastSqlMessage.c_str());
 }
 
 } //. namespace
@@ -222,7 +308,19 @@ static void RenderSinActionRow()
 
     //_ imgui 1.80 lacks BeginDisabled/EndDisabled; buttons below swap
     // label or ignore the click instead of true graying-out.
-    ImGui::Columns(kSinCount, "sin_action_columns", false);
+    //
+    // GitHub's own action content is state-dependent height (NotInstalled
+    // is a couple lines, UpdateAvailable with a loaded diff can be five
+    // or six) -- different per sin. Stacking the SQL section directly
+    // underneath it *inside the same per-sin column* would start each
+    // sin's SQL block at whatever Y its own GitHub content happened to
+    // end at, staggering the three "SQL (local db)" blocks against each
+    // other (a staircase, one found by actually looking at the running
+    // addon rather than just compiling it). Two separate Columns() rows
+    // -- GitHub's, then SQL's -- fixes it: each row starts fresh at the
+    // same Y for all three columns (see ImGui::NextColumn()'s LineMinY
+    // reset), so only within-row bottoms can differ, not tops.
+    ImGui::Columns(kSinCount, "sin_github_columns", false);
     for (int i = 0; i < kSinCount; ++i)
     {
         std::string sinName = kSinNames[i];
@@ -230,6 +328,7 @@ static void RenderSinActionRow()
 
         ImGui::TextColored(ImVec4(0.85f, 0.75f, 0.35f, 1.0f), "%s", sinName.c_str());
         ImGui::TextWrapped("%s", kSinDescriptions[i]);
+        ImGui::TextDisabled("GitHub");
 
         const SinUpdateInfo* info = nullptr;
         for (const auto& s : sinInfo)
@@ -308,7 +407,25 @@ static void RenderSinActionRow()
             ImGui::Button("Up to date");
         }
 
-        RenderGenerateFromSqlButton(s_denoiserAddonDir, sinName);
+        ImGui::NextColumn();
+        ImGui::PopID();
+    }
+    ImGui::Columns(1);
+
+    ImGui::Separator();
+
+    //_ Second row, same column count -- see the comment above for why
+    // this is a separate Columns() call rather than continuing inside
+    // the loop above. Column widths are computed the same way both
+    // times (same count, same window width), so column i here lines up
+    // under column i above without needing to repeat the sin's name.
+    ImGui::Columns(kSinCount, "sin_sql_columns", false);
+    for (int i = 0; i < kSinCount; ++i)
+    {
+        std::string sinName = kSinNames[i];
+        ImGui::PushID(sinName.c_str());
+
+        RenderSqlSinAction(s_denoiserAddonDir, sinName);
 
         ImGui::NextColumn();
         ImGui::PopID();

@@ -25,6 +25,7 @@
 #include "imgui.h"
 #include "live_log.h"
 #include "Nexus.h"
+#include "sql_update.h"
 #include "version.h"
 #include "webhook_report.h"
 
@@ -76,6 +77,9 @@ void AddonLoad(AddonAPI_t* aApi)
     //_ Lets github_update.cpp's background-thread failures reach Nexus's
     //_ log too.
     SetUpdaterLogger(aApi);
+    //_ Same reasoning, for sql_update.cpp's own (synchronous) write path
+    //_ -- see sql_update.h's SetSqlUpdateLogger.
+    SetSqlUpdateLogger(aApi);
     GameState_Init(aApi);   //. caches DataLink pointers, see game_state.h
     LiveLog_Init(aApi);     //. subscribes EV_VFXD_SINS_LOG
     EffectDb_SetApi(aApi);  //. log pointer only -- EffectDb_Open happens lazily,

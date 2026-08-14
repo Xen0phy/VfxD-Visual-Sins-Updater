@@ -57,6 +57,7 @@
 #include "installed_tree_store.h"
 #include "installed_tree_view.h"
 #include "specialization_info.h"
+#include "sql_update.h"
 #include "ui_colors.h"
 
 #include <algorithm>
@@ -566,6 +567,16 @@ struct OverlayCacheEntry
 {
     int         generation = -1;
     EDiffStatus diffStatus = EDiffStatus::NotLoaded;
+    //_ Which diff source diffStatus/file were built from -- 0 = none,
+    // 1 = GitHub (github_update.h's GetSinDiffInfo), 2 = SQL
+    // (sql_update.h's GetSqlDiffInfo). diffStatus alone can't tell a
+    // switch from one source's Ready plan to the other's Ready plan for
+    // the same sin apart from "no change" (both read as Ready), which
+    // would leave the tree showing a stale plan from whichever source
+    // loaded first -- found once SQL gave every sin a second diff source
+    // that could independently go Ready. See RenderJsonTabContent's own
+    // "SQL wins the tie" comment for the pointer-selection half of this.
+    int         diffSource = 0;
     nlohmann::ordered_json file;
     int contentVersion = 0;
 };
@@ -1315,8 +1326,15 @@ void RenderJsonTabContent()
 
     //_ A Ready diff plan overlays pending-update coloring onto this same
     // tree (BuildDiffOverlayTree) rather than a separate list. Sins with
-    // no plan yet just render the plain on-disk tree.
-    std::vector<SinDiffInfo> diffs = GetSinDiffInfo();
+    // no plan yet just render the plain on-disk tree. Two independent
+    // sources can each have a Ready diff cached for the same sin now
+    // (GitHub's own StartLoadDiff, and sql_update.cpp's LoadSqlDiff --
+    // see sql_update.h's GetSqlDiffInfo() doc comment for why this
+    // lookup needed adding) -- SQL wins the tie if somehow both are
+    // Ready at once, since it's the path this addon is moving toward;
+    // GitHub only shown when SQL has nothing loaded for that sin.
+    std::vector<SinDiffInfo> diffs    = GetSinDiffInfo();
+    std::vector<SinDiffInfo> sqlDiffs = GetSqlDiffInfo();
     bool anyOverlayShown  = false;
     bool anyConflictShown = false;
 
@@ -1333,9 +1351,16 @@ void RenderJsonTabContent()
         }
 
         const SinDiffInfo* diff = nullptr;
-        for (const auto& d : diffs)
-            if (d.sinName == sin.sinName)
-                diff = &d;
+        int diffSource = 0; //. 0 = none, 1 = GitHub, 2 = SQL -- see OverlayCacheEntry::diffSource
+        for (const auto& d : sqlDiffs)
+            if (d.sinName == sin.sinName && d.status != EDiffStatus::NotLoaded)
+                { diff = &d; diffSource = 2; }
+        if (!diff)
+        {
+            for (const auto& d : diffs)
+                if (d.sinName == sin.sinName)
+                    { diff = &d; diffSource = 1; }
+        }
 
         bool hasOverlay = diff && diff->status == EDiffStatus::Ready && !diff->plan.IsEmpty();
 
@@ -1358,7 +1383,9 @@ void RenderJsonTabContent()
             EDiffStatus statusForCache = diff ? diff->status : EDiffStatus::NotLoaded;
             OverlayCacheEntry& cached = s_overlayCache[sin.sinName];
 
-            bool stale = cached.generation != GetInstalledTreeGeneration() || cached.diffStatus != statusForCache;
+            bool stale = cached.generation != GetInstalledTreeGeneration()
+                || cached.diffStatus != statusForCache
+                || cached.diffSource != diffSource;
 
             if (stale)
             {
@@ -1370,6 +1397,7 @@ void RenderJsonTabContent()
 
                 cached.generation = GetInstalledTreeGeneration();
                 cached.diffStatus = statusForCache;
+                cached.diffSource = diffSource;
                 cached.file       = std::move(built);
                 ++cached.contentVersion;
             }

@@ -200,3 +200,23 @@ nlohmann::ordered_json SinGenerator_Generate(ESinGeneratorVariant variant, int m
 
     return root;
 }
+
+int SinGenerator_CountEmittedGuids(ESinGeneratorVariant variant)
+{
+    //_ effects is one row per guid_b64 (see effect_db.h), so counting
+    // rows that survive the same filter SinGenerator_Generate applies
+    // before grouping by effect_id is exactly the guid count generation
+    // would emit -- no need to actually group/build anything here.
+    std::vector<EffectDbEffect> allEffects = EffectDb_GetAllEffects();
+
+    int count = 0;
+    for (const auto& e : allEffects)
+    {
+        if (e.categoryPath.empty())
+            continue;
+        if (variant == ESinGeneratorVariant::Sloth && e.categoryPath.front() == "Caution")
+            continue;
+        ++count;
+    }
+    return count;
+}

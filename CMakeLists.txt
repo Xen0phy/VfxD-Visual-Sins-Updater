@@ -52,6 +52,7 @@ add_library(VfxDSinsUpdater SHARED src/addon/addon.cpp
     src/core/tree/installed_tree_store.cpp
     src/core/tree/db_tree_view.cpp
     src/integration/github_update.cpp
+    src/integration/sql_update.cpp
     src/integration/webhook_report.cpp
     src/ui/backups_ui.cpp
     src/ui/live_log_ui.cpp
