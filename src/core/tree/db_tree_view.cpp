@@ -1,7 +1,11 @@
 #include "db_tree_view.h"
 
+#include "game_state.h"          //. GameState_ProfessionName
+#include "specialization_info.h" //. SpecializationProfession
+
 #include <algorithm>
 #include <map>
+#include <set>
 #include <string>
 
 namespace
@@ -79,6 +83,27 @@ nlohmann::ordered_json BuildGroupsJson(const std::string& guid_b64)
 }
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// JoinKey
+//--------------------------------------------------------------------------------
+// Local map key only -- doesn't need to match effect_db.cpp's private
+// category-path delimiter, since this is never written to SQL, only used
+// to look an already-split EffectDbCategory::categoryPath up by value.
+// Same shape as sin_generator.cpp's own JoinKey, deliberately not shared
+// with it (different translation unit, trivial enough not to warrant a
+// shared header).
+//--------------------------------------------------------------------------------
+std::string JoinKey(const std::vector<std::string>& path)
+{
+    std::string out;
+    for (size_t i = 0; i < path.size(); ++i)
+    {
+        if (i) out += '\x1f';
+        out += path[i];
+    }
+    return out;
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // FindOrCreateDbCategory
 //--------------------------------------------------------------------------------
 // Same shape as installed_tree_overlay.cpp's FindOrCreateDiffCategory --
@@ -89,12 +114,24 @@ nlohmann::ordered_json BuildGroupsJson(const std::string& guid_b64)
 // JSON-only editing affordances (drag, delete, create, right-click) on
 // it for free -- there is no JSON position for any DB tab category to
 // have, ever, not just until it's promoted.
+//
+// Also stamps "__vfxd_sort_order" (the `categories` table's own
+// sort_order, looked up by `sortOrderByKey` -- see BuildDbTree) on every
+// node it creates, so SortTreeRecursive can mirror the curated JSON's
+// authored category order instead of always alphabetizing -- omitted
+// (not zeroed) when a segment isn't in the table, so SortTreeRecursive
+// can tell "really unordered" apart from "curated position 0".
 //--------------------------------------------------------------------------------
-nlohmann::ordered_json* FindOrCreateDbCategory(nlohmann::ordered_json& root, const std::vector<std::string>& path)
+nlohmann::ordered_json* FindOrCreateDbCategory(nlohmann::ordered_json& root, const std::vector<std::string>& path,
+                                                const std::map<std::string, int>& sortOrderByKey)
 {
     nlohmann::ordered_json* cursor = &root;
+    std::vector<std::string> soFar;
+    soFar.reserve(path.size());
     for (const auto& segment : path)
     {
+        soFar.push_back(segment);
+
         if (!cursor->contains("categories") || !(*cursor)["categories"].is_array())
             (*cursor)["categories"] = nlohmann::ordered_json::array();
 
@@ -109,6 +146,11 @@ nlohmann::ordered_json* FindOrCreateDbCategory(nlohmann::ordered_json& root, con
             newCat["categories"]     = nlohmann::ordered_json::array();
             newCat["effects"]        = nlohmann::ordered_json::array();
             newCat["__vfxd_virtual"] = true;   //. no JSON position, ever -- see comment above
+
+            auto it = sortOrderByKey.find(JoinKey(soFar));
+            if (it != sortOrderByKey.end())
+                newCat["__vfxd_sort_order"] = it->second;
+
             (*cursor)["categories"].push_back(std::move(newCat));
             next = &(*cursor)["categories"].back();
         }
@@ -118,13 +160,118 @@ nlohmann::ordered_json* FindOrCreateDbCategory(nlohmann::ordered_json& root, con
 }
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// ClassFolderNameFromByGuidJson
+//--------------------------------------------------------------------------------
+// Level 1 of the Uncategorized sort (TODO_C_uncategorized_class_sort.md):
+// union the professions implied by every occurrence of every guid on this
+// node, read off the node's own "__vfxd_db_by_guid" -> "occurrences" ->
+// "specialization_ids" JSON that BuildOccurrencesJson already built --
+// deliberately NOT a second EffectDb_GetOccurrences(guid_b64) call per
+// guid, since that data is already in hand by the time this runs.
+// specialization_ids are already unpacked raw ids (1..127, see
+// EffectDb_SpecOrCoreIdsInMask); resolved here to a profession via
+// SpecializationProfession() for a real spec id or
+// EffectDb_ProfessionFromCoreOnlyId() for a core-only pseudo-id
+// (>= kEffectDbCoreOnlyIdFloor), same split DecodeSpecOrCoreId uses
+// elsewhere. One profession -> that profession's folder; more than one
+// (the same guid cast by more than one class over time) -> "Multiple",
+// no per-combination buckets. An empty result shouldn't happen -- every
+// guid reaching Uncategorized arrived via EffectDb_RecordEvent, which
+// always writes a matching occurrence row alongside it -- but folds into
+// "Multiple" rather than a third bucket if it ever does.
+//--------------------------------------------------------------------------------
+std::string ClassFolderNameFromByGuidJson(const nlohmann::ordered_json& byGuid)
+{
+    std::set<Mumble::EProfession> professions;
+    for (const auto& [guid_b64, detail] : byGuid.items())
+    {
+        if (!detail.contains("occurrences"))
+            continue;
+        for (const auto& occ : detail["occurrences"])
+        {
+            if (!occ.contains("specialization_ids"))
+                continue;
+            for (const auto& idJson : occ["specialization_ids"])
+            {
+                const unsigned int id = idJson.get<unsigned int>();
+                const Mumble::EProfession prof = (id >= kEffectDbCoreOnlyIdFloor)
+                    ? EffectDb_ProfessionFromCoreOnlyId(id)
+                    : SpecializationProfession(id);
+                if (prof != Mumble::EProfession::None)
+                    professions.insert(prof);
+            }
+        }
+    }
+
+    if (professions.size() == 1)
+        return GameState_ProfessionName(*professions.begin());
+    return "Multiple";
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// FindOrCreateVirtualChild
+//--------------------------------------------------------------------------------
+// One-segment version of FindOrCreateDbCategory's materialize-if-missing
+// logic -- find `name` among `parent`'s "categories", or create it (tagged
+// "__vfxd_virtual", same reasoning as FindOrCreateDbCategory) if absent.
+// Kept separate from FindOrCreateDbCategory rather than reusing it: that
+// function's contract is "split a category_path string", and the
+// Uncategorized class/type folders below aren't derived from one -- see
+// TODO_C_uncategorized_class_sort.md.
+//--------------------------------------------------------------------------------
+nlohmann::ordered_json* FindOrCreateVirtualChild(nlohmann::ordered_json& parent, const std::string& name)
+{
+    if (!parent.contains("categories") || !parent["categories"].is_array())
+        parent["categories"] = nlohmann::ordered_json::array();
+
+    for (auto& sub : parent["categories"])
+        if (sub.value("name", std::string()) == name)
+            return &sub;
+
+    nlohmann::ordered_json newCat;
+    newCat["name"]           = name;
+    newCat["categories"]     = nlohmann::ordered_json::array();
+    newCat["effects"]        = nlohmann::ordered_json::array();
+    newCat["__vfxd_virtual"] = true;
+    parent["categories"].push_back(std::move(newCat));
+    return &parent["categories"].back();
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// FindOrCreateUncategorizedBucket
+//--------------------------------------------------------------------------------
+// Materializes Uncategorized/<class>/type N lazily, one segment at a time,
+// via FindOrCreateVirtualChild -- so a class/type combination nothing
+// lands in never appears as an empty folder, same rule the rest of the DB
+// tab already follows. `classFolder` is one of the 9 profession names or
+// "Multiple"; `typeFolder` is "type N" for effects.type (0-11), used
+// directly with no aggregation -- type is a fixed per-guid attribute
+// (confirmed it can only appear once per guid), never ambiguous the way
+// profession can be, so there's no third "Multiple" case at this level.
+//--------------------------------------------------------------------------------
+nlohmann::ordered_json* FindOrCreateUncategorizedBucket(nlohmann::ordered_json& root,
+                                                          const std::string& classFolder,
+                                                          const std::string& typeFolder)
+{
+    nlohmann::ordered_json* uncategorized = FindOrCreateVirtualChild(root, "Uncategorized");
+    nlohmann::ordered_json* classNode     = FindOrCreateVirtualChild(*uncategorized, classFolder);
+    return FindOrCreateVirtualChild(*classNode, typeFolder);
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // SortTreeRecursive
 //--------------------------------------------------------------------------------
-// Alphabetical by name, categories then effects, at every level -- the
-// "deterministic, no drag-to-reorder" decision from the handoff. Effects
-// grouped under one effect_id have no per-guid ordering concept either;
-// nothing here needs one, since a node's "guids" array is just a set,
-// never displayed as an ordered list the user controls.
+// Categories: mirrors the curated JSON's own authored order via each
+// node's "__vfxd_sort_order" (stamped by FindOrCreateDbCategory from the
+// `categories` table -- see BuildDbTree) when present -- ascending, same
+// as SinGenerator_Generate's own effect ordering. A node without one
+// (every Uncategorized/<class>/type N folder, since those are never
+// curated -- see FindOrCreateUncategorizedBucket; also any real category
+// segment the seed hasn't given a sort_order to yet) sorts after every
+// node that has one, alphabetically among themselves -- same fallback
+// the tree used exclusively before this. Effects: still always
+// alphabetical by name -- sort_order isn't being extended to effects,
+// only categories.
 //--------------------------------------------------------------------------------
 void SortTreeRecursive(nlohmann::ordered_json& node)
 {
@@ -133,6 +280,17 @@ void SortTreeRecursive(nlohmann::ordered_json& node)
         auto& cats = node["categories"];
         std::sort(cats.begin(), cats.end(), [](const nlohmann::ordered_json& a, const nlohmann::ordered_json& b)
         {
+            const bool aHas = a.contains("__vfxd_sort_order");
+            const bool bHas = b.contains("__vfxd_sort_order");
+            if (aHas != bHas)
+                return aHas;   //. the one with a curated position sorts first
+            if (aHas && bHas)
+            {
+                const int soA = a["__vfxd_sort_order"].get<int>();
+                const int soB = b["__vfxd_sort_order"].get<int>();
+                if (soA != soB)
+                    return soA < soB;
+            }
             return a.value("name", std::string()) < b.value("name", std::string());
         });
         for (auto& sub : cats)
@@ -157,6 +315,15 @@ nlohmann::ordered_json BuildDbTree(const std::vector<EffectDbEffect>& dbEffects,
     root["categories"] = nlohmann::ordered_json::array();
     root["effects"]    = nlohmann::ordered_json::array();
 
+    //_ Categories table's own sort_order, keyed by joined path -- see
+    // FindOrCreateDbCategory's use of it and SortTreeRecursive's
+    // "mirror the curated JSON order" comment. Same EffectDb_GetAllCategories
+    // call SinGenerator_Generate already makes for the same table; not on
+    // a hot path here either (once per tree rebuild, not per frame).
+    std::map<std::string, int> sortOrderByKey;
+    for (const auto& c : EffectDb_GetAllCategories())
+        sortOrderByKey[JoinKey(c.categoryPath)] = c.sortOrder;
+
     //_ Group by effect_id first -- every guid sharing one effect_id folds
     // into a single node's "guids" array, rather than each guid getting
     // its own leaf. name/category_path/description/behavior* are
@@ -171,12 +338,6 @@ nlohmann::ordered_json BuildDbTree(const std::vector<EffectDbEffect>& dbEffects,
     for (const auto& [effectId, members] : byEffectId)
     {
         const EffectDbEffect& rep = *members.front();  //. representative -- see comment above
-
-        nlohmann::ordered_json* dest = FindOrCreateDbCategory(root, rep.categoryPath);
-        //. rep.categoryPath.empty() naturally lands at `root` itself here,
-        // which is exactly the "Uncategorized" bucket's contents -- see
-        // below for why it's wrapped in its own named category instead
-        // of left loose at the top level.
 
         nlohmann::ordered_json node;
         node["name"]            = rep.name;
@@ -215,6 +376,24 @@ nlohmann::ordered_json BuildDbTree(const std::vector<EffectDbEffect>& dbEffects,
             detail["groups"]       = BuildGroupsJson(m->guid_b64);
             byGuid[m->guid_b64] = std::move(detail);
         }
+        //_ Destination resolved from `byGuid` before it's moved into
+        // `node`, not from categoryPath alone: an empty categoryPath's
+        // destination (Uncategorized's class/type folders) is derived
+        // from the occurrences data just assembled above -- see
+        // ClassFolderNameFromByGuidJson. A real categoryPath still goes
+        // through FindOrCreateDbCategory exactly as before.
+        nlohmann::ordered_json* dest = nullptr;
+        if (!rep.categoryPath.empty())
+        {
+            dest = FindOrCreateDbCategory(root, rep.categoryPath, sortOrderByKey);
+        }
+        else
+        {
+            const std::string classFolder = ClassFolderNameFromByGuidJson(byGuid);
+            const std::string typeFolder  = "type " + std::to_string(rep.type);
+            dest = FindOrCreateUncategorizedBucket(root, classFolder, typeFolder);
+        }
+
         node["__vfxd_db_by_guid"] = std::move(byGuid);
 
         if (!rep.behaviorType.empty())
@@ -232,22 +411,6 @@ nlohmann::ordered_json BuildDbTree(const std::vector<EffectDbEffect>& dbEffects,
         }
 
         (*dest)["effects"].push_back(std::move(node));
-    }
-
-    //_ Effects with an empty category_path all landed directly on `root`
-    // above (FindOrCreateDbCategory with an empty path is a no-op cursor
-    // walk, returning &root itself) -- move them into a real named
-    // bucket rather than rendering loose at the tab's top level, same
-    // idea as the old overlay's "Unrecognized (for science)" bucket.
-    if (!root["effects"].empty())
-    {
-        nlohmann::ordered_json uncategorized;
-        uncategorized["name"]           = "Uncategorized";
-        uncategorized["categories"]     = nlohmann::ordered_json::array();
-        uncategorized["effects"]        = std::move(root["effects"]);
-        uncategorized["__vfxd_virtual"] = true;
-        root["effects"] = nlohmann::ordered_json::array();
-        root["categories"].push_back(std::move(uncategorized));
     }
 
     SortTreeRecursive(root);
