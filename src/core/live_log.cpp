@@ -23,6 +23,11 @@ AddonAPI_t* s_api        = nullptr;
 bool        s_listening  = false;
 bool        s_hideKnown  = false;
 
+//_ See LiveLog_SetForScienceOnly's doc comment in live_log.h -- gates
+// IngestLogLine's own ordinary-fold branch only, checked after
+// FeedEffectDb/UpdateForScienceEntry always already ran.
+bool        s_forScienceOnly = false;
+
 //_ Types 0, 1, 9, 11 start disabled (rarely useful by default); the rest
 // start enabled -- from characterizing real captured data. Not persisted
 // anywhere; resets to these defaults every time the DLL loads.
@@ -88,6 +93,9 @@ std::string MakeGroupSignature(const std::string& starterGuid, int duration, uns
 // id is looked up by (starterGuid, duration, a4) signature (see
 // MakeGroupSignature), not freshly minted, so a recurrence of the same
 // starter reuses the same groupId no matter how long ago it last showed up.
+// Exception: while background-only mode is on (LiveLog_SetForScienceOnly),
+// s_typeEnabled is ignored here entirely -- see the local typeGateOpen
+// lambda below for why that's safe.
 //
 // A non-starter line joins the open group only if its duration and a4
 // match the starter's exactly; anything else -- including a toggled-off
@@ -101,9 +109,22 @@ std::string MakeGroupSignature(const std::string& starterGuid, int duration, uns
 int AdvanceGroupState(const std::string& starterGuid, int type, int duration, unsigned int a4,
                        std::string& outGroupStarterGuid)
 {
+    //_ Background-only mode (LiveLog_SetForScienceOnly) ignores
+    // s_typeEnabled entirely for grouping, same as FeedEffectDb/
+    // UpdateForScienceEntry already ignore it for everything else -- see
+    // this function's own doc comment. Safe to bypass here specifically
+    // because IngestLogLine's ordinary branch (the only other consumer of
+    // this function's output, and the only reason it stays in sync with
+    // s_typeEnabled at all) never runs while background-only mode is on;
+    // it returns early before reaching that branch. Without this,
+    // s_typeEnabled's own defaults (types 0/1/9/11 start off) would leave
+    // type:1/11 group starters permanently ungrouped in the db despite
+    // background-only mode's whole point being "every type, unfiltered".
+    auto typeGateOpen = [](int t) { return s_forScienceOnly || s_typeEnabled[t]; };
+
     if (type == 1 || type == 11)
     {
-        if (!s_typeEnabled[type])
+        if (!typeGateOpen(type))
         {
             s_currentGroupId = -1;   //. starter filtered off: nothing opens, and anything open closes
             s_currentGroupStarterGuid.clear();
@@ -126,7 +147,7 @@ int AdvanceGroupState(const std::string& starterGuid, int type, int duration, un
     }
 
     if (s_currentGroupId >= 0
-        && s_typeEnabled[s_currentGroupStarterType]   //. group's own starter type must still be on
+        && typeGateOpen(s_currentGroupStarterType)   //. group's own starter type must still be on
         && duration == s_currentGroupDuration
         && a4 == s_currentGroupA4)
     {
@@ -431,6 +452,13 @@ void IngestLogLine(const std::string& guid_b64, const std::string& info)
     FeedEffectDb(guid_b64, info, parsed, groupStarterGuid);
     UpdateForScienceEntry(guid_b64, parsed, groupId);   //. same gate as FeedEffectDb, see that function's comment
 
+    //_ Background-capture mode -- see LiveLog_SetForScienceOnly's doc
+    // comment. Both calls above already ran unconditionally, so "for
+    // science" capture and its own display twin are unaffected; this only
+    // ever skips the ordinary s_entries fold below.
+    if (s_forScienceOnly)
+        return;
+
     if (parsed.type >= 0 && parsed.type < kLiveLogTypeCount && !s_typeEnabled[parsed.type])
         return;   //. type toggled off
 
@@ -570,6 +598,16 @@ const std::unordered_map<std::string, LiveLogEntry>& LiveLog_GetEntries()
 const std::unordered_map<std::string, LiveLogEntry>& LiveLog_GetForScienceEntries()
 {
     return s_forScienceEntries;
+}
+
+void LiveLog_SetForScienceOnly(bool forScienceOnly)
+{
+    s_forScienceOnly = forScienceOnly;
+}
+
+bool LiveLog_GetForScienceOnly()
+{
+    return s_forScienceOnly;
 }
 
 void LiveLog_Clear()

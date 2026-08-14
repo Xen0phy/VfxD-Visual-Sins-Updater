@@ -486,6 +486,32 @@ bool EffectDb_GetEffect(const std::string& guid_b64, EffectDbEffect& out);
 std::vector<EffectDbEffect> EffectDb_GetAllEffects();
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// EffectDb_GetAllGroupStarters
+//--------------------------------------------------------------------------------
+// Every distinct guid that has ever opened a type:1/11 group (i.e. every
+// distinct `group_members.starter_guid_b64`), returned as a full
+// EffectDbEffect each -- the DB tab's own group-review view lists these
+// so a curator can browse straight to "every unnamed starter" without
+// already knowing a guid to look one up by (EffectDb_GetGroupsStarted
+// requires the starter's guid as input; this is what enumerates them in
+// the first place).
+//
+// A starter guid always has its own `effects` row by construction --
+// EffectDb_RecordEvent writes the effects row and the group_members row
+// for one event together, never one without the other -- so a lookup
+// failure here would mean a real data inconsistency, not an expected
+// case; such a guid is silently skipped rather than surfaced specially,
+// since there's nothing more useful a browsing view could do with it.
+//
+// Not on the hot path (called once per DB-tab-generation change, same
+// gating as EffectDb_GetAllEffects's own caller), so an ad-hoc two-step
+// query (list distinct starters, then EffectDb_GetEffect each) is fine --
+// reuses that already-tested lookup rather than duplicating its column
+// list in a second hand-written JOIN.
+//--------------------------------------------------------------------------------
+std::vector<EffectDbEffect> EffectDb_GetAllGroupStarters();
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // EffectDb_GetAllCategories
 //--------------------------------------------------------------------------------
 // Full `categories` table, for SinGenerator's category-node materialization

@@ -180,3 +180,31 @@ void LiveLog_SetKnownGuidBehaviors(const std::unordered_map<std::string, std::st
 const std::unordered_map<std::string, LiveLogEntry>& LiveLog_GetEntries();
 const std::unordered_map<std::string, LiveLogEntry>& LiveLog_GetForScienceEntries();
 void LiveLog_Clear();
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// LiveLog_SetForScienceOnly / LiveLog_GetForScienceOnly
+//--------------------------------------------------------------------------------
+// While true, IngestLogLine skips its own ordinary-display fold (the
+// LiveLog_GetEntries() store) entirely, before the "Types logged"/hideKnown
+// checks even run -- that store neither grows nor gets touched while this
+// is on. FeedEffectDb and UpdateForScienceEntry (the "for science" db write
+// and its own display twin, LiveLog_GetForScienceEntries()) are unaffected
+// either way -- both already run unconditionally, ahead of this check, same
+// as they always have.
+//
+// For running "for science" purely as a background capture: without this,
+// keeping it going for a long session still means the ordinary live log
+// panel accumulates one entry per distinct guid encountered and keeps
+// getting walked/rendered every frame the panel is open, even if nobody's
+// looking at that list. This opts fully out of that store, not just its
+// display.
+//
+// Deliberately independent of EffectDb_IsEnabled()/LiveLog_IsListening() --
+// this only ever changes what IngestLogLine does with an event once one
+// arrives; it doesn't decide whether events arrive at all or whether they
+// reach the db. The UI is what ties this to "turn on capture + listening
+// together" as one convenience toggle (see live_log_ui.cpp) -- nothing here
+// requires that pairing.
+//--------------------------------------------------------------------------------
+void LiveLog_SetForScienceOnly(bool forScienceOnly);
+bool LiveLog_GetForScienceOnly();

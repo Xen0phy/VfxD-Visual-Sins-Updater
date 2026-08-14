@@ -418,6 +418,47 @@ void DecodeSpecOrCoreId(unsigned int id, std::string& outProfName, std::string& 
 }
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// ClassesSeenLabel
+//--------------------------------------------------------------------------------
+// A guid's captured occurrences (EffectDb_GetOccurrences), collapsed down
+// to just the set of profession names that have ever triggered it --
+// specialization-level detail is what RenderEffectDbDetail's full
+// breakdown is for; this is a one-line "which classes" summary for
+// RenderDbTabGroupsView, where the point is predicting a starter's likely
+// category from its members at a glance, not a full occurrence dump.
+// std::set for dedupe + stable alphabetical order (profession appears once
+// no matter how many specs/occurrences produced it). Empty return means
+// no self-caused occurrence has been captured for this guid yet -- for a
+// group member specifically, that's expected whenever it was only ever
+// seen as *target* of the starter's effect, never caster itself (see
+// EffectDbOccurrence's self_mask -- this reads every mask, not just
+// caster, so it still surfaces those too).
+//--------------------------------------------------------------------------------
+std::string ClassesSeenLabel(const std::string& guid_b64)
+{
+    std::set<std::string> professions;
+    for (const auto& occ : EffectDb_GetOccurrences(guid_b64))
+        for (unsigned int id : EffectDb_SpecOrCoreIdsInMask(occ.specializationMask))
+        {
+            std::string profName, specLabel;
+            DecodeSpecOrCoreId(id, profName, specLabel);
+            professions.insert(profName);
+        }
+
+    if (professions.empty())
+        return "";
+
+    std::string label;
+    for (const auto& p : professions)
+    {
+        if (!label.empty())
+            label += ", ";
+        label += p;
+    }
+    return label;
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // RenderEffectDbDetail
 //--------------------------------------------------------------------------------
 // The "for science" expanded view -- full capture detail for a DB tab
@@ -1104,7 +1145,7 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                     else if (effIsDbEffect)
                     {
                         if (effect.value("in_json", false))
-                            ImGui::TextDisabled("Also installed (also exists in a loaded sin file).");
+                            ImGui::TextDisabled("Also installed (exists in a loaded sin file).");
 
                         if (effect.contains("description") && effect["description"].is_string())
                         {
@@ -1118,14 +1159,31 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                         // only ever moves a whole effect_id at once.
                         RenderGuidList("guids", dbEffectGuids);
 
-                        if (effect.contains("behaviors") && effect["behaviors"].is_array())
+                        //_ Requires a non-empty array, not just presence --
+                        // BuildDbTree always sets "behaviors" to *some*
+                        // array (see its own comment), an empty one when
+                        // the seed had none, so contains()+is_array() alone
+                        // was true for every DB-tab node regardless of
+                        // whether there was anything to show.
+                        //
+                        // Wording deliberately drops "(owned by VfxDenoiser)"
+                        // here, unlike the JSON tab's version of this same
+                        // header just below -- this value is a one-time
+                        // snapshot seed_effect_db.py copied in from a Greed
+                        // file's own "behaviors" at import time (see
+                        // EffectDbEffect::behaviorType's doc comment), not
+                        // read live from any sin file. VfxDenoiser never
+                        // reads this database at all, so calling it
+                        // "owned by VfxDenoiser" here would claim a live
+                        // relationship that doesn't exist, on a field the
+                        // user couldn't edit through this tab regardless.
+                        if (effect.contains("behaviors") && effect["behaviors"].is_array()
+                            && !effect["behaviors"].empty())
                         {
-                            ImGui::TextDisabled("Behaviors (owned by VfxDenoiser):");
+                            ImGui::TextDisabled("Behaviors (seeded snapshot, not read by VfxDenoiser):");
                             for (const auto& behavior : effect["behaviors"])
                                 RenderBehavior(behavior);
                         }
-
-                        //_ The capture data itself -- see db_tree_view.cpp's
                         // BuildDbTree for where "__vfxd_db_by_guid" comes from.
                         // This is the whole reason the DB tab exists: every
                         // guid's block/type/occurrence/group history, not just
@@ -1241,7 +1299,11 @@ void RenderCategoryTree(const std::string& sinName, const nlohmann::ordered_json
                             }
                         }
 
-                        if (effect.contains("behaviors") && effect["behaviors"].is_array())
+                        //_ Requires non-empty, not just presence -- see the
+                        // DB tab's version of this same check above for why
+                        // contains()+is_array() alone isn't enough.
+                        if (effect.contains("behaviors") && effect["behaviors"].is_array()
+                            && !effect["behaviors"].empty())
                         {
                             ImGui::TextDisabled("Behaviors (owned by VfxDenoiser):");
                             for (const auto& behavior : effect["behaviors"])
@@ -1597,6 +1659,229 @@ void RenderJsonTabContent()
 }
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// RenderDbTabGroupsView
+//--------------------------------------------------------------------------------
+// The DB tab's "Groups" toggle content -- a flat, alphabetical-by-guid
+// list of every type:1/11 group starter (EffectDb_GetAllGroupStarters),
+// filtered to unnamed-only by default. Clicking one shows its members
+// (EffectDb_GetGroupsStarted, unchanged existing order -- no reordering
+// needed, a starter can't meaningfully be "discovered before" a group it
+// opens the way a whole *group* could, and sort_order is for SQL->JSON
+// generation only, not this).
+//
+// Deliberately a separate, smaller renderer rather than folded into
+// RenderCategoryTree -- this isn't a category tree at all, it's a flat
+// browse-then-drill-in list, same "own smaller renderer" reasoning
+// effect_db_tab_view.h originally gave for the DB tab as a whole.
+//
+// Renaming reuses the DB tab's existing effect_id-keyed rename state
+// machine unchanged (BeginDbEffectRename/IsDbEffectBeingRenamed/
+// RenderDbEffectRenameEditor, see installed_tree_edit.h) -- a starter or
+// member clicked here is the same effect_id-backed row the main tree
+// already knows how to rename; this view is just a different way of
+// finding it, not a new write path.
+//
+// Both the starter and every member also get a "Classes seen" line (see
+// ClassesSeenLabel) -- an unnamed starter's own guid carries no hint of
+// what it is, but a quick glance at which professions triggered its
+// members is often enough to guess the category it belongs in without
+// opening the full per-occurrence breakdown RenderEffectDbDetail gives
+// in the main tree.
+//--------------------------------------------------------------------------------
+void RenderDbTabGroupsView(const std::vector<EffectDbEffect>& starters, bool& showAllStarters,
+                            std::string& selectedGuid)
+{
+    ImGui::TextDisabled("Every type:1 / type:11 group starter the effect database has ever seen.\n"
+                         "Click one to see its members -- often the easiest way to guess what an unnamed starter is.");
+
+    ImGui::Checkbox("Show all (including already-named)##db_tab_groups_show_all", &showAllStarters);
+
+    //_ Alphabetical by guid_b64 -- deliberately not a "discovery order":
+    // that would need borrowing effect_meta.sort_order, which is for
+    // SQL->JSON generation only (see its own doc comment) and doesn't
+    // mean "first captured" in any sense this view could rely on. Just a
+    // stable, no-claimed-meaning sort, same spirit as SortTreeRecursive
+    // elsewhere in this tab.
+    std::vector<const EffectDbEffect*> visible;
+    for (const auto& s : starters)
+        if (showAllStarters || s.name.empty())
+            visible.push_back(&s);
+    std::sort(visible.begin(), visible.end(), [](const EffectDbEffect* a, const EffectDbEffect* b)
+    {
+        return a->guid_b64 < b->guid_b64;
+    });
+
+    ImGui::Text("%zu starter%s%s", visible.size(), visible.size() == 1 ? "" : "s",
+                showAllStarters ? "" : " (unnamed)");
+
+    //_ Fixed at kVisibleRows -- previously grew/shrank with the starter
+    // list's own row count (clamped between a floor and this same cap),
+    // but that tied the details pane's height to the wrong thing: its
+    // actual content (header, rename controls, classes-seen line, then
+    // every duration/a4 instance and its members) is often taller than
+    // even a generous starter-count-driven floor, regardless of how many
+    // starters happen to be in the list. Just a flat height now; ImGui's
+    // own child scrollbar still takes over past this for either side
+    // (the starter list via its Selectable loop, the details pane via its
+    // own content) exactly as before.
+    constexpr size_t kVisibleRows = 20;
+
+    float lineHeight = ImGui::GetTextLineHeightWithSpacing();
+    float listHeight = kVisibleRows * lineHeight + ImGui::GetStyle().FramePadding.y * 2.0f;
+
+    ImGui::BeginChild("db_tab_group_starters", ImVec2(320.0f, listHeight), true);
+    if (visible.empty())
+    {
+        ImGui::TextDisabled(showAllStarters ? "No group starters captured yet."
+                                             : "No unnamed group starters.");
+    }
+    for (const EffectDbEffect* s : visible)
+    {
+        //_ Bare guid when unnamed -- appearing as a raw guid rather than a
+        // name already implies "unnamed" on its own (the default filter
+        // above is unnamed-only anyway), so an explicit "(unnamed)" prefix
+        // here was saying the same thing twice. Same convention now used
+        // in the details pane on the right.
+        const std::string& label = s->name.empty() ? s->guid_b64 : s->name;
+        ImGui::PushID(s->guid_b64.c_str());
+        if (ImGui::Selectable(label.c_str(), selectedGuid == s->guid_b64))
+            selectedGuid = s->guid_b64;
+        ImGui::PopID();
+    }
+    ImGui::EndChild();
+
+    ImGui::SameLine();
+
+    //_ Looked up from the full `starters` list, not just `visible` --
+    // the selection can outlive the filter (renamed while selected, or
+    // "show all" toggled off) without being cleared, and its members are
+    // still worth showing either way.
+    const EffectDbEffect* selected = nullptr;
+    for (const auto& s : starters)
+        if (s.guid_b64 == selectedGuid) { selected = &s; break; }
+
+    ImGui::BeginChild("db_tab_group_details", ImVec2(0.0f, listHeight), true);
+
+    if (selectedGuid.empty())
+    {
+        ImGui::TextDisabled("Select a starter to see its members.");
+    }
+    else if (!selected)
+    {
+        ImGui::TextDisabled("Selected starter is no longer known to the database.");
+    }
+    else
+    {
+        ImGui::PushID(static_cast<int>(selected->effect_id));
+
+        //_ No "(unnamed starter)"/"Starter:" framing -- the left list
+        // selection already establishes "this is the selected starter",
+        // and a name-less guid on its own already implies unnamed (same
+        // reasoning as dropping "(unnamed)" from the member list below).
+        // If it has a name, show it; either way the guid+type line always
+        // shows so there's no ambiguity about which one this is.
+        if (!selected->name.empty())
+            ImGui::Text("%s", selected->name.c_str());
+        ImGui::TextDisabled("%s -- type %d", selected->guid_b64.c_str(), selected->type);
+
+        std::string starterClasses = ClassesSeenLabel(selected->guid_b64);
+        ImGui::TextDisabled("Classes seen: %s", starterClasses.empty() ? "(no data)" : starterClasses.c_str());
+
+        if (!AnyEditInFlight() && ImGui::SmallButton("Rename starter"))
+            BeginDbEffectRename(selected->effect_id, { selected->guid_b64 }, selected->name);
+        if (IsDbEffectBeingRenamed(selected->effect_id))
+            RenderDbEffectRenameEditor();
+
+        ImGui::Spacing();
+        ImGui::TextDisabled("Members, by (duration, a4) instance:");
+
+        std::vector<EffectDbGroupInstance> instances = EffectDb_GetGroupsStarted(selectedGuid);
+        if (instances.empty())
+            ImGui::TextDisabled("(no instances recorded)");
+
+        for (const auto& inst : instances)
+        {
+            ImGui::PushID(inst.duration);
+            ImGui::PushID(static_cast<int>(inst.a4));
+
+            //_ The starter's own row in group_members (member_guid_b64 ==
+            // starter_guid_b64, see effect_db.h's group_members doc
+            // comment) is filtered out of both the count and the list
+            // below -- the header above already identifies the starter,
+            // and this whole view exists specifically to browse type:1/11
+            // starters, so re-flagging "this is the starter" a third time
+            // inside its own member list added nothing.
+            std::vector<std::string> otherMembers;
+            for (const auto& memberGuid : inst.memberGuids)
+                if (memberGuid != selectedGuid)
+                    otherMembers.push_back(memberGuid);
+
+            ImGui::Text("duration %d, a4 %u -- %zu other member%s", inst.duration, inst.a4,
+                        otherMembers.size(), otherMembers.size() == 1 ? "" : "s");
+
+            ImGui::Indent();
+            for (const auto& memberGuid : otherMembers)
+            {
+                ImGui::PushID(memberGuid.c_str());
+
+                EffectDbEffect member;
+                if (!EffectDb_GetEffect(memberGuid, member))
+                {
+                    ImGui::BulletText("%s (no longer known)", memberGuid.c_str());
+                }
+                else
+                {
+                    //_ Bare guid when unnamed, same convention as the
+                    // starter list on the left -- appearing as a raw guid
+                    // rather than a name already implies "unnamed", no
+                    // need to spell that out again here either.
+                    std::string memberLabel = member.name.empty() ? memberGuid : member.name;
+                    ImGui::BulletText("%s", memberLabel.c_str());
+
+                    //_ SameLine() only fires when the button is actually
+                    // about to be drawn right after it -- previously
+                    // called unconditionally ahead of a button gated on
+                    // !AnyEditInFlight(), so as soon as any rename was in
+                    // progress (starter or otherwise), every other
+                    // member's SmallButton call got short-circuited away
+                    // entirely while its SameLine() had already run,
+                    // leaving the cursor mid-line with nothing left to
+                    // draw there -- the next real item (the classes-seen
+                    // line, or the next member's own bullet) then landed
+                    // on top of this line instead of starting a new one.
+                    if (!AnyEditInFlight())
+                    {
+                        ImGui::SameLine();
+                        if (ImGui::SmallButton("Rename"))
+                            BeginDbEffectRename(member.effect_id, { memberGuid }, member.name);
+                    }
+                    if (IsDbEffectBeingRenamed(member.effect_id))
+                        RenderDbEffectRenameEditor();
+
+                    std::string memberClasses = ClassesSeenLabel(memberGuid);
+                    if (!memberClasses.empty())
+                    {
+                        ImGui::Indent();
+                        ImGui::TextDisabled("Classes seen: %s", memberClasses.c_str());
+                        ImGui::Unindent();
+                    }
+                }
+
+                ImGui::PopID();
+            }
+            ImGui::Unindent();
+
+            ImGui::PopID();
+            ImGui::PopID();
+        }
+
+        ImGui::PopID();
+    }
+
+    ImGui::EndChild();
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // RenderDbTabContent
 //--------------------------------------------------------------------------------
 // The Database tab's content -- fully independent of RenderJsonTabContent (see
@@ -1633,6 +1918,17 @@ void RenderDbTabContent(const std::string& denoiserAddonDir)
     static int                     s_dbTabTreeContentVersion      = 0;
     static size_t                   s_dbTabEffectCount             = 0;
 
+    //_ The Groups view's own state -- kept here (not inside
+    // RenderDbTabGroupsView) so it survives across frames the same way
+    // the tree cache above does, and so the starter list can share this
+    // function's own generation gate rather than needing a second one.
+    // See RenderDbTabGroupsView's own doc comment for what these mean.
+    static bool                     s_dbTabShowGroups             = false;
+    static bool                     s_dbTabGroupsShowAllStarters   = false;
+    static std::string              s_dbTabSelectedStarterGuid;
+    static std::vector<EffectDbEffect> s_dbTabGroupStarters;
+    static int                     s_dbTabGroupStartersGeneration = -1;
+
     //_ Rebuilds on either generation moving -- effect_db's own (a real
     // capture/rename/placement happened) or the installed tree's (the
     // "in_json" badge below needs the freshly-loaded guid set, since it's
@@ -1644,6 +1940,19 @@ void RenderDbTabContent(const std::string& denoiserAddonDir)
     // "when does this recompute" trigger is needed here.
     int dbGenNow        = EffectDb_GetGeneration();
     int installedGenNow = GetInstalledTreeGeneration();
+
+    //_ Only depends on effect_db's own generation (a rename or a fresh
+    // capture), never the installed tree's -- group starters have no
+    // in_json-style badge to refresh. Gated separately from the tree
+    // rebuild below so toggling into the Groups view for the first time
+    // doesn't wait on an installed-tree generation bump that may never
+    // come.
+    if (dbGenNow != s_dbTabGroupStartersGeneration)
+    {
+        s_dbTabGroupStarters           = EffectDb_GetAllGroupStarters();
+        s_dbTabGroupStartersGeneration = dbGenNow;
+    }
+
     if (dbGenNow != s_dbTabTreeGeneration || installedGenNow != s_dbTabInstalledTreeGeneration)
     {
         std::vector<EffectDbEffect> allEffects     = EffectDb_GetAllEffects();
@@ -1653,6 +1962,26 @@ void RenderDbTabContent(const std::string& denoiserAddonDir)
         s_dbTabTreeGeneration           = dbGenNow;
         s_dbTabInstalledTreeGeneration  = installedGenNow;
         ++s_dbTabTreeContentVersion;
+    }
+
+    if (ImGui::Button(s_dbTabShowGroups ? "Back to Tree##db_tab_groups_toggle" : "Groups (T1/T11 starters)##db_tab_groups_toggle"))
+        s_dbTabShowGroups = !s_dbTabShowGroups;
+
+    if (s_dbTabShowGroups)
+    {
+        RenderDbTabGroupsView(s_dbTabGroupStarters, s_dbTabGroupsShowAllStarters, s_dbTabSelectedStarterGuid);
+
+        //_ Normally deferred to this function's very end, alongside the
+        // JSON tab's own edit jobs (see the Apply block below) -- but
+        // that block sits after this branch's early return, and the
+        // Groups view's own "Rename"/"Rename starter" buttons queue
+        // through this exact same job. Without this, a rename made from
+        // here would sit pending and silently never get written unless
+        // the user happened to switch back to the tree view afterward.
+        ApplyPendingDbEffectRename();
+
+        ImGui::PopID();
+        return;
     }
 
     long long dbTreeVersion = (3LL << 32) | static_cast<unsigned int>(s_dbTabTreeContentVersion);

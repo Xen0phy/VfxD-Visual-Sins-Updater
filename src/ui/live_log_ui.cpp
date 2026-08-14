@@ -450,12 +450,49 @@ void RenderLiveLogSection(AddonAPI_t* aApi, const std::string& denoiserAddonDir)
         //_ Switches the list below from the ordinary filtered display
         // into the effect db's own capture stream -- self only, every
         // type, same block/occurrence detail as the tree (see live_log.h).
-        ImGui::Checkbox("Show for-science log (self only, all types, tree-style data)", &s_forScienceView);
+        // Disabled while background-only mode is on below -- nothing to
+        // switch to, the list itself isn't rendered at all in that mode.
+        bool backgroundOnly = LiveLog_GetForScienceOnly();
+        if (!backgroundOnly)
+        {
+            ImGui::Checkbox("Show for-science log (self only, all types, tree-style data)", &s_forScienceView);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(
+                    "The list below becomes the effect db's own capture stream: every self-cast "
+                    "event regardless of the type filters or \"hide known\" above, with the same "
+                    "block/occurrence detail the Installed Effects tree shows for \"for science\" data.");
+        }
+
+        ImGui::Spacing();
+
+        //_ Single self-contained switch for "just let this run": turns on
+        // everything for-science capture actually needs (EffectDb_SetEnabled
+        // + LiveLog_SetListening, since IngestLogLine never even sees an
+        // event unless listening is on) and tells IngestLogLine to skip its
+        // own ordinary s_entries fold entirely (LiveLog_SetForScienceOnly --
+        // see that function's doc comment in live_log.h), not just hide it
+        // from view. Turning it off is symmetric -- stops listening and
+        // capture together, rather than leaving them on with nothing
+        // controlling them, so the checkbox alone is a complete on/off.
+        if (ImGui::Checkbox("Background only -- capture silently, skip the live log entirely", &backgroundOnly))
+        {
+            LiveLog_SetForScienceOnly(backgroundOnly);
+            LiveLog_SetListening(aApi, backgroundOnly);
+            EffectDb_SetEnabled(backgroundOnly, denoiserAddonDir);
+            s_forScienceView = false; //. nothing left to switch to/from while this is on
+        }
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(
-                "The list below becomes the effect db's own capture stream: every self-cast "
-                "event regardless of the type filters or \"hide known\" above, with the same "
-                "block/occurrence detail the Installed Effects tree shows for \"for science\" data.");
+                "Turns on \"Capture live\" and \"For science\" together and records every "
+                "self-caused effect, every type, straight to the permanent database -- but "
+                "the on-screen list below (either version) is skipped entirely, so it never "
+                "accumulates entries or gets walked every frame. Turn this off to stop both.");
+
+        if (backgroundOnly)
+        {
+            ImGui::TextDisabled("Capturing silently in the background -- nothing shown below.");
+            return;
+        }
     }
 
     ImGui::Separator();

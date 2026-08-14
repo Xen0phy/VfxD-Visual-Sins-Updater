@@ -735,6 +735,45 @@ std::vector<EffectDbEffect> EffectDb_GetAllEffects()
 }
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// EffectDb_GetAllGroupStarters
+//--------------------------------------------------------------------------------
+// See effect_db.h's doc comment. Two ad-hoc queries, same "not a hot
+// path" reasoning as EffectDb_GetAllCategories just below -- first every
+// distinct starter guid, then EffectDb_GetEffect per guid (reused as-is,
+// not reimplemented here).
+//--------------------------------------------------------------------------------
+std::vector<EffectDbEffect> EffectDb_GetAllGroupStarters()
+{
+    std::vector<EffectDbEffect> out;
+    if (!s_db) return out;
+
+    sqlite3_stmt* stmt = nullptr;
+    static const char* kSelectDistinctStarters =
+        "SELECT DISTINCT starter_guid_b64 FROM group_members";
+
+    if (sqlite3_prepare_v2(s_db, kSelectDistinctStarters, -1, &stmt, nullptr) != SQLITE_OK)
+        return out;
+
+    std::vector<std::string> starterGuids;
+    while (sqlite3_step(stmt) == SQLITE_ROW)
+        starterGuids.emplace_back(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0)));
+    sqlite3_finalize(stmt);
+
+    out.reserve(starterGuids.size());
+    for (const auto& guid : starterGuids)
+    {
+        EffectDbEffect e;
+        if (EffectDb_GetEffect(guid, e))
+            out.push_back(std::move(e));
+        //. else: a starter guid with no effects row would be a real data
+        // inconsistency (see this function's header comment) -- skipped,
+        // not surfaced, since a browsing view has nothing useful to do
+        // with a guid it can't describe.
+    }
+    return out;
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // EffectDb_GetAllCategories
 //--------------------------------------------------------------------------------
 // Full `categories` table -- externally seeded only (see the schema
