@@ -1,22 +1,5 @@
 //################################################################################
-// github_update.cpp
-//--------------------------------------------------------------------------------
-// See github_update.h for the module contract. Mirrors gw2_api.cpp's
-// pattern from the reference project this was modeled on: HTTP via
-// WinHTTP (synchronous calls), always from a short-lived detached
-// background thread, never the render thread. A single atomic in-flight
-// flag covers checking, diff-loading, and applying, since they touch the
-// same files and must never run concurrently with each other (a check
-// running mid-apply could report stale info). Every failure path leaves
-// previously-cached results untouched.
-//
-// Unlike the reference project's fixed host+path, GitHub release assets
-// redirect to a different host (objects.githubusercontent.com), so the
-// HTTP helper here takes a full URL and cracks it with WinHttpCrackUrl
-// rather than assuming one fixed host. WinHTTP follows redirects
-// automatically by default, including cross-host ones, so no extra
-// handling is needed for that -- flagging the assumption here in case a
-// future WinHTTP policy change on the user's system disables it.
+// github_update.cpp   (see: github_update.h)
 //--------------------------------------------------------------------------------
 
 #pragma comment(lib, "winhttp.lib")
@@ -46,12 +29,11 @@ namespace fs = std::filesystem;
 // ToCrlf
 //--------------------------------------------------------------------------------
 // nlohmann::json::dump() always emits bare '\n' line endings, but every
-// VfxDenoiser file shipped/edited in the wild uses CRLF. Converting here
-// keeps an applied-update file's line endings consistent with every
-// other VfxDenoiser file on disk, instead of silently switching just
-// this one file to LF the moment an update is applied. Mirrors
-// addon.cpp's own ToCrlf, kept as a separate copy since the two files
-// don't currently share a utility header.
+// VfxDenoiser file shipped/edited in the wild uses CRLF. Converting here keeps an
+// applied-update file's line endings consistent with every other VfxDenoiser file
+// on disk, instead of silently switching just this one file to LF the moment an
+// update is applied. Mirrors addon.cpp's own ToCrlf, kept as a separate copy
+// since the two files don't currently share a utility header.
 //--------------------------------------------------------------------------------
 static std::string ToCrlf(const std::string& lfText)
 {
@@ -76,19 +58,17 @@ static std::mutex        s_messageMutex;
 static std::string       s_lastApplyMessage; //. guarded by s_messageMutex
 static std::string       s_lastCheckMessage; //. guarded by s_messageMutex
 
-//_ See BeginUpdateShutdown/GetUpdateActiveThreadCount (github_update.h).
-// s_shuttingDown is polled (not locked) at step boundaries; s_activeThreads
-// is only touched by ActiveThreadGuard so every exit path is covered.
+//_ See BeginUpdateShutdown/GetUpdateActiveThreadCount (github_update.h). s_shuttingDown is polled (not locked); s_activeThreads is only touched by ActiveThreadGuard so every exit path is covered.
 static std::atomic<bool> s_shuttingDown{false};
 static std::atomic<int>  s_activeThreads{0};
 
 //********************************************************************************
 // ActiveThreadGuard
 //--------------------------------------------------------------------------------
-// Constructed as the first statement inside each background thread lambda
-// (not by the caller before std::thread(...) -- it has to be the spawned
-// thread itself doing the counting) and destroyed on the way out no matter
-// which return statement or exception unwinds through it.
+// Constructed as the first statement inside each background thread lambda (not by
+// the caller before std::thread(...) -- it has to be the spawned thread itself
+// doing the counting) and destroyed on the way out no matter which return
+// statement or exception unwinds through it.
 //--------------------------------------------------------------------------------
 struct ActiveThreadGuard
 {
@@ -109,17 +89,16 @@ int GetUpdateActiveThreadCount()
 //********************************************************************************
 // DiffCacheEntry
 //--------------------------------------------------------------------------------
-// status/plan            see SinDiffInfo
-// oldFile                the installed file as loaded, pre-merge
-// installedPath           where it lives on disk
-// latestVersion           the version this diff was resolved against
+// status/plan     see SinDiffInfo
+// oldFile         the installed file as loaded, pre-merge
+// installedPath   where it lives on disk
+// latestVersion   the version this diff was resolved against
 //--------------------------------------------------------------------------------
-// Everything needed to display a diff AND, later, apply it without
-// re-downloading or re-deciding anything. Populated by StartLoadDiff,
-// consumed by StartApplyUpdate. oldFile/installedPath/latestVersion are
-// deliberately not part of the public SinDiffInfo -- GetSinDiffInfo()
-// only hands out the display-safe MergePlan, not the raw json this
-// cache also carries.
+// Everything needed to display a diff AND, later, apply it without re-downloading
+// or re-deciding anything. Populated by StartLoadDiff, consumed by
+// StartApplyUpdate. oldFile/installedPath/latestVersion are not part of the
+// public SinDiffInfo -- GetSinDiffInfo() only hands out the display-safe
+// MergePlan, not the raw json this cache also carries.
 //--------------------------------------------------------------------------------
 struct DiffCacheEntry
 {
@@ -136,9 +115,7 @@ static std::unordered_map<std::string, DiffCacheEntry> s_diffCache;
 static constexpr const char* kRepoOwner = "Xen0phy";
 static constexpr const char* kRepoName  = "VfxD_Visual_Sins";
 
-//_ Set once (see SetUpdaterLogger) before any background thread can
-// start; never reassigned afterward, so reading it from a background
-// thread without a lock is safe.
+//_ Set once (see SetUpdaterLogger) before any background thread can start; never reassigned afterward, so reading it from a background thread without a lock is safe.
 static AddonAPI_t* s_api = nullptr;
 
 void SetUpdaterLogger(AddonAPI_t* aApi)
@@ -149,17 +126,14 @@ void SetUpdaterLogger(AddonAPI_t* aApi)
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // LogCritical
 //--------------------------------------------------------------------------------
-// No-op if SetUpdaterLogger was never called (e.g. Addon_Load never got
-// an aApi).
+// No-op if SetUpdaterLogger was never called (e.g. Addon_Load never got an aApi).
 //--------------------------------------------------------------------------------
 static void LogCritical(const std::string& msg)
 {
     if (s_api) s_api->Log(LOGL_CRITICAL, "VfxDSinsUpdater", msg.c_str());
 }
 
-//_ WinHTTP's documented way to cancel a blocked synchronous call is to
-// close its handles from a different thread -- these three are what
-// CancelInFlightUpdateRequest closes.
+//_ WinHTTP's documented way to cancel a blocked synchronous call is to close its handles from a different thread -- these three are what CancelInFlightUpdateRequest closes.
 static std::mutex s_activeHandlesMutex;
 static HINTERNET  s_activeSession = nullptr;
 static HINTERNET  s_activeConnect = nullptr;
@@ -176,10 +150,13 @@ void CancelInFlightUpdateRequest()
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // HttpsGetToString
 //--------------------------------------------------------------------------------
-// Synchronous HTTPS GET against a full URL. Always called from the
-// background thread. Returns false only on a transport-level failure
-// (couldn't even get a response); a non-200 status is still reported
-// via outStatusCode with outBody left as whatever the server sent.
+// Synchronous HTTPS GET against a full URL, not a fixed host+path, since GitHub
+// release assets redirect to a different host (objects.githubusercontent.com);
+// WinHTTP follows redirects automatically, including cross-host, so no extra
+// handling is needed. Always called from the background thread. Returns false
+// only on a transport-level failure (couldn't even get a response); a non-200
+// status is still reported via outStatusCode with outBody left as whatever the
+// server sent.
 //--------------------------------------------------------------------------------
 static bool HttpsGetToString(const std::wstring& url, std::string& outBody, int& outStatusCode)
 {
@@ -204,9 +181,7 @@ static bool HttpsGetToString(const std::wstring& url, std::string& outBody, int&
     if (!hSession) return false;
     { std::lock_guard<std::mutex> lock(s_activeHandlesMutex); s_activeSession = hSession; }
 
-    //_ Release assets can be several MB on a slow connection -- more
-    // generous than a tiny API response, but still bounded so a hung
-    // connection can't wedge the thread forever.
+    //_ Release assets can be several MB on a slow connection -- more generous than a tiny API response, but still bounded so a hung connection can't wedge the thread forever.
     WinHttpSetTimeouts(hSession, 10000, 10000, 10000, 30000);
 
     HINTERNET hConnect = WinHttpConnect(hSession, hostBuf, uc.nPort, 0);
@@ -230,9 +205,7 @@ static bool HttpsGetToString(const std::wstring& url, std::string& outBody, int&
     }
     { std::lock_guard<std::mutex> lock(s_activeHandlesMutex); s_activeRequest = hRequest; }
 
-    //_ GitHub's API requires a User-Agent (already sent via WinHttpOpen's
-    // agent string) and returns cleaner JSON with this Accept header;
-    // harmless for the non-API asset-download URL too.
+    //_ GitHub's API requires a User-Agent (already sent via WinHttpOpen's agent string) and returns cleaner JSON with this Accept header; harmless for the non-API asset-download URL too.
     const wchar_t* headers = L"Accept: application/vnd.github+json\r\n";
 
     bool ok = WinHttpSendRequest(hRequest, headers, (DWORD)-1, WINHTTP_NO_REQUEST_DATA, 0, 0, 0)
@@ -270,8 +243,8 @@ static bool HttpsGetToString(const std::wstring& url, std::string& outBody, int&
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // Widen
 //--------------------------------------------------------------------------------
-// Asset names/URLs handled here are plain ASCII, so a byte-for-byte
-// widen is safe.
+// Asset names/URLs handled here are plain ASCII, so a byte-for-byte widen is
+// safe.
 //--------------------------------------------------------------------------------
 static std::wstring Widen(const std::string& s)
 {
@@ -281,10 +254,10 @@ static std::wstring Widen(const std::string& s)
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // ParseAssetVersion
 //--------------------------------------------------------------------------------
-// Matches "VfxD_Gluttony-v4177.json" / "VfxD_Gluttony_v4177.json" among
-// a release's asset names. No-suffix assets aren't expected from GitHub
-// (only from a user's local, possibly-manually-renamed install), so an
-// unsuffixed match is simply ignored rather than treated as version -1.
+// Matches "VfxD_Gluttony-v4177.json" / "VfxD_Gluttony_v4177.json" among a
+// release's asset names. No-suffix assets aren't expected from GitHub (only from
+// a user's local, possibly-manually-renamed install), so an unsuffixed match is
+// simply ignored.
 //--------------------------------------------------------------------------------
 static bool ParseAssetVersion(const std::string& assetName, const std::string& sinName, int& outVersion)
 {
@@ -319,9 +292,7 @@ void StartUpdateCheck(const std::string& denoiserAddonDir, bool alsoLoadDiff)
     {
         ActiveThreadGuard threadGuard;
 
-        //_ The loop below always walks kSinNames (all three), not just
-        // what's found here, so a sin the user doesn't have yet still
-        // gets a result (NotInstalled) an "Install" button can use.
+        //_ The loop below always walks kSinNames (all three), not just what's found here, so a sin the user doesn't have yet still gets a result (NotInstalled) an "Install" button can use.
         auto installed = ScanInstalledSinFiles(denoiserAddonDir);
         std::unordered_map<std::string, InstalledSinFile> installedByName;
         for (const auto& f : installed)
@@ -330,18 +301,14 @@ void StartUpdateCheck(const std::string& denoiserAddonDir, bool alsoLoadDiff)
         //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
         // storeFailure
         //--------------------------------------------------------------------------------
-        // Shared failure path for all three error cases below. Normally
-        // leaves s_sinInfo exactly as it was from any previous successful
-        // check, so a rate-limit hit or network hiccup doesn't make an
-        // already-known update disappear -- but that only makes sense if
-        // there WAS a previous successful check. On a cold start (this
-        // session's very first check hits the hiccup), s_sinInfo is empty,
-        // and leaving it empty would make GetSinUpdateInfo() report nothing
-        // at all, so the UI defaults every sin to NotInstalled -- Install
-        // button on everything, even sins already on disk. So: only in
-        // that case, fall back to what ScanInstalledSinFiles already found
-        // above, reporting installed sins as installed with an unknown
-        // latest version instead of as not-installed.
+        // Shared failure path for all three error cases below. Normally leaves s_sinInfo
+        // exactly as it was from any previous successful check, so a rate-limit hit or
+        // network hiccup doesn't make an already-known update disappear. On a cold start
+        // (s_sinInfo still empty, no previous successful check this session), that would
+        // instead make GetSinUpdateInfo() report nothing and the UI default every sin to
+        // NotInstalled -- so only in that case, this falls back to what
+        // ScanInstalledSinFiles already found above, reporting installed sins as
+        // installed with an unknown latest version.
         //--------------------------------------------------------------------------------
         auto storeFailure = [&installedByName]()
         {
@@ -359,9 +326,7 @@ void StartUpdateCheck(const std::string& denoiserAddonDir, bool alsoLoadDiff)
                     {
                         info.installedPath    = instIt->second.fullPath;
                         info.installedVersion = instIt->second.version;
-                        //_ latestVersion stays -1 (unknown) -- UpToDate here
-                        // just means "installed, can't tell if there's an
-                        // update," falling through to the non-actionable button.
+                        //_ latestVersion stays -1 (unknown) -- UpToDate here just means "installed, can't tell if there's an update," falling through to the non-actionable button.
                         info.state = ESinUpdateState::UpToDate;
                     }
                     else
@@ -419,9 +384,7 @@ void StartUpdateCheck(const std::string& denoiserAddonDir, bool alsoLoadDiff)
             return;
         }
 
-        //_ Unload started while the parse above was in flight -- nothing
-        // left to interrupt, but no reason to continue either; skip
-        // straight to releasing the in-flight claim instead of writing.
+        //_ Unload started while the parse above was in flight -- nothing left to interrupt, but no reason to continue either; skip straight to releasing the in-flight claim instead of writing.
         if (s_shuttingDown.load())
         {
             s_requestInFlight.store(false);
@@ -452,8 +415,7 @@ void StartUpdateCheck(const std::string& denoiserAddonDir, bool alsoLoadDiff)
                 int assetVersion = -1;
                 if (!ParseAssetVersion(assetName, sinName, assetVersion)) continue;
 
-                //_ A release should only ever contain one asset per sin,
-                // but if it somehow doesn't, keep the highest version seen.
+                //_ A release should only ever contain one asset per sin, but if it somehow doesn't, keep the highest version seen.
                 if (assetVersion > info.latestVersion)
                 {
                     info.latestVersion = assetVersion;
@@ -463,9 +425,7 @@ void StartUpdateCheck(const std::string& denoiserAddonDir, bool alsoLoadDiff)
 
             if (info.latestVersion < 0)
             {
-                //_ GitHub's latest release doesn't have this sin at all
-                // (unlikely, but possible mid-release-edit) -- report as
-                // up to date if already installed rather than guessing.
+                //_ GitHub's latest release doesn't have this sin at all (unlikely, but possible mid-release-edit) -- report as up to date if already installed.
                 info.state = isInstalled ? ESinUpdateState::UpToDate : ESinUpdateState::NotInstalled;
             }
             else if (!isInstalled)
@@ -495,9 +455,7 @@ void StartUpdateCheck(const std::string& denoiserAddonDir, bool alsoLoadDiff)
         s_checkStatus.store(ECheckStatus::Done);
         s_requestInFlight.store(false);
 
-        //_ Runs after s_requestInFlight is released, since StartLoadDiff
-        // acquires that flag itself. Also skipped once shutdown has begun --
-        // it would spawn a new thread AddonUnload never got to cancel.
+        //_ Runs after s_requestInFlight is released, since StartLoadDiff acquires that flag itself. Also skipped once shutdown has begun, to avoid spawning a thread AddonUnload never got to cancel.
         if (anyUpdate && alsoLoadDiff && !s_shuttingDown.load())
             StartLoadDiff(denoiserAddonDir);
     })
@@ -555,9 +513,7 @@ void StartLoadDiff(const std::string& denoiserAddonDir, const std::string& onlyS
         return;
     }
 
-    //_ Mark every sin about to be loaded as Loading immediately (before
-    // the thread starts) so the panel can show a spinner next frame,
-    // not just after the first network call lands.
+    //_ Mark every sin about to be loaded as Loading immediately (before the thread starts) so the panel can show a spinner next frame, not just after the first network call lands.
     {
         std::lock_guard<std::mutex> lock(s_diffMutex);
         for (const auto& sin : toLoad)
@@ -570,9 +526,7 @@ void StartLoadDiff(const std::string& denoiserAddonDir, const std::string& onlyS
 
         for (const auto& sin : toLoad)
         {
-            //_ Checked once per sin so a multi-sin load stops picking up
-            // new work as soon as unload begins. Any sin left at Loading
-            // here just gets retried next time the panel asks for it.
+            //_ Checked once per sin so a multi-sin load stops picking up new work as soon as unload begins. Any sin left at Loading here just gets retried next time the panel asks for it.
             if (s_shuttingDown.load())
                 break;
 
@@ -584,9 +538,7 @@ void StartLoadDiff(const std::string& denoiserAddonDir, const std::string& onlyS
 
             if (sin.latestDownloadUrl.empty()) { fail(); continue; }
 
-            //_ Checked before the download below -- guid-first matching
-            // (see merge.h) assumes a guid never repeats, so there's no
-            // point spending bandwidth on a sin this can't safely use.
+            //_ Checked before the download below -- guid-first matching (see merge.h) assumes a guid never repeats, so there's no point spending bandwidth on a sin this can't safely use.
             json oldFile;
             try
             {
@@ -657,9 +609,7 @@ std::vector<SinDiffInfo> GetSinDiffInfo()
 
 void StartApplyUpdate(const std::string& denoiserAddonDir, const std::string& sinName)
 {
-    //_ "For science" capture and update/apply are deliberately mutually
-    // exclusive -- see effect_db.h. The options UI is expected to grey
-    // out Apply while capture is on; this is the backing check behind that.
+    //_ "For science" capture and update/apply are mutually exclusive -- see effect_db.h. The options UI greys out Apply while capture is on; this is the backing check behind that.
     if (EffectDb_IsEnabled())
         return;
 
@@ -687,9 +637,7 @@ void StartApplyUpdate(const std::string& denoiserAddonDir, const std::string& si
 
         json oldFile = entry.oldFile; //. entry.oldFile stays untouched on failure
 
-        //_ Nothing downloaded here (already resolved by StartLoadDiff), so
-        // CancelInFlightUpdateRequest has no call to interrupt -- this is
-        // the one check standing between unload and the disk writes below.
+        //_ Nothing downloaded here (already resolved by StartLoadDiff), so CancelInFlightUpdateRequest has no call to interrupt -- this is the one check standing between unload and the disk writes below.
         if (s_shuttingDown.load())
         {
             s_applyStatus.store(EApplyStatus::Idle);
@@ -701,15 +649,13 @@ void StartApplyUpdate(const std::string& denoiserAddonDir, const std::string& si
         {
             std::string msg = std::string("Failed: ") + sinName + " (" + why + ")";
             SetLastApplyMessage(msg);
-            //_ Writing the user's actual VfxDenoiser file -- surface this
-            // loudly, not just in the options panel.
+            //_ Writing the user's actual VfxDenoiser file -- surface this loudly, not just in the options panel.
             LogCritical(msg);
             s_applyStatus.store(EApplyStatus::Error);
             s_requestInFlight.store(false);
         };
 
-        //_ Back up the old file before touching anything, in case the
-        // merge has a bug -- never destroy a user's tuning silently.
+        //_ Back up the old file before touching anything, in case the merge has a bug -- never destroy a user's tuning silently.
         std::error_code ec;
         fs::path backupPath = fs::path(entry.installedPath).concat(".bak");
         fs::copy_file(entry.installedPath, backupPath, fs::copy_options::overwrite_existing, ec);
@@ -718,8 +664,7 @@ void StartApplyUpdate(const std::string& denoiserAddonDir, const std::string& si
         //_ apply the confirmed plan (merge.h)
         ApplyMergePlan(oldFile, entry.plan);
 
-        //_ Write to a temp file first, then rename over the final name --
-        // so a crash mid-write can't corrupt anything.
+        //_ Write to a temp file first, then rename over the final name -- so a crash mid-write can't corrupt anything.
         fs::path dir = fs::path(entry.installedPath).parent_path();
         std::string newFileName = "VfxD_" + sinName + "-v" + std::to_string(entry.latestVersion) + ".json";
         fs::path newPath = dir / newFileName;
@@ -741,13 +686,11 @@ void StartApplyUpdate(const std::string& denoiserAddonDir, const std::string& si
         fs::rename(tmpPath, newPath, ec);
         if (ec) { fail("couldn't rename into place"); return; }
 
-        //_ Remove the old-named file, unless the version-stamped name
-        // happens to be identical to what it already was.
+        //_ Remove the old-named file, unless the version-stamped name happens to be identical to what it already was.
         if (fs::path(entry.installedPath) != newPath)
             fs::remove(entry.installedPath, ec); //. best-effort; leftover file is harmless
 
-        //_ This sin's cached diff is now stale (it's been applied) --
-        // drop it so the options panel stops offering to re-apply it.
+        //_ This sin's cached diff is now stale (it's been applied) -- drop it so the options panel stops offering to re-apply it.
         {
             std::lock_guard<std::mutex> lock(s_diffMutex);
             s_diffCache.erase(sinName);
@@ -757,9 +700,7 @@ void StartApplyUpdate(const std::string& denoiserAddonDir, const std::string& si
         s_applyStatus.store(EApplyStatus::Done);
         s_requestInFlight.store(false);
 
-        //_ Re-verify against what's actually on disk, rather than assuming
-        // the write matches expectation. Skipped once shutdown has begun --
-        // see StartUpdateCheck's alsoLoadDiff chain-call for the same reasoning.
+        //_ Re-verify against what's actually on disk. Skipped once shutdown has begun -- see StartUpdateCheck's alsoLoadDiff chain-call for the same reasoning.
         if (!s_shuttingDown.load())
             StartUpdateCheck(denoiserAddonDir);
     })
@@ -768,9 +709,7 @@ void StartApplyUpdate(const std::string& denoiserAddonDir, const std::string& si
 
 void StartInstallSin(const std::string& denoiserAddonDir, const std::string& sinName)
 {
-    //_ Same "for science" lock as StartApplyUpdate -- see the comment
-    // there. StartInstallSin writes a brand-new sin file via the same
-    // write-safety path, so it's under the same restriction.
+    //_ Same "for science" lock as StartApplyUpdate -- StartInstallSin writes a brand-new sin file via the same write-safety path, so it's under the same restriction.
     if (EffectDb_IsEnabled())
         return;
 
@@ -788,9 +727,7 @@ void StartInstallSin(const std::string& denoiserAddonDir, const std::string& sin
         }
     }
 
-    //_ Only proceed against the last completed check's own view of
-    // things -- if it doesn't think this sin is NotInstalled (stale
-    // info) or has no download URL, there's nothing safe to do here.
+    //_ Only proceeds against the last completed check's own view of things -- if it doesn't think this sin is NotInstalled (stale info) or has no download URL, there's nothing safe to do here.
     if (!found || target.state != ESinUpdateState::NotInstalled || target.latestDownloadUrl.empty())
     {
         s_requestInFlight.store(false);
@@ -812,9 +749,7 @@ void StartInstallSin(const std::string& denoiserAddonDir, const std::string& sin
             s_requestInFlight.store(false);
         };
 
-        //_ Download the release asset. Nothing local to reconcile
-        // against -- no merge, no .bak, since there's no existing file
-        // this could clobber.
+        //_ Download the release asset. Nothing local to reconcile against -- no merge, no .bak, since there's no existing file this could clobber.
         std::string body;
         int statusCode = 0;
         if (!HttpsGetToString(Widen(target.latestDownloadUrl), body, statusCode) || statusCode != 200)
@@ -823,9 +758,7 @@ void StartInstallSin(const std::string& denoiserAddonDir, const std::string& sin
             return;
         }
 
-        //_ The download above is the one thing CancelInFlightUpdateRequest
-        // can interrupt (handled by fail() already). Once it succeeds, this
-        // is the last chance to notice unload before writing to disk.
+        //_ The download above is the one thing CancelInFlightUpdateRequest can interrupt (handled by fail() already). Once it succeeds, this is the last chance to notice unload before writing to disk.
         if (s_shuttingDown.load())
         {
             s_applyStatus.store(EApplyStatus::Idle);
@@ -837,9 +770,7 @@ void StartInstallSin(const std::string& denoiserAddonDir, const std::string& sin
         try { newFile = json::parse(body); }
         catch (...) { fail("couldn't parse downloaded file"); return; }
 
-        //_ Write to a temp file first, then rename over the final name --
-        // same write-safety path as StartApplyUpdate, so a crash
-        // mid-write can't leave a half-written file behind.
+        //_ Write to a temp file first, then rename over the final name -- same write-safety path as StartApplyUpdate, so a crash mid-write can't leave a half-written file behind.
         fs::path dir = fs::path(denoiserAddonDir);
         std::error_code ec;
         std::string newFileName = "VfxD_" + sinName + "-v" + std::to_string(target.latestVersion) + ".json";
@@ -866,9 +797,7 @@ void StartInstallSin(const std::string& denoiserAddonDir, const std::string& sin
         s_applyStatus.store(EApplyStatus::Done);
         s_requestInFlight.store(false);
 
-        //_ Re-verify against what's actually on disk -- same reasoning
-        // as the end of StartApplyUpdate, including skipping it once
-        // shutdown has begun.
+        //_ Re-verify against what's actually on disk -- same reasoning as the end of StartApplyUpdate, including skipping it once shutdown has begun.
         if (!s_shuttingDown.load())
             StartUpdateCheck(denoiserAddonDir);
     })

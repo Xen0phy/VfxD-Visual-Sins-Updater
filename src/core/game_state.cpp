@@ -1,11 +1,5 @@
 //################################################################################
-// game_state.cpp
-//--------------------------------------------------------------------------------
-// See game_state.h for the module contract and source-selection rules.
-// Owns: caching the two DataLink pointers, and the per-field RTAPI/Mumble
-// selection logic. Deliberately has no knowledge of live_log.cpp or any
-// other consumer -- callers decide when to call these, this module just
-// answers "what is it right now."
+// game_state.cpp   (see: game_state.h)
 //--------------------------------------------------------------------------------
 
 #include "game_state.h"
@@ -14,8 +8,7 @@
 
 namespace {
 
-//_ Cached once in GameState_Init -- DataLink_Get's pointers stay valid
-// for the addon's session, so these aren't re-queried every call.
+//_ Valid for the whole addon session -- set once in GameState_Init.
 Mumble::Identity*    s_mumbleIdentity = nullptr;
 Mumble::Data*        s_mumbleLink     = nullptr;
 RTAPI::RealTimeData* s_rtapiData      = nullptr;
@@ -69,8 +62,6 @@ Mumble::EProfession GameState_GetProfession()
 
 unsigned int GameState_GetSpecialization()
 {
-    //_ Cross-source equivalence confirmed by hand-testing (see
-    // game_state.h). No reconciliation beyond the fallback order itself.
     if (GameState_IsRTAPILive())
         return s_rtapiData->EliteSpecialization;
     if (s_mumbleIdentity)
@@ -78,11 +69,15 @@ unsigned int GameState_GetSpecialization()
     return 0;
 }
 
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// GameState_GetRace
+//--------------------------------------------------------------------------------
+// Falls back to Asura (0) when identity isn't available. Callers needing to
+// tell that apart from a genuine Asura should check
+// GameState_HasMumbleIdentity() first.
+//--------------------------------------------------------------------------------
 Mumble::ERace GameState_GetRace()
 {
-    //_ Falls back to Asura (0) when identity isn't available -- callers
-    // needing to tell that apart from a genuine Asura should check
-    // GameState_HasMumbleIdentity() first.
     if (s_mumbleIdentity)
         return s_mumbleIdentity->Race;
     return Mumble::ERace::Asura;
@@ -90,8 +85,7 @@ Mumble::ERace GameState_GetRace()
 
 const char* GameState_ProfessionName(Mumble::EProfession profession)
 {
-    //_ Matched directly against Mumble.h's EProfession, not guessed from
-    // the enumerator spelling.
+    //_ Matched against Mumble.h's EProfession, not enumerator spelling.
     switch (profession)
     {
         case ENone:         return "None";
@@ -127,9 +121,9 @@ namespace {
 // FixedCharArrayToString
 //--------------------------------------------------------------------------------
 // Converts a fixed-size char array to a std::string. Mumble.h/RTAPI.hpp
-// document these as null-terminated in practice, but neither guarantees
-// it if the real value ever exactly fills the buffer -- strnlen bounds
-// the read instead of trusting an unguaranteed terminator.
+// document these as null-terminated in practice, but neither guarantees it if
+// the real value ever exactly fills the buffer -- strnlen bounds the read
+// instead of trusting an unguaranteed terminator.
 //--------------------------------------------------------------------------------
 std::string FixedCharArrayToString(const char* arr, size_t capacity)
 {

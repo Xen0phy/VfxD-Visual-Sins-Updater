@@ -20,8 +20,8 @@
 // so a rollback can find the sin's *current* on-disk filename in case it
 // differs from the backup's after an applied update.
 //
-// denoiserAddonDir is passed in rather than read from a global, same
-// convention as RenderReportSection -- addon.cpp remains the sole owner
-// of s_denoiserAddonDir.
+// denoiserAddonDir is passed in instead of read from a global, same convention
+// as RenderReportSection -- addon.cpp remains the sole owner of
+// s_denoiserAddonDir.
 //--------------------------------------------------------------------------------
 void RenderBackupsSection(const std::string& denoiserAddonDir);

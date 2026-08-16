@@ -1,9 +1,5 @@
 //################################################################################
-// installed_tree_search.cpp
-//--------------------------------------------------------------------------------
-// See installed_tree_search.h for the module contract. Installed-effects
-// tree search matching/closing functions, extracted from addon.cpp -- a
-// mechanical move, no behavior change.
+// installed_tree_search.cpp   (see: installed_tree_search.h)
 //--------------------------------------------------------------------------------
 
 #include "imgui.h"
@@ -110,9 +106,7 @@ bool CategoryHasDescendantMatch(const nlohmann::ordered_json& category, const st
 void BuildCategoryMatchCache(const nlohmann::ordered_json& category, const std::string& queryLower,
                               CategoryMatchCache& categoryCache, EffectMatchCache& effectCache)
 {
-    //_ Bottom-up: effects and subcategories first, so each is visited
-    // (and cached) exactly once for the whole tree -- see the group
-    // comment in installed_tree_search.h for why that matters.
+    //_ Bottom-up -- children cached before their parent needs the answer.
     bool anyDescendantMatches = false;
 
     if (category.contains("effects") && category["effects"].is_array())
@@ -211,8 +205,7 @@ void SilentlyCloseSubtree(const nlohmann::ordered_json& category)
     std::string name = category.value("name", std::string("(unnamed category)"));
     ImGui::GetStateStorage()->SetInt(ImGui::GetID(name.c_str()), 0);
 
-    //_ Mirror the ID scope TreeNode(name) would have auto-pushed for its
-    // children had it actually opened.
+    //_ Mirrors the ID scope TreeNode(name) would have auto-pushed if opened.
     ImGui::PushID(name.c_str());
     SilentlyCloseChildren(category);
     ImGui::PopID();

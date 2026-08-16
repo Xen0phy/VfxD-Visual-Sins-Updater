@@ -42,17 +42,16 @@ struct BackupInfo
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // ScanBackups
 //--------------------------------------------------------------------------------
-// Scans denoiserAddonDir for .bak files belonging to any VfxD_<Name>.json
-// Visual Sins file -- not limited to the update-tracked kSinNames subset
-// (see sin_files.h) -- matched the same way ScanInstalledSinFiles matches
-// the live files, plus a trailing ".bak". Also picks up the .bak of any
-// other .json file SaveInstalledSinFile has ever written a backup for
-// (i.e. any file ScanInstalledSinFiles accepted by content, not just
-// name -- see its own comment); by the time a .bak exists its .json
-// sibling already passed that content check once, so ScanBackups itself
-// doesn't re-open the file, it just reuses the same name/version
-// fallback (ExtractNameAndVersion). Does filesystem stat() calls -- call
-// on demand, not every frame.
+// Scans denoiserAddonDir for .bak files belonging to any VfxD_<Name>.json Visual
+// Sins file -- not limited to the update-tracked kSinNames subset (see
+// sin_files.h) -- matched the same way ScanInstalledSinFiles matches the live
+// files, plus a trailing ".bak". Also picks up the .bak of any other .json file
+// SaveInstalledSinFile has ever written a backup for (i.e. any file
+// ScanInstalledSinFiles accepted by content, not just name -- see its own
+// comment); by the time a .bak exists its .json sibling already passed that
+// content check once, so ScanBackups itself doesn't re-open the file, it just
+// reuses the same name/version fallback (ExtractNameAndVersion). Does filesystem
+// stat() calls -- call on demand, not every frame.
 //--------------------------------------------------------------------------------
 std::vector<BackupInfo> ScanBackups(const std::string& denoiserAddonDir);
 
@@ -60,15 +59,14 @@ std::vector<BackupInfo> ScanBackups(const std::string& denoiserAddonDir);
 // RestoreBackup
 //--------------------------------------------------------------------------------
 // Restores backup to backup.restorePath, using the same backup-then-tmp-
-// then-rename write-safety pattern as every other write in this addon --
-// a crash mid-rollback can't corrupt anything either. restorePath, if it
-// currently exists, is itself backed up over the same .bak -- so a
-// rollback is really a swap; running it again brings back the
-// pre-rollback content.
+// then-rename write-safety pattern as every other write in this addon -- a crash
+// mid-rollback can't corrupt anything either. restorePath, if it currently
+// exists, is itself backed up over the same .bak -- so a rollback is really a
+// swap; running it again brings back the pre-rollback content.
 //
-// currentInstalledPath, if non-empty and different from restorePath (the
-// case after an applied update, which writes under a new version-stamped
-// filename), is removed best-effort once the restore succeeds. Pass an
-// empty string if there's no such file.
+// currentInstalledPath, if non-empty and different from restorePath (the case
+// after an applied update, which writes under a new version-stamped filename), is
+// removed best-effort once the restore succeeds. Pass an empty string if there's
+// no such file.
 //--------------------------------------------------------------------------------
 bool RestoreBackup(const BackupInfo& backup, const std::string& currentInstalledPath, std::string& outError);

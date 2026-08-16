@@ -1,80 +1,67 @@
 //################################################################################
-// live_log.cpp
-//--------------------------------------------------------------------------------
-// See live_log.h for the module contract and vfxd_sins_bridge.h for the
-// wire format. This file owns: the subscribe/unsubscribe lifecycle, the
-// one-entry-per-guid storage map (plus its for-science twin, see
-// UpdateForScienceEntry), the drop-on-arrival "hide known" filter, and
-// infostr parsing. Rendering (the CollapsingHeader, the tree, the
-// toggles) stays in live_log_ui.cpp/addon.cpp alongside every other
-// section, same as backup.cpp/report.cpp already do for their own
-// sections.
+// live_log.cpp   (see: live_log.h)
 //--------------------------------------------------------------------------------
 
 #include "effect_db.h"
 #include "live_log.h"
+#include "game_state.h"
 #include "vfxd_sins_bridge.h"
 
 #include <sstream>
 
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// (anonymous namespace)
+//--------------------------------------------------------------------------------
+// Owns the subscribe/unsubscribe lifecycle, the one-entry-per-guid storage map
+// (plus its for-science twin, see UpdateForScienceEntry), the drop-on-arrival
+// "hide known" filter, and infostr parsing (see vfxd_sins_bridge.h for the wire
+// format). Rendering stays in live_log_ui.cpp/addon.cpp, same as
+// backup.cpp/report.cpp already do for their own sections.
+//--------------------------------------------------------------------------------
 namespace {
 
 AddonAPI_t* s_api        = nullptr;
 bool        s_listening  = false;
 bool        s_hideKnown  = false;
 
-//_ See LiveLog_SetForScienceOnly's doc comment in live_log.h -- gates
-// IngestLogLine's own ordinary-fold branch only, checked after
-// FeedEffectDb/UpdateForScienceEntry always already ran.
+//_ Gates IngestLogLine's ordinary-fold branch only; see LiveLog_SetForScienceOnly
 bool        s_forScienceOnly = false;
 
-//_ Types 0, 1, 9, 11 start disabled (rarely useful by default); the rest
-// start enabled -- from characterizing real captured data. Not persisted
-// anywhere; resets to these defaults every time the DLL loads.
+//_ Types 0/1/9/11 default disabled, rest enabled; not persisted across reloads
 bool s_typeEnabled[kLiveLogTypeCount] = {
     false, false, true, true, true, true, true, true, true, false, true, false
 };
 
-//_ Assigned once per guid on genuine first sight (see firstSeenSeq), so
-// render order can follow "received order" without re-deriving it. Reset
-// alongside LiveLog_Clear() so a cleared log's next entry starts at 0.
+//_ Per-guid first-sight counter for render order; reset in LiveLog_Clear()
 int s_nextSeq = 0;
 
 std::unordered_map<std::string, LiveLogEntry> s_entries;        //. guid_b64 -> entry
 std::unordered_map<std::string, std::string>  s_guidToName;     //. name map from addon.cpp
 std::unordered_map<std::string, std::string>  s_guidToBehavior; //. behavior map from addon.cpp
 
-//_ The effect db's own capture stream, mirrored for display -- see
-// LiveLog_GetForScienceEntries's doc comment in live_log.h. Own
-// firstSeenSeq counter, independent of the ordinary entries map's.
+//_ Display mirror of the effect db capture stream (see live_log.h)
 std::unordered_map<std::string, LiveLogEntry> s_forScienceEntries; //. guid_b64 -> entry
-int s_forScienceNextSeq = 0;
+int s_forScienceNextSeq = 0;   //. independent of s_nextSeq
 
-//_ Running "is a group currently open" state for AdvanceGroupState below.
-// Lives at module scope, not per-entry, since grouping is a property of
-// arrival order -- a single guid can drift through several groups.
+//_ Module-scope "group currently open" state for AdvanceGroupState below
 int          s_nextGroupId            = 0;
 int          s_currentGroupId         = -1;
 int          s_currentGroupDuration   = 0;
 unsigned int s_currentGroupA4         = 0;
-int          s_currentGroupStarterType = -1;   //. which of {1, 11} opened the active group
+int          s_currentGroupStarterType = -1;   //. active group's starter type
 
-//_ Guid of the starter that opened s_currentGroupId; "" if none open.
-// Unlike the int id above (session-local strip coloring only, see
-// GroupStripColor), this feeds FeedEffectDb's group_members table.
+//_ Starter guid for s_currentGroupId; feeds FeedEffectDb's group_members table
 std::string  s_currentGroupStarterGuid;
 
-//_ signature -> groupId, for content-addressed group identity (see
-// AdvanceGroupState below). Session-lifetime; cleared in LiveLog_Clear.
+//_ signature -> groupId map for content-addressed group identity; see Clear()
 std::unordered_map<std::string, int> s_groupSignatureToId;
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // MakeGroupSignature
 //--------------------------------------------------------------------------------
-// Builds the s_groupSignatureToId key for a starter line: two starters
-// with the same guid/duration/a4 collapse onto the same groupId, no
-// matter how far apart in time or how many unrelated groups sit between
-// them (see AdvanceGroupState).
+// Builds the s_groupSignatureToId key for a starter line: two starters with the
+// same guid/duration/a4 collapse onto the same groupId, no matter how far apart
+// in time or how many unrelated groups sit between them (see AdvanceGroupState).
 //--------------------------------------------------------------------------------
 std::string MakeGroupSignature(const std::string& starterGuid, int duration, unsigned int a4)
 {
@@ -85,48 +72,27 @@ std::string MakeGroupSignature(const std::string& starterGuid, int duration, uns
 // AdvanceGroupState
 //--------------------------------------------------------------------------------
 // Called unconditionally on every parsed line, before IngestLogLine's own
-// type/hideKnown filters -- a dropped *continuation* line must not break
-// group state, but a dropped *starter* type must still block grouping.
-//
-// type:1 / type:11 opens a group, unless toggled off in s_typeEnabled --
-// then nothing opens, and any group in progress closes immediately. The
-// id is looked up by (starterGuid, duration, a4) signature (see
-// MakeGroupSignature), not freshly minted, so a recurrence of the same
-// starter reuses the same groupId no matter how long ago it last showed up.
-// Exception: while background-only mode is on (LiveLog_SetForScienceOnly),
-// s_typeEnabled is ignored here entirely -- see the local typeGateOpen
-// lambda below for why that's safe.
-//
-// A non-starter line joins the open group only if its duration and a4
-// match the starter's exactly; anything else -- including a toggled-off
-// type -- closes the group outright (strict contiguity) and returns -1.
-//
-// outGroupStarterGuid is set to the starter guid of whichever group this
-// line ends up in, or cleared to "" when the return is -1 -- the value
-// IngestLogLine threads into FeedEffectDb for group_members (see
-// s_currentGroupStarterGuid's own comment on why it's a separate concept).
+// type/hideKnown filters, so a dropped continuation line can't break group state
+// while a dropped starter still blocks grouping. type:1/11 opens a group unless
+// toggled off in s_typeEnabled, closing any group in progress; the id comes from
+// a (starterGuid, duration, a4) signature (see MakeGroupSignature), reused on
+// recurrence regardless of gap. A non-starter line joins only on an exact
+// duration/a4 match; anything else closes the group (strict contiguity) and
+// returns -1. Background-only mode (LiveLog_SetForScienceOnly) ignores
+// s_typeEnabled here -- see typeGateOpen below. outGroupStarterGuid carries the
+// starter guid to FeedEffectDb, cleared to "" on a -1 return.
 //--------------------------------------------------------------------------------
 int AdvanceGroupState(const std::string& starterGuid, int type, int duration, unsigned int a4,
                        std::string& outGroupStarterGuid)
 {
-    //_ Background-only mode (LiveLog_SetForScienceOnly) ignores
-    // s_typeEnabled entirely for grouping, same as FeedEffectDb/
-    // UpdateForScienceEntry already ignore it for everything else -- see
-    // this function's own doc comment. Safe to bypass here specifically
-    // because IngestLogLine's ordinary branch (the only other consumer of
-    // this function's output, and the only reason it stays in sync with
-    // s_typeEnabled at all) never runs while background-only mode is on;
-    // it returns early before reaching that branch. Without this,
-    // s_typeEnabled's own defaults (types 0/1/9/11 start off) would leave
-    // type:1/11 group starters permanently ungrouped in the db despite
-    // background-only mode's whole point being "every type, unfiltered".
+    //_ Bypasses s_typeEnabled so background-only mode groups every type
     auto typeGateOpen = [](int t) { return s_forScienceOnly || s_typeEnabled[t]; };
 
     if (type == 1 || type == 11)
     {
         if (!typeGateOpen(type))
         {
-            s_currentGroupId = -1;   //. starter filtered off: nothing opens, and anything open closes
+            s_currentGroupId = -1;   //. starter filtered: closes any group
             s_currentGroupStarterGuid.clear();
             outGroupStarterGuid.clear();
             return -1;
@@ -147,7 +113,7 @@ int AdvanceGroupState(const std::string& starterGuid, int type, int duration, un
     }
 
     if (s_currentGroupId >= 0
-        && typeGateOpen(s_currentGroupStarterType)   //. group's own starter type must still be on
+        && typeGateOpen(s_currentGroupStarterType)   //. starter's type must stay enabled
         && duration == s_currentGroupDuration
         && a4 == s_currentGroupA4)
     {
@@ -155,9 +121,7 @@ int AdvanceGroupState(const std::string& starterGuid, int type, int duration, un
         return s_currentGroupId;
     }
 
-    //_ Closes whatever group was open, not just this line -- (duration,
-    // a4) pairs get reused by unrelated effects, so without this,
-    // unrelated lines could silently keep joining on shared numbers.
+    //_ Closes any open group -- duration/a4 pairs recur across unrelated effects
     s_currentGroupId = -1;
     s_currentGroupStarterGuid.clear();
     outGroupStarterGuid.clear();
@@ -167,20 +131,17 @@ int AdvanceGroupState(const std::string& starterGuid, int type, int duration, un
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // ParseInfoFields
 //--------------------------------------------------------------------------------
-// infostr's shape (see log_effect): an optional leading effectDef name
-// (the one part that can contain spaces), then "type:" onward is a run of
-// whitespace-delimited "key:value" tokens with no fixed order
-// requirement, followed by optional trailing found_effect->name / " -> "
-// + behavior text that isn't ours to parse anymore (see live_log.h:
-// `behavior` is fully removed). Every field value is a single token with
-// no embedded spaces, so each one is bounded by "read to the next
-// whitespace" rather than by searching for the next key's literal text.
+// infostr's shape (see log_effect): an optional leading effectDef name (the one
+// part that can contain spaces), then "type:" onward is a run of whitespace-
+// delimited "key:value" tokens with no fixed order requirement, followed by
+// optional trailing found_effect->name / " -> " + behavior text that isn't ours
+// to parse anymore (see live_log.h: `behavior` is fully removed). Every field
+// value is a single token with no embedded spaces, so each one is bounded by the
+// next whitespace, not by searching for the next key's literal text.
 //--------------------------------------------------------------------------------
 void ParseInfoFields(const std::string& info, LiveLogEntry& e)
 {
-    //_ Overrides the default 0 -- a missing/failed "type:" parse should
-    // fail IngestLogLine's bounds check and show unfiltered, not silently
-    // alias to type 0 (disabled) and vanish the entry without a trace.
+    //_ -1 default so a failed parse fails the bounds check, not aliases to type 0
     e.type = -1;
 
     size_t pos = info.find("type:");   //. skip the leading effectDef name
@@ -220,10 +181,10 @@ void ParseInfoFields(const std::string& info, LiveLogEntry& e)
 //--------------------------------------------------------------------------------
 // info's leading token, before "type:" -- e.g. "GDgna.cndZw" -- which
 // ParseInfoFields above has always simply skipped past (its own
-// info.find("type:") jump). Split on '.' into group/member. Left empty
-// (both out params untouched) if this line has no dotted block at all --
-// not every infostr carries one, and guessing at a non-block-shaped
-// leading token would be worse than leaving it blank.
+// info.find("type:") jump). Split on '.' into group/member. Left empty (both out
+// params untouched) if this line has no dotted block at all -- not every infostr
+// carries one, and guessing at a non-block-shaped leading token would be worse
+// than leaving it blank.
 //--------------------------------------------------------------------------------
 void ParseLeadingBlock(const std::string& info, std::string& outGroup, std::string& outMember)
 {
@@ -234,7 +195,7 @@ void ParseLeadingBlock(const std::string& info, std::string& outGroup, std::stri
     std::string leading = info.substr(0, typePos);
     size_t end = leading.find_last_not_of(" \t");
     if (end == std::string::npos)
-        return;   //. nothing but whitespace before "type:" -- no block here
+        return;   //. whitespace-only prefix -- no block
     leading = leading.substr(0, end + 1);
 
     size_t dot = leading.find('.');
@@ -248,17 +209,13 @@ void ParseLeadingBlock(const std::string& info, std::string& outGroup, std::stri
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // ParseTrailingName
 //--------------------------------------------------------------------------------
-// Everything after the last recognized key:value token, minus the
-// " -> behavior" suffix this addon deliberately never parses further
-// (see live_log.h on `behavior` being fully removed) -- e.g.
-// "Cross 032 - Bullet Trail" out of "... target:self Cross 032 - Bullet
-// Trail -> Hide". Empty for a nameless type 1/11 marker line.
-//
-// Independent of field order on purpose, per ParseInfoFields's own
-// comment that infostr makes no ordering guarantee: walks every
-// whitespace-delimited token, remembers the stream position right after
-// the *last* one shaped like a recognized key:value pair, and returns
-// whatever text follows that position.
+// Everything after the last recognized key:value token, minus the " -> behavior"
+// suffix this addon never parses further (see live_log.h on `behavior` being
+// fully removed) -- e.g. "Cross 032 - Bullet Trail" out of "... target:self Cross
+// 032 - Bullet Trail -> Hide". Empty for a nameless type 1/11 marker line. Walks
+// every whitespace-delimited token, independent of field order (see
+// ParseInfoFields), and returns whatever follows the last token shaped like a
+// recognized key:value pair.
 //--------------------------------------------------------------------------------
 std::string ParseTrailingName(const std::string& info)
 {
@@ -278,9 +235,7 @@ std::string ParseTrailingName(const std::string& info)
         if (isKey)
         {
             auto pos = tokens.tellg();
-            //_ tellg() returns -1 once extraction has consumed the rest of
-            // the stream (this key was the last token) -- treat that as
-            // "nothing follows" rather than misreading it as a huge offset.
+            //_ tellg() returns -1 when exhausted; treat as "nothing follows"
             lastKeyEnd = (pos == std::istringstream::pos_type(-1)) ? info.size() : static_cast<size_t>(pos);
         }
     }
@@ -305,20 +260,18 @@ std::string ParseTrailingName(const std::string& info)
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // ApplyGroupHistory
 //--------------------------------------------------------------------------------
-// Shared by IngestLogLine's ordinary entry and UpdateForScienceEntry --
-// factored out so the for-science branch's strip/tooltip (see
-// live_log_ui.cpp's GroupStripColor and its caller) follows exactly the
-// same "latest wins on groupId, append to recentGroupIds only on genuine
-// change, cap at kLiveLogGroupHistoryCap" rule the ordinary branch already
-// had, rather than a second, driftable copy of it.
+// Shared by IngestLogLine's ordinary entry and UpdateForScienceEntry -- factored
+// out so the for-science branch's strip/tooltip (see live_log_ui.cpp's
+// GroupStripColor and its caller) follows exactly the same "latest wins on
+// groupId, append to recentGroupIds only on genuine change, cap at
+// kLiveLogGroupHistoryCap" rule the ordinary branch already had, instead of a
+// second, driftable copy of it.
 //--------------------------------------------------------------------------------
 void ApplyGroupHistory(LiveLogEntry& entry, int groupId)
 {
     entry.groupId = groupId;   //. "latest wins", same as type/duration/a4
 
-    //_ Append only when the group actually differs from the last one
-    // recorded -- same-group repeats don't grow this, and an ungrouped
-    // event neither appends nor clears history (groupId == -1).
+    //_ Appends only on a group change; ungrouped (-1) neither appends nor clears
     if (groupId >= 0 && (entry.recentGroupIds.empty() || entry.recentGroupIds.back() != groupId))
     {
         entry.recentGroupIds.push_back(groupId);
@@ -330,25 +283,16 @@ void ApplyGroupHistory(LiveLogEntry& entry, int groupId)
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // FeedEffectDb
 //--------------------------------------------------------------------------------
-// The "for science" capture hook -- called from IngestLogLine *before*
-// this module's own type-toggle/hideKnown display filters, deliberately:
-// those exist to declutter the on-screen panel, not to gate what's worth
-// writing to a permanent research database. In particular s_typeEnabled
-// starts types 1 and 11 *disabled* by default even though those are
-// precisely the marker rows the database exists to correlate.
-//
-// Caster-only for now (see effect_db.h on kSelfMaskCaster being the only
-// value currently produced) -- entirely separate from isSelfEvent below,
-// which is broader (caster OR target) and only feeds LiveLogEntry's own
-// display fold, not this.
-//
-// groupStarterGuid passes straight through to EffectDbRawEvent as-is
-// (already resolved by AdvanceGroupState via IngestLogLine) -- same
-// "passed in, not read from statics" convention this file already follows.
-//
-// Bails before EffectDb_RecordEvent if no identity source is attached yet
-// (see GameState_GetProfession's doc comment) -- recording then would set
-// EffectDb_SpecOrCoreId's reserved sentinel bit, which can't be cleared.
+// The "for science" capture hook, called before this module's own type-
+// toggle/hideKnown display filters -- those declutter the on-screen panel, not
+// gate what's worth writing to the database, and s_typeEnabled starts types 1/11
+// disabled even though those are the marker rows the database exists to
+// correlate. Caster-only currently (see effect_db.h's kSelfMaskCaster), unlike
+// the broader isSelfEvent below, which only feeds the display fold.
+// groupStarterGuid passes straight through to EffectDbRawEvent, resolved by
+// AdvanceGroupState. Bails before EffectDb_RecordEvent with no identity source
+// attached (see GameState_GetProfession) -- recording then sets a sentinel bit
+// that can't clear.
 //--------------------------------------------------------------------------------
 void FeedEffectDb(const std::string& guid_b64, const std::string& info, const LiveLogEntry& parsed,
                    const std::string& groupStarterGuid)
@@ -356,8 +300,7 @@ void FeedEffectDb(const std::string& guid_b64, const std::string& info, const Li
     if (!EffectDb_IsEnabled() || parsed.caster != "self")
         return;
 
-    //_ No identity source attached yet -- see this function's doc comment
-    // on why that must bail here rather than being filtered out later.
+    //_ No identity source yet; must bail here, not be filtered out later
     if (!GameState_IsRTAPILive() && !GameState_HasMumbleIdentity())
         return;
 
@@ -372,9 +315,7 @@ void FeedEffectDb(const std::string& guid_b64, const std::string& info, const Li
     ev.groupStarterGuid = groupStarterGuid;
     ev.selfMask = kSelfMaskCaster;
 
-    //_ Read close together, not a full fix, but keeps the window small
-    // where RTAPI could flip live/not-live between calls and mix sources
-    // (see GameState_GetProfession's doc comment on the None fallback).
+    //_ Read close together to shrink the window where RTAPI could flip mid-call
     ev.profession     = GameState_GetProfession();
     ev.race           = GameState_GetRace();
     ev.specialization = GameState_GetSpecialization();
@@ -385,20 +326,14 @@ void FeedEffectDb(const std::string& guid_b64, const std::string& info, const Li
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // UpdateForScienceEntry
 //--------------------------------------------------------------------------------
-// Display-side twin of FeedEffectDb -- same gate (EffectDb_IsEnabled() &&
-// parsed.caster == "self"), so this map's contents always match what's
-// actually landing in the db, never showing an event the db itself
-// dropped. Deliberately does NOT check s_typeEnabled or s_hideKnown --
-// this stream exists specifically so "for science" isn't blind to
-// whatever the ordinary display filters currently hide (see FeedEffectDb's
-// own comment on why types 1/11 in particular can't be filtered here).
-//
-// groupId is applied via the same ApplyGroupHistory helper the ordinary
-// entry uses -- this stream is never itself filtered by s_typeEnabled, but
-// AdvanceGroupState's grouping still respects that toggle (a type:1/11
-// starter that's toggled off in the ordinary panel doesn't open a group
-// here either -- see AdvanceGroupState's own gate), so this and the
-// ordinary branch always agree on which lines are currently grouped.
+// Display-side twin of FeedEffectDb -- same gate (EffectDb_IsEnabled() && caster
+// == "self"), so this map always matches what's landing in the db. Does not check
+// s_typeEnabled or s_hideKnown -- this stream exists so "for science" isn't blind
+// to whatever the ordinary display filters hide (see FeedEffectDb on why types
+// 1/11 can't be filtered here). groupId comes from the same ApplyGroupHistory
+// helper the ordinary entry uses; AdvanceGroupState's own s_typeEnabled gate
+// still applies to grouping, so the two branches always agree on which lines are
+// currently grouped.
 //--------------------------------------------------------------------------------
 void UpdateForScienceEntry(const std::string& guid_b64, const LiveLogEntry& parsed, int groupId)
 {
@@ -427,35 +362,28 @@ void UpdateForScienceEntry(const std::string& guid_b64, const LiveLogEntry& pars
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // IngestLogLine
 //--------------------------------------------------------------------------------
-// The actual ingestion path, shared by the real Events_Subscribe callback
-// below and directly usable by test code without going through Nexus at
-// all. Takes plain strings, not the raw event struct, so it never has to
-// trust the payload's lifetime past this call. Drops the event, before it
-// ever becomes/updates an entry, if its type is toggled off or hideKnown
-// applies; otherwise inserts-or-updates the one entry for this guid,
-// "latest wins".
+// The actual ingestion path, shared by the real Events_Subscribe callback below
+// and directly usable by test code without going through Nexus at all. Takes
+// plain strings, not the raw event struct, so it never has to trust the payload's
+// lifetime past this call. Drops the event, before it ever becomes/updates an
+// entry, if its type is toggled off or hideKnown applies; otherwise inserts-or-
+// updates the one entry for this guid, "latest wins".
 //--------------------------------------------------------------------------------
 void IngestLogLine(const std::string& guid_b64, const std::string& info)
 {
-    //_ Parsed into a scratch entry first so the filter check below can
-    // use the freshly-parsed type without a separate parse pass.
+    //_ Scratch entry lets the filter check below reuse the freshly-parsed type
     LiveLogEntry parsed{};
     ParseInfoFields(info, parsed);
 
-    //_ Always runs, even for a line about to be dropped below -- group
-    // state must stay continuous regardless of per-type filters (see
-    // AdvanceGroupState); now computed first so both calls below can thread it.
+    //_ Runs even for a dropped line -- group state must stay continuous
     std::string groupStarterGuid;
     int groupId = AdvanceGroupState(guid_b64, parsed.type, parsed.duration, parsed.a4, groupStarterGuid);
 
-    //. unconditionally, before either filter below -- see FeedEffectDb
+    //_ Runs unconditionally, before either filter below -- see FeedEffectDb
     FeedEffectDb(guid_b64, info, parsed, groupStarterGuid);
-    UpdateForScienceEntry(guid_b64, parsed, groupId);   //. same gate as FeedEffectDb, see that function's comment
+    UpdateForScienceEntry(guid_b64, parsed, groupId);   //. same gate as FeedEffectDb
 
-    //_ Background-capture mode -- see LiveLog_SetForScienceOnly's doc
-    // comment. Both calls above already ran unconditionally, so "for
-    // science" capture and its own display twin are unaffected; this only
-    // ever skips the ordinary s_entries fold below.
+    //_ Background-capture mode; only skips the ordinary s_entries fold below
     if (s_forScienceOnly)
         return;
 
@@ -466,15 +394,14 @@ void IngestLogLine(const std::string& guid_b64, const std::string& info)
     if (s_hideKnown && known)
         return;   //. hideKnown drop
 
-    LiveLogEntry& entry = s_entries[guid_b64]; //. insert-or-get: repeats collapse onto the same entry
+    LiveLogEntry& entry = s_entries[guid_b64]; //. insert-or-get, repeats collapse here
     if (entry.seenCount == 0)
         entry.firstSeenSeq = s_nextSeq++;   //. first sight only
 
     entry.guid_b64     = guid_b64;
     entry.knownInSin   = known;
     entry.displayName  = known ? s_guidToName.at(guid_b64) : guid_b64;
-    //_ Independent lookup, never derived from the event (see live_log.h)
-    // -- guarded separately from s_guidToName in case the two go out of sync.
+    //_ Independent lookup, guarded separately in case it drifts from s_guidToName
     entry.installedBehavior = (known && s_guidToBehavior.count(guid_b64)) ? s_guidToBehavior.at(guid_b64) : "";
     entry.type     = parsed.type;
     entry.duration = parsed.duration;
@@ -482,12 +409,11 @@ void IngestLogLine(const std::string& guid_b64, const std::string& info)
     entry.caster   = parsed.caster;
     entry.a6       = parsed.a6;
     entry.target   = parsed.target;
-    ApplyGroupHistory(entry, groupId);   //. see ApplyGroupHistory's own comment -- shared with UpdateForScienceEntry
+    ApplyGroupHistory(entry, groupId);   //. shared with UpdateForScienceEntry
 
     entry.seenCount++;
 
-    //_ Written only when this event's caster or target is "self" (exact
-    // match of VfxDenoiser's own pointer-identity check) -- see LiveLogEntry.
+    //_ Self-context fields set only on an exact caster/target == "self" match
     bool isSelfEvent = (parsed.caster == "self" || parsed.target == "self");
     if (isSelfEvent)
     {
@@ -502,9 +428,9 @@ void IngestLogLine(const std::string& guid_b64, const std::string& info)
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // OnVfxdSinsLog
 //--------------------------------------------------------------------------------
-// Events_Subscribe callback for EV_VFXD_SINS_LOG. Copies the event's
-// pointers out immediately, since they're only valid for the duration of
-// this callback (see vfxd_sins_bridge.h), then hands off to IngestLogLine.
+// Events_Subscribe callback for EV_VFXD_SINS_LOG. Copies the event's pointers out
+// immediately, since they're only valid for the duration of this callback (see
+// vfxd_sins_bridge.h), then hands off to IngestLogLine.
 //--------------------------------------------------------------------------------
 void OnVfxdSinsLog(void* aEventArgs)
 {
@@ -617,9 +543,7 @@ void LiveLog_Clear()
     s_forScienceEntries.clear();
     s_forScienceNextSeq = 0;
 
-    //_ So a cleared log's next group starts at 0 with no stale "currently
-    // open group" or stale signatures carried over from before the clear
-    // (see s_groupSignatureToId).
+    //_ Resets group state so nothing stale carries over from before the clear
     s_nextGroupId            = 0;
     s_currentGroupId         = -1;
     s_currentGroupDuration   = 0;

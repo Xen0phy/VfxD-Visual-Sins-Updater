@@ -1,9 +1,5 @@
 //################################################################################
-// backup.cpp
-//--------------------------------------------------------------------------------
-// See backup.h for the module contract. This file owns: scanning the
-// addon dir for .bak files, and the read-then-backup-then-temp-rename
-// sequence that makes a restore crash-safe.
+// backup.cpp   (see: backup.h)
 //--------------------------------------------------------------------------------
 
 #include "core/backup.h"
@@ -18,6 +14,9 @@
 
 namespace fs = std::filesystem;
 
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// ScanBackups
+//--------------------------------------------------------------------------------
 std::vector<BackupInfo> ScanBackups(const std::string& denoiserAddonDir)
 {
     std::vector<BackupInfo> out;
@@ -26,9 +25,7 @@ std::vector<BackupInfo> ScanBackups(const std::string& denoiserAddonDir)
     if (!fs::exists(denoiserAddonDir, ec) || ec)
         return out;   //. not installed, nothing to find
 
-    //_ Same sin-name/separator pattern as ScanInstalledSinFiles (any
-    // <Name>, not a fixed list -- see sin_files.h), plus a trailing ".bak".
-    // Version isn't tracked -- a backup is only ever restored to its own path.
+    //_ Version isn't tracked -- a backup only ever restores to its own path.
     static const std::regex kVfxdPattern(R"(^VfxD_([A-Za-z0-9]+)(?:[-_]v\d+)?\.json\.bak$)");
 
     for (const auto& entry : fs::directory_iterator(denoiserAddonDir, ec))
@@ -48,9 +45,7 @@ std::vector<BackupInfo> ScanBackups(const std::string& denoiserAddonDir)
         }
         else
         {
-            //_ Not VfxD_<Name>-named -- fall back to the same name/version
-            // split ScanInstalledSinFiles uses for content-matched files, so
-            // sinName lines up with the live file it belongs to (version discarded).
+            //_ Not VfxD_<Name>-named -- falls back like content-matched files.
             std::string outName;
             int         outVersion;
             ExtractNameAndVersion(fileName.substr(0, fileName.size() - 9), outName, outVersion);
@@ -71,10 +66,12 @@ std::vector<BackupInfo> ScanBackups(const std::string& denoiserAddonDir)
     return out;
 }
 
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// RestoreBackup
+//--------------------------------------------------------------------------------
 bool RestoreBackup(const BackupInfo& backup, const std::string& currentInstalledPath, std::string& outError)
 {
-    //_ Read into memory before touching anything on disk -- bakPath and
-    // restorePath can be the same file content-wise in edge cases.
+    //_ Read into memory first -- bakPath/restorePath can collide content-wise.
     std::string content;
     {
         std::ifstream in(backup.bakPath, std::ios::binary);
@@ -95,8 +92,7 @@ bool RestoreBackup(const BackupInfo& backup, const std::string& currentInstalled
 
     const std::string& restorePath = backup.restorePath;
 
-    //_ Back up whatever's currently at restorePath onto this same .bak
-    // first -- makes a restore a swap; doing it again undoes it.
+    //_ Swap semantics for this copy are explained in backup.h.
     std::error_code ec;
     if (fs::exists(restorePath, ec))
     {
@@ -108,8 +104,7 @@ bool RestoreBackup(const BackupInfo& backup, const std::string& currentInstalled
         }
     }
 
-    //_ Temp file then rename over restorePath, so a crash mid-restore
-    // can't corrupt anything.
+    //_ Crash-safety for this tmp/rename step is explained in backup.h.
     fs::path tmpPath = fs::path(restorePath).concat(".tmp");
     try
     {
@@ -147,9 +142,7 @@ bool RestoreBackup(const BackupInfo& backup, const std::string& currentInstalled
         return false;
     }
 
-    //_ currentInstalledPath, if different from restorePath (e.g. after an
-    // applied update), is now stale -- remove it best-effort; failure here
-    // doesn't undo the restore above.
+    //_ Best-effort; failure here doesn't undo the restore above (see backup.h).
     if (!currentInstalledPath.empty() && fs::path(currentInstalledPath) != fs::path(restorePath))
         fs::remove(currentInstalledPath, ec);
 

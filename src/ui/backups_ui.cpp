@@ -1,8 +1,5 @@
 //################################################################################
-// backups_ui.cpp
-//--------------------------------------------------------------------------------
-// "Backups" options-panel section. Extracted from addon.cpp -- a mechanical
-// move, no behavior change. See backups_ui.h for what's exposed and why.
+// backups_ui.cpp   (see: backups_ui.h)
 //--------------------------------------------------------------------------------
 
 #include "backup.h"
@@ -22,8 +19,8 @@ static std::string s_backupsActionMessage;   //. last rollback outcome
 // Every write this addon makes (applied update, saved edit, category
 // rename/move) leaves a ".bak" of what was there before. Only one backup
 // generation is kept per sin (at most 3 total), so RestoreBackup treats a
-// rollback as a swap rather than a one-way trip -- rolling back twice on
-// the same entry undoes the first swap.
+// rollback as a swap, not a one-way trip -- rolling back twice on the same
+// entry undoes the first swap.
 //--------------------------------------------------------------------------------
 void RenderBackupsSection(const std::string& denoiserAddonDir)
 {
@@ -55,9 +52,7 @@ void RenderBackupsSection(const std::string& denoiserAddonDir)
 
         if (ImGui::Button("Roll back"))
         {
-            //_ Live file may sit at a different path than backup.restorePath
-            // (version bump) -- find the sin's current path so RestoreBackup
-            // can clean up the stale one; empty if nothing is installed.
+            //_ Path may differ from backup.restorePath after a version bump.
             std::string currentPath;
             for (const auto& sin : GetInstalledSins())
             {

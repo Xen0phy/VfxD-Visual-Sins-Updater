@@ -1,14 +1,15 @@
 //################################################################################
-// specialization_info.cpp
-//--------------------------------------------------------------------------------
-// See specialization_info.h for the module contract and sourcing note. Owns
-// the single id -> {name, profession} switch, generated from the GW2 API
-// response -- regenerate from
-// https://api.guildwars2.com/v2/specializations?ids=all if this file is ever lost.
+// specialization_info.cpp   (see: specialization_info.h)
 //--------------------------------------------------------------------------------
 
 #include "specialization_info.h"
 
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// GetSpecializationInfo
+//--------------------------------------------------------------------------------
+// Generated from https://api.guildwars2.com/v2/specializations?ids=all;
+// regenerate from that endpoint if this table is ever lost.
+//--------------------------------------------------------------------------------
 SpecializationInfo GetSpecializationInfo(unsigned int specializationId)
 {
     switch (specializationId)
@@ -113,7 +114,7 @@ SpecializationInfo GetSpecializationInfo(unsigned int specializationId)
         case 80: return {"Evoker",              EElementalist};
 
         default:
-            return {};   //. name == nullptr -- falls back to raw id upstream
+            return {};   //. falls back to raw id
     }
 }
 

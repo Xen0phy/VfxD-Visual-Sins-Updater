@@ -1,13 +1,12 @@
 //################################################################################
 // sql_update.cpp
 //--------------------------------------------------------------------------------
-// See sql_update.h for the module contract. Everything here runs on
-// whatever thread calls it (the render thread, in practice) -- no
-// std::thread, no atomics, no mutex, since nothing here can block: every
-// read is local SQLite (already-open connection) and every write is a
-// local file. The only shared state is s_diffCache, and it's only ever
-// touched from that one thread, same assumption effect_db.cpp already
-// makes about its own render-thread-only callers.
+// See sql_update.h for the module contract. Everything here runs on whatever
+// thread calls it (the render thread, in practice) -- no std::thread, no atomics,
+// no mutex, since nothing here can block: every read is local SQLite (already-open
+// connection) and every write is a local file. The only shared state is
+// s_diffCache, and it's only ever touched from that one thread, same assumption
+// effect_db.cpp already makes about its own render-thread-only callers.
 //--------------------------------------------------------------------------------
 
 #include "effect_db.h"
@@ -28,11 +27,9 @@ namespace fs = std::filesystem;
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // ToCrlf
 //--------------------------------------------------------------------------------
-// Same conversion github_update.cpp/installed_tree_store.cpp each keep
-// their own copy of -- see either of their comments for why (every real
-// VfxDenoiser file on disk uses CRLF; nlohmann::json::dump() always
-// emits bare '\n'). Kept as a third copy rather than introducing a
-// shared utility header this pass didn't ask for.
+// Same conversion github_update.cpp/installed_tree_store.cpp each keep their own
+// copy of -- see either of their comments for why (every real VfxDenoiser file on
+// disk uses CRLF; nlohmann::json::dump() always emits bare '\n').
 //--------------------------------------------------------------------------------
 static std::string ToCrlf(const std::string& lfText)
 {
@@ -47,9 +44,7 @@ static std::string ToCrlf(const std::string& lfText)
     return out;
 }
 
-//_ Set once (see SetSqlUpdateLogger) before Addon_Load hands off; never
-// reassigned afterward, so reading it without a lock is safe -- same
-// assumption github_update.cpp's own s_api makes.
+//_ Set once before Addon_Load hands off, never reassigned -- same as github_update.cpp's s_api
 static AddonAPI_t* s_api = nullptr;
 
 void SetSqlUpdateLogger(AddonAPI_t* aApi)
@@ -77,14 +72,9 @@ static ESinGeneratorVariant VariantForSin(const std::string& sinName)
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // SharedMasterGuidCount
 //--------------------------------------------------------------------------------
-// SinGenerator_CountEmittedGuids(Gluttony) -- the number every sin's
-// installed filename is compared against AND every sin's newly-written
-// filename is stamped with, confirmed against a real GitHub-downloaded
-// Sloth install to match that release's own naming convention (all
-// three sin filenames in a given release share this one number, even
-// though Sloth's own body -- Caution-category guids filtered out -- is
-// smaller). See sql_update.h's top comment for the full reasoning and
-// the real numbers that surfaced this.
+// The shared master guid count every sin's filename is compared against and
+// stamped with -- not this sin's own filtered count. See sql_update.h's top
+// comment for the full reasoning.
 //--------------------------------------------------------------------------------
 static int SharedMasterGuidCount()
 {
@@ -94,11 +84,10 @@ static int SharedMasterGuidCount()
 //********************************************************************************
 // SqlDiffCacheEntry
 //--------------------------------------------------------------------------------
-// Everything ApplySqlUpdate needs to apply exactly what LoadSqlDiff
-// resolved and displayed, without regenerating or re-deciding anything --
-// same shape/reasoning as github_update.cpp's own DiffCacheEntry.
-// installedPath/latestVersion are deliberately not part of the public
-// SinDiffInfo, same as the GitHub path.
+// Everything ApplySqlUpdate needs to apply exactly what LoadSqlDiff resolved and
+// displayed, without regenerating or re-deciding anything -- same shape/reasoning
+// as github_update.cpp's own DiffCacheEntry. installedPath/latestVersion are not
+// part of the public SinDiffInfo, same as the GitHub path.
 //--------------------------------------------------------------------------------
 struct SqlDiffCacheEntry
 {
@@ -115,10 +104,9 @@ static std::unordered_map<std::string, SqlDiffCacheEntry> s_diffCache;
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // WriteJsonAtomic
 //--------------------------------------------------------------------------------
-// Shared tmp-then-rename write path for both ApplySqlUpdate and
-// InstallSqlSin -- same pattern StartApplyUpdate/StartInstallSin use in
-// github_update.cpp. Returns "" on success, a human-readable failure
-// reason otherwise.
+// Shared tmp-then-rename write path for both ApplySqlUpdate and InstallSqlSin --
+// same pattern StartApplyUpdate/StartInstallSin use in github_update.cpp. Returns
+// "" on success, a human-readable failure reason otherwise.
 //--------------------------------------------------------------------------------
 static std::string WriteJsonAtomic(const fs::path& newPath, const json& content)
 {
@@ -161,8 +149,7 @@ std::vector<SqlSinUpdateInfo> CheckSqlUpdates(const std::string& denoiserAddonDi
     for (const auto& f : installed)
         installedByName[f.sinName] = f;
 
-    //_ Computed once -- every sin compares against this same number, not
-    // its own filtered count. See SharedMasterGuidCount's comment.
+    //_ Computed once; every sin compares against this same number, not its own count
     int masterCount = SharedMasterGuidCount();
 
     std::vector<SqlSinUpdateInfo> results;
@@ -182,9 +169,6 @@ std::vector<SqlSinUpdateInfo> CheckSqlUpdates(const std::string& denoiserAddonDi
         {
             info.installedPath    = instIt->second.fullPath;
             info.installedVersion = instIt->second.version;
-            //_ A SQL count <= the installed version reads as UpToDate,
-            // never a downgrade/negative state -- same rule
-            // github_update.cpp applies for the GitHub case.
             info.state = (info.installedVersion < info.latestVersion)
                 ? ESinUpdateState::UpdateAvailable
                 : ESinUpdateState::UpToDate;
@@ -222,7 +206,7 @@ SinDiffInfo LoadSqlDiff(const std::string& denoiserAddonDir, const std::string& 
         if (f.sinName == sinName) { installedFile = &f; break; }
 
     if (!installedFile)
-        return fail(EDiffStatus::Error); //. not installed -- caller should use InstallSqlSin instead
+        return fail(EDiffStatus::Error); //. not installed, use InstallSqlSin
 
     json oldFile;
     try
@@ -233,8 +217,7 @@ SinDiffInfo LoadSqlDiff(const std::string& denoiserAddonDir, const std::string& 
     }
     catch (...) { return fail(EDiffStatus::Error); }
 
-    //_ Same guard StartLoadDiff applies before ever trusting a
-    // guid-first merge -- see merge.h's own doc comment.
+    //_ Same guard StartLoadDiff applies before trusting a guid-first merge -- see merge.h
     if (!FindDuplicateGuids(oldFile).empty())
         return fail(EDiffStatus::Blocked);
 
@@ -291,12 +274,8 @@ std::vector<SinDiffInfo> GetSqlDiffInfo()
 
 bool ApplySqlUpdate(const std::string& denoiserAddonDir, const std::string& sinName, std::string& outMessage)
 {
-    (void)denoiserAddonDir; //. installedPath already resolved into the cache entry
+    (void)denoiserAddonDir; //. already cached from LoadSqlDiff
 
-    //_ Same "for science"/apply mutual exclusion as StartApplyUpdate --
-    // see effect_db.h. Re-checked here rather than trusted from
-    // LoadSqlDiff time, since capture can be toggled independently while
-    // a diff sits loaded and unapplied.
     if (EffectDb_IsEnabled())
     {
         outMessage = "Can't apply while \"for science\" capture is enabled.";
@@ -310,13 +289,11 @@ bool ApplySqlUpdate(const std::string& denoiserAddonDir, const std::string& sinN
         return false;
     }
 
-    SqlDiffCacheEntry entry = it->second; //. own copy; cache erased on success below
+    SqlDiffCacheEntry entry = it->second; //. own copy, cache erased below
 
     json oldFile = entry.oldFile;
 
-    //_ Back up the old file before touching anything -- same
-    // .bak-then-overwrite pattern StartApplyUpdate/SaveInstalledSinFile
-    // already use, never destroy a user's tuning silently.
+    //_ Backs up first so a user's tuning is never destroyed silently
     std::error_code ec;
     fs::path backupPath = fs::path(entry.installedPath).concat(".bak");
     fs::copy_file(entry.installedPath, backupPath, fs::copy_options::overwrite_existing, ec);
@@ -341,14 +318,10 @@ bool ApplySqlUpdate(const std::string& denoiserAddonDir, const std::string& sinN
         return false;
     }
 
-    //_ Remove the old-named file, unless the version-stamped name
-    // happens to be identical to what it already was -- same as
-    // StartApplyUpdate.
+    //_ Skips removal if the version-stamped name is identical to the old one
     if (fs::path(entry.installedPath) != newPath)
         fs::remove(entry.installedPath, ec); //. best-effort; leftover file is harmless
 
-    //_ This sin's cached diff is now stale (it's been applied) -- drop
-    // it so the options panel stops offering to re-apply it.
     s_diffCache.erase(sinName);
 
     outMessage = "Updated (from SQL): " + sinName;

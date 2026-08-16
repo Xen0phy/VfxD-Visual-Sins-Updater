@@ -1,4 +1,3 @@
-
 //################################################################################
 // vfxd_sins_bridge.h
 //--------------------------------------------------------------------------------
@@ -8,7 +7,7 @@
 // VfxSinsLogEvent                  the payload struct itself
 //--------------------------------------------------------------------------------
 // Wire contract between VfxDenoiser and VfxDSinsUpdater for live effect-log
-// capture, carried over Nexus's Events_Raise/Events_Subscribe rather than a
+// capture, carried over Nexus's Events_Raise/Events_Subscribe instead of a
 // network endpoint -- both addons already load through Nexus and get an
 // AddonAPI_t* with events built in, so there's no socket/port to stand up or
 // secure.
@@ -27,20 +26,14 @@
 
 #include <cstdint>
 
-//_ Raised when live-capture toggles on/off; VfxDenoiser's log_effect only
-// emits EV_VFXD_SINS_LOG while listening, so its own logged_effects list
-// doesn't grow unbounded while we capture instead.
+//_ Raised when live-capture toggles on/off; log_effect only emits EV_VFXD_SINS_LOG while listening, so logged_effects stays bounded
 inline constexpr const char* EV_VFXD_SINS_LISTEN_START = "EV_VFXD_SINS_LISTEN_START";
 inline constexpr const char* EV_VFXD_SINS_LISTEN_STOP  = "EV_VFXD_SINS_LISTEN_STOP";
 
-//_ One per logged effect, only while listening. Payload is a
-// VfxSinsLogEvent* valid only for the callback -- copy strings out
-// immediately, since log_effect fires synchronously on the render thread.
+//_ One per logged effect while listening; payload is valid only for the callback -- copy strings out immediately
 inline constexpr const char* EV_VFXD_SINS_LOG = "EV_VFXD_SINS_LOG";
 
-//_ Bump if the struct layout changes; readers on both sides should ignore
-// any struct_version they don't recognize rather than guess at a
-// mismatched layout.
+//_ Bump on struct layout change; readers should ignore an unrecognized struct_version instead of guessing at layout
 inline constexpr uint32_t kVfxSinsLogEventVersion = 1;
 
 extern "C" {

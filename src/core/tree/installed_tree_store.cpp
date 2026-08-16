@@ -20,13 +20,10 @@ std::vector<InstalledSinFile>  s_installedSins;
 //_ sinName -> parsed file, only present if it parsed OK.
 std::unordered_map<std::string, nlohmann::ordered_json> s_installedJson;
 
-//_ Bumped every time s_installedJson is (re)loaded -- see
-// GetInstalledTreeGeneration's doc comment in the header for why.
+//_ Bumped on every s_installedJson (re)load; see GetInstalledTreeGeneration
 int s_installedTreeGeneration = 0;
 
-//_ Set once via InstalledTreeStore_SetApi (from Addon_Init), to the
-// same AddonAPI_t entry.cpp got from Nexus -- only used for aApi->Log
-// on SaveInstalledSinFile's write-failure path.
+//_ Set via InstalledTreeStore_SetApi; used only for aApi Log on save failure
 AddonAPI_t* s_api = nullptr;
 
 std::unordered_map<std::string, std::vector<std::string>> s_duplicateGuidsBySin;
@@ -34,11 +31,11 @@ std::unordered_map<std::string, std::vector<std::string>> s_duplicateGuidsBySin;
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // ToCrlf
 //--------------------------------------------------------------------------------
-// nlohmann::json::dump() always emits bare '\n', but every VfxDenoiser
-// file shipped/edited in the wild uses CRLF. Converting here keeps a
-// saved file's line endings consistent with what it had on disk before
-// the edit, instead of silently flipping the whole file to LF the
-// first time someone edits a single effect.
+// nlohmann::json::dump() always emits bare '\n', but every VfxDenoiser file
+// shipped/edited in the wild uses CRLF. Converting here keeps a saved file's line
+// endings consistent with what it had on disk before the edit, instead of
+// silently flipping the whole file to LF the first time someone edits a single
+// effect.
 //--------------------------------------------------------------------------------
 std::string ToCrlf(const std::string& lfText)
 {
@@ -56,8 +53,8 @@ std::string ToCrlf(const std::string& lfText)
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // CollectGuidNamesRecursive
 //--------------------------------------------------------------------------------
-// Recursively walks every effect anywhere under `category`, keeping
-// each effect's name alongside its guids -- see CollectGuidNameMap.
+// Recursively walks every effect anywhere under `category`, keeping each effect's
+// name alongside its guids -- see CollectGuidNameMap.
 //--------------------------------------------------------------------------------
 void CollectGuidNamesRecursive(const nlohmann::ordered_json& category,
                                 std::unordered_map<std::string, std::string>& out)
@@ -85,10 +82,10 @@ void CollectGuidNamesRecursive(const nlohmann::ordered_json& category,
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // FormatBehaviors
 //--------------------------------------------------------------------------------
-// Flattens one effect's "behaviors" array into a single display
-// string. An effect can legitimately carry more than one behavior at
-// once (e.g. Hide for Others + Show for Self), so entries are joined
-// with "; " rather than assuming exactly one.
+// Flattens one effect's "behaviors" array into a single display string. An effect
+// can legitimately carry more than one behavior at once (e.g. Hide for Others +
+// Show for Self), so entries are joined with "; " instead of assuming exactly
+// one.
 //--------------------------------------------------------------------------------
 std::string FormatBehaviors(const nlohmann::ordered_json& behaviors)
 {
@@ -114,11 +111,11 @@ std::string FormatBehaviors(const nlohmann::ordered_json& behaviors)
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // CollectGuidBehaviorsRecursive
 //--------------------------------------------------------------------------------
-// Same recursive walk as CollectGuidNamesRecursive, but keeping each
-// effect's own formatted "behaviors" summary instead of its name --
-// see CollectGuidBehaviorMap. An effect with no "behaviors" array
-// still gets an (empty-string) entry, so a known guid is
-// distinguishable from one that's merely unconfigured.
+// Same recursive walk as CollectGuidNamesRecursive, but keeping each effect's own
+// formatted "behaviors" summary instead of its name -- see
+// CollectGuidBehaviorMap. An effect with no "behaviors" array still gets an
+// (empty-string) entry, so a known guid is distinguishable from one that's merely
+// unconfigured.
 //--------------------------------------------------------------------------------
 void CollectGuidBehaviorsRecursive(const nlohmann::ordered_json& category,
                                     std::unordered_map<std::string, std::string>& out)
@@ -205,9 +202,7 @@ void LoadInstalledEffectsTree(const std::string& denoiserAddonDir)
             continue;
         }
 
-        //_ Checked once here, against the real on-disk file -- StartLoadDiff
-        // in github_update.cpp runs this same check again on its own
-        // read, so neither trusts the other's cache.
+        //_ Checked here against the on-disk file; re-checked by StartLoadDiff too
         s_duplicateGuidsBySin[sin.sinName] = FindDuplicateGuids(parsed);
 
         s_installedJson[sin.sinName] = std::move(parsed);
@@ -295,9 +290,7 @@ std::unordered_set<std::string> CollectInstalledGuids()
     return out;
 }
 
-//_ Same backup-then-tmp-then-rename pattern as github_update.cpp's
-// StartApplyUpdate. Unlike an applied update, an edit never changes the
-// filename (no version bump), so this writes back to the exact path read.
+//_ Same backup-then-tmp-then-rename pattern as github_update.cpp StartApplyUpdate
 bool SaveInstalledSinFile(const std::string& sinName, std::string& outError)
 {
     auto jsonIt = s_installedJson.find(sinName);

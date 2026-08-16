@@ -1,9 +1,5 @@
 //################################################################################
-// installed_tree_overlay.cpp
-//--------------------------------------------------------------------------------
-// See installed_tree_overlay.h for the module contract. Diff/duplicate
-// overlay tree builders, extracted from addon.cpp -- a mechanical move, no
-// behavior change.
+// installed_tree_overlay.cpp   (see: installed_tree_overlay.h)
 //--------------------------------------------------------------------------------
 
 #include "installed_tree_overlay.h"
@@ -18,12 +14,12 @@ namespace {
 //--------------------------------------------------------------------------------
 // guidToEffect         guid -> owning effect, over the overlay copy being built
 //--------------------------------------------------------------------------------
-// Built once up front -- O(effects) -- rather than a fresh linear scan per
-// lookup, same idea as merge.cpp's own OldIndex (see ApplyMergePlan
-// there). Replaces what used to be a straight per-lookup scan
-// (FindOverlayEffectLocation); once ApplyMergePlan itself got the same
-// fix, there was no reason for this preview builder, doing the same shape
-// of work against the same size of tree, to stay slow.
+// Built once up front -- O(effects) -- instead of a fresh linear scan per lookup,
+// same idea as merge.cpp's own OldIndex (see ApplyMergePlan there). Replaces what
+// used to be a straight per-lookup scan (FindOverlayEffectLocation); once
+// ApplyMergePlan itself got the same fix, there was no reason for this preview
+// builder, doing the same shape of work against the same size of tree, to stay
+// slow.
 //--------------------------------------------------------------------------------
 struct DiffGuidIndex
 {
@@ -33,14 +29,13 @@ struct DiffGuidIndex
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // IndexDiffCategory
 //--------------------------------------------------------------------------------
-// Recursively populates `idx` from every effect under `category`,
-// including `category`'s own name in the tracked path -- same
-// push-before-recurse/pop-after shape as pathSoFar elsewhere in this
-// codebase (e.g. RenderCategoryTree), so a top-level call already
-// includes that category's own name at path[0], not just its children's.
-// The no-`pathSoFar` overload below is a convenience for the (more
-// common) case where a caller doesn't need to seed or reuse the path
-// vector itself -- both existing call sites use it unchanged.
+// Recursively populates `idx` from every effect under `category`, including
+// `category`'s own name in the tracked path -- same push-before-recurse/
+// pop-after shape as pathSoFar elsewhere in this codebase (e.g.
+// RenderCategoryTree), so a top-level call already includes that category's own
+// name at path[0], not just its children's. The no-`pathSoFar` overload below is
+// a convenience for the (more common) case where a caller doesn't need to seed or
+// reuse the path vector itself -- both existing call sites use it unchanged.
 //--------------------------------------------------------------------------------
 void IndexDiffCategory(nlohmann::ordered_json& category, DiffGuidIndex& idx, std::vector<std::string>& pathSoFar)
 {
@@ -69,15 +64,15 @@ void IndexDiffCategory(nlohmann::ordered_json& category, DiffGuidIndex& idx)
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // RemoveDiffEffects
 //--------------------------------------------------------------------------------
-// Address-based removal, single pass -- same shape and reasoning as
-// merge.cpp's RemoveEffectsRecursive: every address in `toRemove` must
-// come from a still-fully-valid index, so removal goes back-to-front by
-// index rather than a forward begin()/erase(it) walk. Erasing index i
-// shifts every index > i down into the slot i used to occupy; a forward
-// pass would re-check toRemove against that reused address on its very
-// next iteration, cascading into deleting everything after the first
-// removed element. Back-to-front never touches an as-yet-unvisited
-// index's address, so every check compares against the real original one.
+// Address-based removal, single pass -- same shape and reasoning as merge.cpp's
+// RemoveEffectsRecursive: every address in `toRemove` must come from a
+// still-fully-valid index, so removal goes back-to-front by index, not a forward
+// begin()/erase(it) walk. Erasing index i shifts every index > i down into the
+// slot i used to occupy; a forward pass would re-check toRemove against that
+// reused address on its very next iteration, cascading into deleting everything
+// after the first removed element. Back-to-front never touches an
+// as-yet-unvisited index's address, so every check compares against the real
+// original one.
 //--------------------------------------------------------------------------------
 void RemoveDiffEffects(nlohmann::ordered_json& category, const std::unordered_set<const nlohmann::ordered_json*>& toRemove)
 {
@@ -97,17 +92,16 @@ void RemoveDiffEffects(nlohmann::ordered_json& category, const std::unordered_se
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // FindOrCreateDiffCategory
 //--------------------------------------------------------------------------------
-// Finds, or creates and appends (tagged "__vfxd_virtual"), the category at
-// `path` under `root`. Shared by a moving rework's destination and a plain
-// insert's destination. Ancestor tint ("__vfxd_hasnew"/"__vfxd_hasrework"/
+// Finds, or creates and appends (tagged "__vfxd_virtual"), the category at `path`
+// under `root`. Shared by a moving rework's destination and a plain insert's
+// destination. Ancestor tint ("__vfxd_hasnew"/"__vfxd_hasrework"/
 // "__vfxd_hasconflict") is NOT set here -- see BubbleDiffTags below for why
 // that's a separate bottom-up pass instead of tagged inline during creation.
 //
-// Deliberately description-agnostic, same reasoning as merge.cpp's own
-// FindOrCreateCategory: FillBlankOverlayCategoryDescriptions (run once, at
-// the very end of BuildDiffOverlayTree) is what seeds a category's
-// description, whether it's brand-new or was already sitting on disk with
-// nothing in it -- see that function's own doc.
+// Description-agnostic, same reasoning as merge.cpp's own FindOrCreateCategory:
+// FillBlankOverlayCategoryDescriptions (run once, at the end of
+// BuildDiffOverlayTree) seeds a category's description, whether brand-new or
+// already sitting on disk empty -- see that function's own doc.
 //--------------------------------------------------------------------------------
 nlohmann::ordered_json* FindOrCreateDiffCategory(nlohmann::ordered_json& root, const std::vector<std::string>& path)
 {
@@ -139,11 +133,11 @@ nlohmann::ordered_json* FindOrCreateDiffCategory(nlohmann::ordered_json& root, c
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // FillBlankOverlayCategoryDescriptions
 //--------------------------------------------------------------------------------
-// Mirrors merge.cpp's FillBlankCategoryDescriptions exactly (see its own
-// doc for the "new or pre-existing, only if currently blank" rule),
-// applied to the preview copy instead of the real file, so the tree view
-// shows a comment appearing in the SAME place ApplyMergePlan would
-// actually put one. `descriptions` is MergePlan::newCategoryDescriptions.
+// Mirrors merge.cpp's FillBlankCategoryDescriptions exactly (see its own doc for
+// the "new or pre-existing, only if currently blank" rule), applied to the
+// preview copy instead of the real file, so the tree view shows a comment
+// appearing in the SAME place ApplyMergePlan would actually put one.
+// `descriptions` is MergePlan::newCategoryDescriptions.
 //--------------------------------------------------------------------------------
 void FillBlankOverlayCategoryDescriptions(nlohmann::ordered_json& category, std::vector<std::string>& pathSoFar,
                                            const std::unordered_map<std::string, std::string>& descriptions)
@@ -173,15 +167,15 @@ void FillBlankOverlayCategoryDescriptions(nlohmann::ordered_json& category, std:
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // PruneEmptyOverlayCategories
 //--------------------------------------------------------------------------------
-// Mirrors merge.cpp's PruneEmptyCategories exactly (see its own comment for
-// the post-order/top-level-exempt reasoning), applied to the preview copy
-// instead of the real file. Without this, a relocation or a merged-away
-// removal that fully vacates a subcategory left an empty, effect-less shell
-// sitting in the overlay tree -- still rendered (with 0 effects) even
-// though applying the very same plan for real prunes it away in
-// ApplyMergePlan's own phase 5. Run at the very end of BuildDiffOverlayTree,
-// after inserts/relocations have landed and before BubbleDiffTags, so the
-// preview tree can never disagree with what Apply actually produces.
+// Mirrors merge.cpp's PruneEmptyCategories exactly (see its own comment for the
+// post-order/top-level-exempt reasoning), applied to the preview copy instead of
+// the real file. Without this, a relocation or a merged-away removal that fully
+// vacates a subcategory left an empty, effect-less shell sitting in the overlay
+// tree -- still rendered (with 0 effects) even though applying the very same plan
+// for real prunes it away in ApplyMergePlan's own phase 5. Run at the very end of
+// BuildDiffOverlayTree, after inserts/relocations have landed and before
+// BubbleDiffTags, so the preview tree can never disagree with what Apply actually
+// produces.
 //--------------------------------------------------------------------------------
 bool PruneEmptyOverlayCategories(nlohmann::ordered_json& category)
 {
@@ -205,14 +199,14 @@ bool PruneEmptyOverlayCategories(nlohmann::ordered_json& category)
 // BubbleDiffTags
 //--------------------------------------------------------------------------------
 // Recomputes every category's "__vfxd_hasnew"/"__vfxd_hasrework"/
-// "__vfxd_hasconflict" flags bottom-up, from whatever per-effect markers
-// are already set on its descendants. A separate pass rather than tagged
-// inline while walking down to create/relocate a category: a moved
-// survivor or a merge's deleted candidates can change what's true about a
-// category *after* the walk that would have tagged it, so a single
-// bottom-up pass over the final leaf markers avoids that ordering
-// dependency. RenderCategoryTree reads these three flags to tint an
-// ancestor category header, conflict taking priority over rework over new.
+// "__vfxd_hasconflict" flags bottom-up, from whatever per-effect markers are
+// already set on its descendants. A separate pass, not tagged inline while
+// walking down to create/relocate a category: a moved survivor or a merge's
+// deleted candidates can change what's true about a category *after* the walk
+// that would have tagged it, so a single bottom-up pass over the final leaf
+// markers avoids that ordering dependency. RenderCategoryTree reads these three
+// flags to tint an ancestor category header, conflict taking priority over rework
+// over new.
 //--------------------------------------------------------------------------------
 void BubbleDiffTags(nlohmann::ordered_json& category)
 {
@@ -244,14 +238,13 @@ void BubbleDiffTags(nlohmann::ordered_json& category)
 // TagDuplicateGuidEffects
 //--------------------------------------------------------------------------------
 // Recursively marks every effect owning one of `dupeGuids` with
-// "__vfxd_dupe_guid", bubbling "__vfxd_hasdupe" onto every ancestor
-// category that contains one, tagging and bubbling in the same walk --
-// unlike BuildDiffOverlayTree's separate bottom-up BubbleDiffTags pass,
-// there's no relocation/removal here that could invalidate an inline
-// bubble, so the simpler single-pass shape is fine. Flags a correctness
-// problem already present in the installed file (see FindDuplicateGuids),
-// not a pending update. Returns whether anything under `category` was
-// tagged, so the caller can tag ancestors too.
+// "__vfxd_dupe_guid", bubbling "__vfxd_hasdupe" onto every ancestor category that
+// contains one, tagging and bubbling in the same walk -- unlike
+// BuildDiffOverlayTree's separate bottom-up BubbleDiffTags pass, there's no
+// relocation/removal here that could invalidate an inline bubble, so the simpler
+// single-pass shape is fine. Flags a correctness problem already present in the
+// installed file (see FindDuplicateGuids), not a pending update. Returns whether
+// anything under `category` was tagged, so the caller can tag ancestors too.
 //--------------------------------------------------------------------------------
 bool TagDuplicateGuidEffects(nlohmann::ordered_json& category, const std::unordered_set<std::string>& dupeGuids)
 {
@@ -296,25 +289,16 @@ bool TagDuplicateGuidEffects(nlohmann::ordered_json& category, const std::unorde
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // BuildDiffOverlayTree
 //--------------------------------------------------------------------------------
-// Mirrors ApplyMergePlan's index-once/mutate-in-place/remove-once/
-// reinsert-once phase ordering (same pointer-invalidation hazards as the
-// real oldFile) so this preview can never disagree with what Apply
-// actually produces:
-//   - each rework's survivor is found via `idx`, tagged in place
-//     ("__vfxd_rework", "__vfxd_new_guids", conditionally
-//     "__vfxd_old_name"/"__vfxd_merged_count"/"__vfxd_conflict")
-//   - merged-away candidates are marked for removal via `idx`
-//   - a moving survivor is marked for removal too and queued for
-//     re-insertion at its new path ("__vfxd_old_category")
-//   - removal runs once, then queued survivors and `plan.inserts`
-//     ("__vfxd_new") are appended at their destinations, materializing
-//     categories as needed ("__vfxd_virtual")
-//   - BubbleDiffTags then recomputes every category's tint bottom-up
-//
-// "__vfxd_virtual"/"__vfxd_new"/"__vfxd_rework" suppress rename/edit/
-// delete/drag on these not-yet-real nodes; RenderCategoryTree's
-// "unexpected field" fallback skips every "__vfxd_*" marker so none leak
-// into the visible field list.
+// Mirrors ApplyMergePlan's index-once/mutate-in-place/remove-once/reinsert-once
+// phase order (same pointer-invalidation hazards as the real oldFile) so this
+// preview can never disagree with what Apply actually produces: each rework's
+// survivor is found and tagged via `idx`, merged-away and relocated survivors are
+// marked and removed in one pass, then queued survivors and `plan.inserts` are
+// appended at their destinations before BubbleDiffTags recomputes every
+// category's tint bottom-up. "__vfxd_virtual"/"__vfxd_new"/"__vfxd_rework"
+// suppress rename/edit/delete/drag on these not-yet-real nodes;
+// RenderCategoryTree's "unexpected field" fallback skips every "__vfxd_*" marker
+// so none leak into the visible field list.
 //--------------------------------------------------------------------------------
 nlohmann::ordered_json BuildDiffOverlayTree(const nlohmann::ordered_json& installed, const MergePlan& plan)
 {
@@ -337,14 +321,11 @@ nlohmann::ordered_json BuildDiffOverlayTree(const nlohmann::ordered_json& instal
             auto it = idx.guidToEffect.find(g);
             if (it != idx.guidToEffect.end()) { survivor = it->second; break; }
         }
-        //_ Shouldn't happen -- the overlay is freshly built from the same
-        // installed tree the plan was resolved against.
+        //_ Shouldn't happen -- same install tree the plan was resolved against
         if (!survivor)
             continue;
 
-        //_ Shown as the final upstream name directly; "__vfxd_old_name" is
-        // only set below when it's actually changing. Guids are left alone
-        // here so "Current GUIDs" / "GUIDs after update" can still compare.
+        //_ Old GUIDs kept as-is here so before/after GUID lists can still compare
         (*survivor)["name"]             = rw.newName;
         (*survivor)["__vfxd_rework"]    = true;
         (*survivor)["__vfxd_new_guids"] = rw.newGuids;
@@ -352,16 +333,12 @@ nlohmann::ordered_json BuildDiffOverlayTree(const nlohmann::ordered_json& instal
         if (rw.oldName != rw.newName)
             (*survivor)["__vfxd_old_name"] = rw.oldName;
 
-        //_ Checked unconditionally, not nested under mergedAwayGuids: this
-        // is the ORIGINAL matched-candidate disagreement, still real even
-        // if StripConflictingMergedAwayGuids later empties that out.
+        //_ Real even if StripConflictingMergedAwayGuids later empties the list
         if (rw.behaviorsConflict)
         {
             (*survivor)["__vfxd_conflict"] = true;
 
-            //_ One entry per other matched candidate's name/category/
-            // behaviors, so the tree view can show what actually
-            // disagreed, not just that something did.
+            //_ One entry per other candidate that actually disagreed
             nlohmann::ordered_json sources = nlohmann::ordered_json::array();
             for (const auto& c : rw.otherCandidates)
             {
@@ -416,15 +393,11 @@ nlohmann::ordered_json BuildDiffOverlayTree(const nlohmann::ordered_json& instal
         (*cursor)["effects"].push_back(std::move(newEffect));
     }
 
-    //_ See PruneEmptyOverlayCategories' own comment -- must run before
-    // BubbleDiffTags so a pruned branch's tags never bubble to a parent
-    // that's about to lose it anyway.
+    //_ Runs before BubbleDiffTags so a pruned branch never bubbles tags up
     for (auto& cat : overlay["categories"])
         PruneEmptyOverlayCategories(cat);
 
-    //_ Backfill blank descriptions last, same ordering reason as
-    // merge.cpp's own phase 6: never write into a branch phase 5 (prune)
-    // is about to delete.
+    //_ Runs last, same ordering reason as merge.cpp's own phase 6
     for (auto& cat : overlay["categories"])
     {
         if (!cat.contains("name") || !cat["name"].is_string())
@@ -442,8 +415,8 @@ nlohmann::ordered_json BuildDiffOverlayTree(const nlohmann::ordered_json& instal
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // BuildDuplicateOverlayTree
 //--------------------------------------------------------------------------------
-// Called independently of any update/diff overlay -- this is about the
-// file as it sits on disk right now, not about a pending change.
+// Called independently of any update/diff overlay -- this is about the file as it
+// sits on disk right now, not about a pending change.
 //--------------------------------------------------------------------------------
 nlohmann::ordered_json BuildDuplicateOverlayTree(const nlohmann::ordered_json& installed, const std::vector<std::string>& dupeGuids)
 {

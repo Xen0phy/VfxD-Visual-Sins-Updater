@@ -1,24 +1,5 @@
 //################################################################################
-// addon.cpp
-//--------------------------------------------------------------------------------
-// RenderSinDiffStatus(diff)   result text under a sin's action button
-// RenderSinActionRow()        three per-sin action columns (install/check/apply)
-// OptionsRenderCallback()     top-level options-panel draw
-// Addon_Init(...)             stores aApi/dir/found handed off from entry.cpp
-//--------------------------------------------------------------------------------
-// The addon's actual behavior, split out from entry.cpp's bare Nexus wiring
-// (which owns AddonLoad/AddonUnload, including locating VfxDenoiser and the
-// initial silent update check): the options-panel UI (RT_OptionsRender),
-// driven by Addon_Init handing off entry.cpp's load-time findings. All the
-// update-check/merge logic itself lives in sin_files.*, github_update.*
-// and merge.*; this file is UI glue plus the addon's own state (which
-// folder it's pointed at, what's currently cached for display) over that.
-//
-// The addon has no floating window of its own - everything lives inside
-// Nexus's own options panel, registered once and drawn only while that
-// panel is open. The always-visible installed-effects tree (data owned by
-// installed_tree_store.*) is what RenderInstalledEffects draws below the
-// action row, and is also what the right-click-to-edit feature extends.
+// addon.cpp   (see: addon.h)
 //--------------------------------------------------------------------------------
 
 #include "addon.h"
@@ -39,35 +20,20 @@
 
 static std::string s_denoiserAddonDir;
 
-//_ Set once via Addon_Init, to the AddonAPI_t pointer entry.cpp got from
-// Nexus; only used for aApi->Log here. Never reassigned, so reading it
-// later is safe without a lock, same as s_denoiserAddonDir above.
+//_ AddonAPI_t from Nexus, set once via Addon_Init and used only for logging.
 static AddonAPI_t* s_api = nullptr;
 
-//_ Set once via Addon_Init to whether VfxDenoiser's folder actually
-// exists; avoids repeatedly rescanning a folder already known missing.
+//_ Whether VfxDenoiser's folder exists, skips rescanning one already missing.
 static std::atomic<bool> s_denoiserFound{false};
 
-//_ Set when the user clicks Install/Apply so the right column can say
-// Installing.../Applying... instead of a generic busy state -- at most
-// one is pending, per github_update.cpp's single in-flight guard.
+//_ Sin with an Install/Apply in flight, so its button reads Installing/Applying.
 static std::string s_pendingActionSin;
 
-//_ Set when the user clicks a SQL Install/Apply action so the message
-// underneath is attributed to the sin that produced it (ApplySqlUpdate/
-// InstallSqlSin are synchronous, so there's no "pending" state the way
-// the GitHub column has -- the call has already finished by the time
-// the button click is processed).
+//_ Sin name paired with the SQL action's synchronous result message below.
 static std::string s_lastSqlMessageSin;
 static std::string s_lastSqlMessage;
 
-//_ Cached synchronous CheckSqlUpdates() result -- see RefreshSqlSinInfo.
-// Unlike GetSinUpdateInfo()/GetCheckStatus() (github_update.h), there's
-// no background thread updating this on its own; it's refreshed lazily
-// on first render and again after anything that could have changed it
-// (a successful Install/Apply here), same "re-verify against what's
-// actually on disk" reasoning StartApplyUpdate/StartInstallSin already
-// apply to their own GitHub-sourced counterparts.
+//_ Cached result of RefreshSqlSinInfo below; nothing refreshes it automatically.
 static std::vector<SqlSinUpdateInfo> s_sqlSinInfo;
 static bool                          s_sqlSinInfoLoaded = false;
 static std::string                   s_sqlCheckError;
@@ -153,23 +119,15 @@ static void RenderSinDiffStatus(const SinDiffInfo* diff)
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // RenderSqlSinAction
 //--------------------------------------------------------------------------------
-// TODO_B.md item 8 / EFFECT_DB_D1_HANDOFF.md's local-db-sourced update
-// path -- the real thing item 7's old "Generate from SQL (test)" button
-// was standing in for, now mirroring the GitHub column's own Install/
-// "Update available" -> "Apply changes"/Up to date shape via
-// sql_update.h instead of github_update.h. Deliberately side by side
-// with the GitHub column above (owner's call), not replacing it -- the
-// GitHub column only goes away once D1 is fully integrated, the last
-// step in that direction, not this one.
+// The local-db-sourced update path, mirroring the GitHub column's own
+// Install/"Update available" -> "Apply changes"/Up to date shape via
+// sql_update.h instead of github_update.h. Sits alongside the GitHub column,
+// both active until the local-db path is fully integrated.
 //
-// Unlike the GitHub column, every call here (CheckSqlUpdates/
-// LoadSqlDiff/ApplySqlUpdate/InstallSqlSin) is synchronous -- no
-// Checking.../Installing... busy state to render, the click has already
-// resolved by the time the next line runs. RenderSinDiffStatus is reused
-// as-is (it only reads a SinDiffInfo -- see sql_update.h reusing that
-// struct/EDiffStatus/ESinUpdateState from github_update.h wholesale, so
-// nothing about that function's wording needed to change for a
-// SQL-sourced diff instead of a GitHub-sourced one).
+// Every call here is synchronous, so unlike the GitHub column there's no
+// Checking.../Installing... busy state. RenderSinDiffStatus is reused as-is
+// since sql_update.h reuses SinDiffInfo/EDiffStatus/ESinUpdateState from
+// github_update.h wholesale.
 //--------------------------------------------------------------------------------
 static void RenderSqlSinAction(const std::string& denoiserAddonDir, const std::string& sinName)
 {
@@ -189,8 +147,7 @@ static void RenderSqlSinAction(const std::string& denoiserAddonDir, const std::s
     for (const auto& s : s_sqlSinInfo)
         if (s.sinName == sinName) { info = &s; break; }
 
-    //_ No result yet (check errored, or hasn't run) reads as NotInstalled,
-    // same fallback RenderSinActionRow uses for the GitHub column.
+    //_ No result reads as NotInstalled, the same fallback RenderSinActionRow uses.
     ESinUpdateState state = info ? info->state : ESinUpdateState::NotInstalled;
 
     if (state == ESinUpdateState::NotInstalled)
@@ -202,7 +159,7 @@ static void RenderSqlSinAction(const std::string& denoiserAddonDir, const std::s
             s_lastSqlMessageSin = sinName;
             s_lastSqlMessage    = msg;
             if (ok)
-                RefreshSqlSinInfo(denoiserAddonDir); //. re-verify against what's actually on disk
+                RefreshSqlSinInfo(denoiserAddonDir); //. re-verify against disk
         }
     }
     else if (state == ESinUpdateState::UpdateAvailable)
@@ -226,9 +183,7 @@ static void RenderSqlSinAction(const std::string& denoiserAddonDir, const std::s
             case EDiffStatus::Blocked:
                 label = "Blocked -- see below"; break;
             case EDiffStatus::Loading:
-                //_ LoadSqlDiff is synchronous -- this status is never
-                // actually returned here, kept only because EDiffStatus
-                // is shared with the (async) GitHub path.
+                //_ Never returned here (LoadSqlDiff is synchronous); kept for the shared enum.
                 label = "Loading..."; clickable = false; break;
         }
 
@@ -241,7 +196,7 @@ static void RenderSqlSinAction(const std::string& denoiserAddonDir, const std::s
                 s_lastSqlMessageSin = sinName;
                 s_lastSqlMessage    = msg;
                 if (ok)
-                    RefreshSqlSinInfo(denoiserAddonDir); //. re-verify, same as ApplyUpdate's GitHub counterpart
+                    RefreshSqlSinInfo(denoiserAddonDir); //. re-verify against disk
             }
             else
             {
@@ -252,8 +207,7 @@ static void RenderSqlSinAction(const std::string& denoiserAddonDir, const std::s
         SinDiffInfo diffForDisplay = GetSqlDiffInfo(sinName);
         RenderSinDiffStatus(&diffForDisplay);
     }
-    //_ UpToDate falls here (Unknown too -- nothing actionable, same as
-    // the GitHub column's own fallback).
+    //_ UpToDate falls here (Unknown too), same as the GitHub column's fallback.
     else
     {
         ImGui::Button("Up to date##sql");
@@ -269,12 +223,14 @@ static void RenderSqlSinAction(const std::string& denoiserAddonDir, const std::s
 // RenderSinActionRow
 //--------------------------------------------------------------------------------
 // Three always-visible per-sin columns (kSinNames order), the entry point
-// for both installing a sin and checking/applying its pending update -
-// deliberately above the collapsing headers so nothing needs expanding.
+// for both installing a sin and checking/applying its pending update,
+// above the collapsing headers so nothing needs expanding first.
 // NotInstalled calls StartInstallSin directly. UpdateAvailable's button
 // doubles as both steps: first click calls StartLoadDiff, then relabels
 // to "Apply changes" and calls StartApplyUpdate; RenderSinDiffStatus
-// renders the result underneath.
+// renders the result underneath. Draws GitHub and SQL actions as two
+// separate Columns() rows (not stacked) so each row starts at a
+// consistent Y regardless of the other's per-sin content height.
 //--------------------------------------------------------------------------------
 static void RenderSinActionRow()
 {
@@ -289,8 +245,7 @@ static void RenderSinActionRow()
     bool checking = (checkStatus == ECheckStatus::Checking);
     bool applying = (applyStatus == EApplyStatus::Applying);
 
-    //_ The pending tag only matters while applying; once it settles the
-    // label it reserved is stale.
+    //_ The pending tag only matters while applying; it's stale once that settles.
     if (!applying)
         s_pendingActionSin.clear();
 
@@ -306,20 +261,7 @@ static void RenderSinActionRow()
     std::vector<SinUpdateInfo> sinInfo = GetSinUpdateInfo();
     std::vector<SinDiffInfo>   diffs   = GetSinDiffInfo();
 
-    //_ imgui 1.80 lacks BeginDisabled/EndDisabled; buttons below swap
-    // label or ignore the click instead of true graying-out.
-    //
-    // GitHub's own action content is state-dependent height (NotInstalled
-    // is a couple lines, UpdateAvailable with a loaded diff can be five
-    // or six) -- different per sin. Stacking the SQL section directly
-    // underneath it *inside the same per-sin column* would start each
-    // sin's SQL block at whatever Y its own GitHub content happened to
-    // end at, staggering the three "SQL (local db)" blocks against each
-    // other (a staircase, one found by actually looking at the running
-    // addon rather than just compiling it). Two separate Columns() rows
-    // -- GitHub's, then SQL's -- fixes it: each row starts fresh at the
-    // same Y for all three columns (see ImGui::NextColumn()'s LineMinY
-    // reset), so only within-row bottoms can differ, not tops.
+    //_ imgui 1.80 lacks BeginDisabled/EndDisabled; buttons swap label or ignore clicks.
     ImGui::Columns(kSinCount, "sin_github_columns", false);
     for (int i = 0; i < kSinCount; ++i)
     {
@@ -334,8 +276,7 @@ static void RenderSinActionRow()
         for (const auto& s : sinInfo)
             if (s.sinName == sinName) { info = &s; break; }
 
-        //_ No result yet (first frame or two after load) reads as
-        // NotInstalled; settles once GetSinUpdateInfo() has data.
+        //_ No result yet reads as NotInstalled; settles once GetSinUpdateInfo() has data.
         ESinUpdateState state = info ? info->state : ESinUpdateState::NotInstalled;
         bool pendingHere = (applying && s_pendingActionSin == sinName);
 
@@ -380,8 +321,7 @@ static void RenderSinActionRow()
                 case EDiffStatus::Error:
                     label = "Error -- retry";   clickable = true; break;
                 case EDiffStatus::Blocked:
-                    //_ Stays until the duplicate GUID is resolved (see
-                    // tree below); another click just re-checks it.
+                    //_ Stays until the duplicate GUID below is resolved; a click just re-checks.
                     label = "Blocked -- see below"; clickable = true; break;
             }
 
@@ -400,8 +340,7 @@ static void RenderSinActionRow()
 
             RenderSinDiffStatus(diff);
         }
-        //_ UpToDate falls here (Unknown too - treated the same, nothing
-        // actionable).
+        //_ UpToDate falls here (Unknown too), nothing actionable either way.
         else
         {
             ImGui::Button("Up to date");
@@ -414,11 +353,7 @@ static void RenderSinActionRow()
 
     ImGui::Separator();
 
-    //_ Second row, same column count -- see the comment above for why
-    // this is a separate Columns() call rather than continuing inside
-    // the loop above. Column widths are computed the same way both
-    // times (same count, same window width), so column i here lines up
-    // under column i above without needing to repeat the sin's name.
+    //_ Same column count as above, so column i here sits under column i above.
     ImGui::Columns(kSinCount, "sin_sql_columns", false);
     for (int i = 0; i < kSinCount; ++i)
     {
@@ -436,9 +371,7 @@ static void RenderSinActionRow()
     if (!lastMsg.empty())
         ImGui::TextWrapped("%s", lastMsg.c_str());
 
-    //_ New content was written to disk; drop the installed-tree cache so
-    // it reloads next time expanded (compares against the message text,
-    // already polled every frame here).
+    //_ New content on disk drops the installed-tree cache so it reloads once expanded.
     static std::string s_lastSeenApplyMsg;
     if (lastMsg != s_lastSeenApplyMsg)
     {
@@ -465,9 +398,7 @@ void OptionsRenderCallback()
         return;
     }
 
-    //_ EffectDb_Poll rate-limits itself internally (see effect_db.h),
-    // so calling it unconditionally here is cheap. Latched into a
-    // static so a stop message outlives the single frame it is returned on.
+    //_ EffectDb_Poll rate-limits itself internally; latched to outlive one frame.
     static std::string s_effectDbStoppedMsg;
     std::string polled = EffectDb_Poll(s_denoiserAddonDir);
     if (!polled.empty())

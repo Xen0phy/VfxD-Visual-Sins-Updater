@@ -5,11 +5,16 @@
 // OptionsRenderCallback()                             draws the options panel
 //--------------------------------------------------------------------------------
 // The addon's actual behavior, as opposed to entry.cpp's bare Nexus wiring:
-// the options-panel UI and the addon's own state (which folder it's pointed
-// at, what's currently cached for display) that the UI reads. The
-// AddonLoad/AddonUnload functions assigned to AddonDefinition_t::Load/Unload
-// live in entry.cpp, not here; this header just exposes what they hand off
-// to this file.
+// the options-panel UI, driven by update-check/merge logic that lives in
+// sin_files.*, github_update.* and merge.*, not here, plus the addon's own
+// state (which folder it's pointed at, what's currently cached for display)
+// that the UI reads. No floating window of its own -- everything draws inside
+// Nexus's own options panel, shown only while that panel is open. The
+// installed-effects tree below the action row, always visible, is drawn by
+// RenderInstalledEffects (data owned by installed_tree_store.*), also extended
+// by the right-click-to-edit feature. The AddonLoad/AddonUnload functions
+// assigned to AddonDefinition_t::Load/Unload live in entry.cpp, not here; this
+// header just exposes what they hand off to this file.
 //--------------------------------------------------------------------------------
 
 #pragma once

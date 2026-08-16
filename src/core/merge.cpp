@@ -1,29 +1,5 @@
 //################################################################################
-// merge.cpp
-//--------------------------------------------------------------------------------
-// ResolveMergePlan()   builds a MergePlan from oldFile/newFile (see merge.h)
-// ApplyMergePlan()     applies a resolved MergePlan to oldFile in place
-// FindDuplicateGuids() guid-uniqueness check for a single file
-//--------------------------------------------------------------------------------
-// Implements the guid-first/name-fallback matching algorithm described in
-// merge.h. An OldIndex (guid/name lookup over oldFile) is built once per
-// call and consumed by a set of small helpers -- FindAllByGuid, GuidDiff,
-// BuildRework/BuildMergedRework -- rather than one large function, so each
-// piece of the decision table (skip/add-only/replace, 1a/1b/1c/2a/2b/2c)
-// can be tested and read in isolation. ApplyMergePlan mutates oldFile in
-// several strict phases so every pointer captured from its own OldIndex
-// stays valid until it's no longer needed -- see its own comment for the
-// phase breakdown and why the order matters.
-//
-// Resolving is itself two passes -- ResolveGuidPass then ResolveNamePass --
-// so every case-1 (guid) match across the whole newFile is locked in and
-// recorded as claimed before any case-2 (name-fallback) match runs. A
-// single interleaved pass let a guid match on one new effect and a name
-// match on an unrelated new effect resolve against the very same old
-// effect (its guid got reassigned upstream while its vacated name/slot
-// was independently reused), producing two reworks with the same identity
-// key; ApplyMergePlan would apply both against the same node and silently
-// drop whichever ran first. See ResolveGuidPass/ResolveNamePass.
+// merge.cpp   (see: merge.h)
 //--------------------------------------------------------------------------------
 
 #include "core/merge.h"
@@ -41,21 +17,16 @@ namespace {
 //********************************************************************************
 // OldIndex
 //--------------------------------------------------------------------------------
-// guidToEffect   guid -> owning old effect; last-indexed wins if the
-//                guid-uniqueness premise below is ever violated
-// guidToPath     guid -> category path (root -> immediate parent) the
-//                owning effect lives under; used to fill oldCategoryPath
-// effectsByName  name -> every old effect sharing it (multimap: GW2 reuses
-//                display names across distinct effects, so a single
-//                pointer per name silently picked one arbitrary match)
+// guidToEffect   guid -> owning old effect; last-indexed wins if guids repeat
+// guidToPath     guid -> category path (root -> parent); fills oldCategoryPath
+// effectsByName  name -> every old effect sharing it (names can repeat in GW2)
 //--------------------------------------------------------------------------------
 // A flat, built-once snapshot of oldFile, built fresh before each of
-// ResolveMergePlan/ApplyMergePlan's own walks and never mutated while in
-// use -- see each caller for why that matters there. Leans on guids never
-// repeating within a file (confirmed for how ArenaNet ships these, not
-// enforced against a hand-edited copy -- see FindDuplicateGuids); a
-// violation wouldn't crash anything, just risk resolving against the
-// wrong same-guid effect.
+// ResolveMergePlan/ApplyMergePlan's own walks and never mutated while in use --
+// see each caller for why that matters there. Leans on guids never repeating
+// within a file (confirmed for how ArenaNet ships these, not enforced against a
+// hand-edited copy -- see FindDuplicateGuids); a violation wouldn't crash
+// anything, just risk resolving against the wrong same-guid effect.
 //--------------------------------------------------------------------------------
 struct OldIndex
 {
@@ -106,9 +77,9 @@ void IndexCategory(json& category, const std::vector<std::string>& pathSoFar, Ol
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // HasAnyGuid
 //--------------------------------------------------------------------------------
-// True if `effect` has at least one string guid. A guid-less effect can
-// never be tracked reliably across releases -- see the case-0 skip in
-// ResolveGuidPass below.
+// True if `effect` has at least one string guid. A guid-less effect can never
+// be tracked reliably across releases -- see the case-0 skip in ResolveGuidPass
+// below.
 //--------------------------------------------------------------------------------
 bool HasAnyGuid(const json& effect)
 {
@@ -133,13 +104,12 @@ std::vector<std::string> ExtractGuids(const json& effect)
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // FindAllByGuid
 //--------------------------------------------------------------------------------
-// Every distinct old effect owning at least one of `newEffect`'s guids
-// (each listed once), or empty if none are claimed in oldFile. Checks
-// every guid rather than stopping at the first hit: a new effect's guid
-// list can straddle more than one old effect (e.g. an upstream merge of
-// two effects into one) -- stopping early would silently pick one
-// candidate and miss the other. See ResolveGuidPass for how the full set
-// returned here resolves into 1a/1b/1c.
+// Every distinct old effect owning at least one of `newEffect`'s guids (each
+// listed once), or empty if none are claimed in oldFile. Checks every guid
+// instead of stopping at the first hit: a new effect's guid list can straddle
+// more than one old effect (e.g. an upstream merge of two effects into one) --
+// stopping early would silently pick one candidate and miss the other. See
+// ResolveGuidPass for how the full set returned here resolves into 1a/1b/1c.
 //--------------------------------------------------------------------------------
 std::vector<json*> FindAllByGuid(const json& newEffect, const OldIndex& idx)
 {
@@ -167,12 +137,11 @@ std::vector<json*> FindAllByGuid(const json& newEffect, const OldIndex& idx)
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // GuidDiff
 //--------------------------------------------------------------------------------
-// Diffs a matched effect's old guid list `o` against its new list `n`:
-// returns guids in `n` but not `o` (de-duplicated, `n`'s order), and
-// reports via `outHasRemoved` whether `o` has anything `n` doesn't.
-// Together these decide skip/add-only/replace -- see BuildRework -- raw
-// counts alone can't, since the same count can mean identical, disjoint,
-// or partially-overlapping sets.
+// Diffs a matched effect's old guid list `o` against its new list `n`: returns
+// guids in `n` but not `o` (de-duplicated, `n`'s order), and reports via
+// `outHasRemoved` whether `o` has anything `n` doesn't. Together these decide
+// skip/add-only/replace -- see BuildRework -- raw counts alone can't, since the
+// same count can mean identical, disjoint, or partially-overlapping sets.
 //--------------------------------------------------------------------------------
 std::vector<std::string> GuidDiff(const std::vector<std::string>& o,
                                    const std::vector<std::string>& n,
@@ -197,11 +166,11 @@ std::vector<std::string> GuidDiff(const std::vector<std::string>& o,
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // PathOf
 //--------------------------------------------------------------------------------
-// The category path `effect` (a known old effect) currently lives under,
-// found via whichever of its guids `idx.guidToPath` recognizes -- every
-// guid on a given effect indexes to the same path, so the first hit is as
-// good as any. Empty only if none of `effect`'s guids are in `idx`, which
-// shouldn't happen for an effect found through `idx` in the first place.
+// The category path `effect` (a known old effect) currently lives under, found
+// via whichever of its guids `idx.guidToPath` recognizes -- every guid on a
+// given effect indexes to the same path, so the first hit is as good as any.
+// Empty only if none of `effect`'s guids are in `idx`, which shouldn't happen
+// for an effect found through `idx` in the first place.
 //--------------------------------------------------------------------------------
 std::vector<std::string> PathOf(const OldIndex& idx, const json& effect)
 {
@@ -217,19 +186,16 @@ std::vector<std::string> PathOf(const OldIndex& idx, const json& effect)
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // BuildRework
 //--------------------------------------------------------------------------------
-// Decides skip/add-only/replace for a matched old/new effect pair (guid or
-// unambiguous name match) by diffing this effect's own guid list -- never
-// a whole-file set, which would let one already-known guid mask other,
-// genuinely new ones on the same effect:
+// Decides skip/add-only/replace for a matched pair by diffing this effect's own
+// guid list, never a whole-file set (which would let one known guid mask other
+// genuinely new ones on the same effect):
 //   added empty                      -> guids untouched
 //   added, nothing removed           -> add-only, old guids kept
 //   added and removed, counts differ -> add-only (too ambiguous to drop)
 //   added and removed, counts match  -> replace (clean upstream renumber)
-// Also compares oldEffect's actual category (via idx) against
-// newCategoryPath: guid/name matching (1a/2a) says nothing about whether
-// upstream also reorganized the category tree, so that can't be assumed
-// unchanged -- see NEXUS_REVIEW.md. Returns false (no outRework) only when
-// neither the guids nor the category actually changed.
+// Also compares oldEffect's category (via idx) against newCategoryPath, since
+// guid/name matching alone says nothing about a tree reorg -- see
+// NEXUS_REVIEW.md. Returns false only when neither guids nor category changed.
 //--------------------------------------------------------------------------------
 bool BuildRework(const json& oldEffect, const json& newEffect,
                   const std::string& name, const OldIndex& idx,
@@ -266,9 +232,7 @@ bool BuildRework(const json& oldEffect, const json& newEffect,
         finalGuids = newGuidsRaw;
     }
 
-    //_ 1a/2a: name already matches, so oldName == newName; category is
-    // still recorded both sides so ApplyMergePlan can relocate when it
-    // actually moved (see merge.h field doc for MergePlanRework)
+    //_ 1a/2a: name unchanged; category recorded both sides for relocation
     outRework.oldName         = name;
     outRework.newName         = name;
     outRework.oldGuids        = oldGuids;
@@ -281,10 +245,9 @@ bool BuildRework(const json& oldEffect, const json& newEffect,
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // BehaviorsConflict
 //--------------------------------------------------------------------------------
-// True if `candidates`' behaviors don't all agree (1c merges only). An
-// empty behaviors list isn't a disagreement -- only candidates with
-// something configured are compared, so 0 or 1 such candidates trivially
-// can't conflict.
+// True if `candidates`' behaviors don't all agree (1c merges only). An empty
+// behaviors list isn't a disagreement -- only candidates with something
+// configured are compared, so 0 or 1 such candidates trivially can't conflict.
 //--------------------------------------------------------------------------------
 bool BehaviorsConflict(const std::vector<json*>& candidates)
 {
@@ -306,16 +269,15 @@ bool BehaviorsConflict(const std::vector<json*>& candidates)
 // BuildMergedRework
 //--------------------------------------------------------------------------------
 // Builds the rework entry for however many old effects `candidates`
-// (FindAllByGuid's match order) a new effect's guids touch. candidates[0]
-// is always the survivor -- any consistent, deterministic pick is enough,
-// since every other candidate is deleted regardless. One candidate is 1b
-// (guid known, name differs); more than one is 1c (upstream folded
-// several effects into one). Both get the same treatment: upstream's
-// name/category win, guids are unioned across every candidate (not just
-// the survivor's) so a guid unique to a soon-to-be-deleted candidate isn't
-// lost, and 1c additionally records the losers for deletion and checks
-// their behaviors for a conflict. Returns false only when there's truly
-// nothing to record.
+// (FindAllByGuid's match order) a new effect's guids touch. candidates[0] is
+// always the survivor -- any consistent, deterministic pick is enough, since
+// every other candidate is deleted regardless. One candidate is 1b (guid known,
+// name differs); more than one is 1c (upstream folded several effects into
+// one). Both get the same treatment: upstream's name/category win, guids are
+// unioned across every candidate (not just the survivor's) so a guid unique to
+// a soon-to-be-deleted candidate isn't lost, and 1c additionally records the
+// losers for deletion and checks their behaviors for a conflict. Returns false
+// only when there's nothing to record.
 //--------------------------------------------------------------------------------
 bool BuildMergedRework(const std::vector<json*>& candidates,
                         const json& newEffect,
@@ -363,8 +325,7 @@ bool BuildMergedRework(const std::vector<json*>& candidates,
     const bool nameChanged     = (oldName != newName);
     const bool categoryChanged = (oldPath != newCategoryPath);
 
-    //_ Single-candidate no-op guard (mirrors BuildRework's own check) --
-    // shouldn't normally trigger since 1b is only reached when name differs
+    //_ No-op guard (mirrors BuildRework), rarely fires -- 1b implies renaming
     if (!isMerge && !guidsChanged && !nameChanged && !categoryChanged)
         return false;
 
@@ -385,8 +346,7 @@ bool BuildMergedRework(const std::vector<json*>& candidates,
 
     outRework.behaviorsConflict = isMerge && BehaviorsConflict(candidates);
 
-    //_ Captured now, while `candidates` still has pre-merge data intact --
-    // survives even if StripConflictingMergedAwayGuids un-deletes a candidate
+    //_ Captured now, before an un-delete by StripConflictingMergedAwayGuids
     if (outRework.behaviorsConflict)
     {
         for (size_t i = 1; i < candidates.size(); ++i)
@@ -412,10 +372,10 @@ bool BuildMergedRework(const std::vector<json*>& candidates,
 // name           pulled out once so ResolveNamePass never re-checks it
 // categoryPath   root -> immediate parent, same convention as pathSoFar
 //--------------------------------------------------------------------------------
-// A new effect ResolveGuidPass found no guid overlap for. Held until every
-// guid match across the whole newFile has run, so ResolveNamePass can tell
-// a genuinely unclaimed same-named old effect from one that's already
-// spoken for -- see the file header for why that ordering matters.
+// A new effect ResolveGuidPass found no guid overlap for. Held until every guid
+// match across the whole newFile has run, so ResolveNamePass can tell a
+// genuinely unclaimed same-named old effect from one that's already spoken for
+// -- see ResolveMergePlan for why that ordering matters.
 //--------------------------------------------------------------------------------
 struct PendingByName
 {
@@ -427,14 +387,13 @@ struct PendingByName
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // ResolveGuidPass
 //--------------------------------------------------------------------------------
-// Walks newCategory (read-only), resolving every Step-1 guid match on the
-// spot exactly as before, and deferring anything guid-less or with no guid
-// overlap into `pending` instead of touching idx.effectsByName itself.
-// Every old effect any guid match touches -- survivor or merged-away
-// candidate alike -- goes into `claimed`, even when BuildRework/
-// BuildMergedRework end up returning false (nothing to rework): the guid
-// identity is still spoken for, so ResolveNamePass must never pick it up
-// as an unrelated same-named candidate.
+// Walks newCategory (read-only), resolving every Step-1 guid match on the spot
+// exactly as before, and deferring anything guid-less or with no guid overlap
+// into `pending` instead of touching idx.effectsByName itself. Every old effect
+// any guid match touches -- survivor or merged-away candidate alike -- goes
+// into `claimed`, even when BuildRework/BuildMergedRework end up returning
+// false (nothing to rework): the guid identity is still spoken for, so
+// ResolveNamePass must never pick it up as an unrelated same-named candidate.
 //--------------------------------------------------------------------------------
 void ResolveGuidPass(const json& newCategory,
                       std::vector<std::string>& pathSoFar,
@@ -450,8 +409,7 @@ void ResolveGuidPass(const json& newCategory,
             if (!newEffect.contains("name") || !newEffect["name"].is_string())
                 continue; //. malformed, skip
 
-            //_ Case 0, guid-less: can't be matched reliably; skip so it
-            // never collides with another guid-less same-named effect
+            //_ Case 0, guid-less: skip -- unmatchable, avoids name collisions
             if (!HasAnyGuid(newEffect))
                 continue;
 
@@ -467,7 +425,7 @@ void ResolveGuidPass(const json& newCategory,
             }
 
             for (json* m : guidMatches)
-                claimed.insert(m); //. spoken for, regardless of outcome below
+                claimed.insert(m); //. spoken for regardless of outcome
 
             if (guidMatches.size() == 1)
             {
@@ -485,8 +443,7 @@ void ResolveGuidPass(const json& newCategory,
                 }
                 else
                 {
-                    //_ 1b: same guid-diff logic as 1a, but name/category are
-                    // overwritten from the update
+                    //_ 1b: like 1a, but overwrites name/category too
                     MergePlanRework rework;
                     if (BuildMergedRework({ guidMatch }, newEffect, name, pathSoFar, idx, rework))
                         plan.reworks.push_back(std::move(rework));
@@ -494,8 +451,7 @@ void ResolveGuidPass(const json& newCategory,
             }
             else
             {
-                //_ 1c: guids split across multiple old effects -- always
-                // folded into one entry now (see BuildMergedRework)
+                //_ 1c: guids split across old effects, folded into one entry
                 MergePlanRework rework;
                 if (BuildMergedRework(guidMatches, newEffect, name, pathSoFar, idx, rework))
                     plan.reworks.push_back(std::move(rework));
@@ -519,13 +475,13 @@ void ResolveGuidPass(const json& newCategory,
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // ResolveNamePass
 //--------------------------------------------------------------------------------
-// Runs Step 2 over every effect ResolveGuidPass deferred, once guid
-// matching for the entire newFile is done and `claimed` is final. Filters
-// idx.effectsByName's candidates against `claimed` before counting, so an
-// old effect a Step-1 match already consumed can't also be matched here by
-// coincidence of name. A candidate this pass itself resolves (2a) is added
-// to `claimed` too, so two pending effects that happen to share a name
-// still can't both land on the same single unclaimed candidate.
+// Runs Step 2 over every effect ResolveGuidPass deferred, once guid matching
+// for the entire newFile is done and `claimed` is final. Filters
+// idx.effectsByName's candidates against `claimed` before counting, so an old
+// effect a Step-1 match already consumed can't also be matched here by
+// coincidence of name. A candidate this pass itself resolves (2a) is added to
+// `claimed` too, so two pending effects that happen to share a name still can't
+// both land on the same single unclaimed candidate.
 //--------------------------------------------------------------------------------
 void ResolveNamePass(const std::vector<PendingByName>& pending,
                       const OldIndex& idx,
@@ -543,8 +499,7 @@ void ResolveNamePass(const std::vector<PendingByName>& pending,
 
         if (candidates.size() == 1)
         {
-            //_ 2a: exactly one unclaimed same-named old effect -- full guid
-            // refresh under an unchanged name
+            //_ 2a: one unclaimed same-named match, full guid refresh
             MergePlanRework rework;
             if (BuildRework(*candidates[0], *item.newEffect, item.name, idx, item.categoryPath, rework))
                 plan.reworks.push_back(std::move(rework));
@@ -552,9 +507,7 @@ void ResolveNamePass(const std::vector<PendingByName>& pending,
         }
         else
         {
-            //_ candidates.empty() (2b: genuinely new, or every same-named
-            // old effect was already claimed elsewhere) or > 1 (2c:
-            // ambiguous, no guid signal to pick) -- insert as new either way
+            //_ 2b/2c: none unclaimed, or several ambiguous -- insert as new
             MergePlanNewEffect insert;
             insert.categoryPath = item.categoryPath;
             insert.name         = item.name;
@@ -567,11 +520,10 @@ void ResolveNamePass(const std::vector<PendingByName>& pending,
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // CountGuidsRecursive
 //--------------------------------------------------------------------------------
-// Recursively tallies how many times each guid string appears across
-// every effect under `category`. A guid on two effects increments the
-// same key twice; a single effect repeating a guid within its own array
-// isn't de-duped, since only file-wide duplication (FindDuplicateGuids'
-// concern) matters here.
+// Recursively tallies how many times each guid string appears across every
+// effect under `category`. A guid on two effects increments the same key twice;
+// a single effect repeating a guid within its own array isn't de-duped, since
+// only file-wide duplication (FindDuplicateGuids' concern) matters here.
 //--------------------------------------------------------------------------------
 void CountGuidsRecursive(const json& category, std::unordered_map<std::string, int>& counts)
 {
@@ -590,15 +542,14 @@ void CountGuidsRecursive(const json& category, std::unordered_map<std::string, i
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // RemoveEffectsRecursive
 //--------------------------------------------------------------------------------
-// Address-based removal, single pass: strips any effect under `category`
-// whose address is in `toRemove`. Only ever called once, against addresses
-// from a still-fully-valid OldIndex (see ApplyMergePlan's phase ordering).
-// Iterates back-to-front by index, not forward begin()/erase(): erasing
-// index i shifts every later element down one slot, reusing its freed
-// address, so a forward pass would re-check the shifted-in element against
-// the STALE address of what used to be there and cascade into erasing
-// everything after it. Back-to-front only ever shifts already-visited
-// indices, so this can't happen.
+// Address-based removal, single pass: strips any effect under `category` whose
+// address is in `toRemove`. Only ever called once, against addresses from a
+// still-fully-valid OldIndex (see ApplyMergePlan's phase ordering). Iterates
+// back-to-front by index, not forward begin()/erase(): erasing index i shifts
+// every later element down one slot, reusing its freed address, so a forward
+// pass would re-check the shifted-in element against the STALE address of what
+// used to be there and cascade into erasing everything after it. Back-to-front
+// only ever shifts already-visited indices, so this can't happen.
 //--------------------------------------------------------------------------------
 void RemoveEffectsRecursive(json& category, const std::unordered_set<const json*>& toRemove)
 {
@@ -620,10 +571,10 @@ void RemoveEffectsRecursive(json& category, const std::unordered_set<const json*
 //--------------------------------------------------------------------------------
 // Recursively walks newFile's category tree, recording every non-empty
 // "description" into `out`, keyed by JoinCategoryPathKey(pathSoFar).
-// Deliberately independent of effect matching -- a category's description
-// is upstream metadata about the category itself, not something tied to
-// any one effect inside it, so this doesn't piggyback on
-// ResolveGuidPass/ResolveNamePass at all.
+// Independent of effect matching -- a category's description is upstream
+// metadata about the category itself, not something tied to any one effect
+// inside it, so this doesn't piggyback on ResolveGuidPass/ResolveNamePass at
+// all.
 //--------------------------------------------------------------------------------
 void CollectCategoryDescriptions(const json& category, std::vector<std::string>& pathSoFar,
                                   std::unordered_map<std::string, std::string>& out)
@@ -651,24 +602,15 @@ void CollectCategoryDescriptions(const json& category, std::vector<std::string>&
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // FillBlankCategoryDescriptions
 //--------------------------------------------------------------------------------
-// Walks EVERY category already sitting in `category` -- brand-new ones
-// FindOrCreateCategory just created moments ago, categories a relocation
-// landed effects into, and categories that were already there on disk
-// completely untouched by this update -- and fills in `descriptions[path]`
-// for any of them whose own "description" is currently missing or empty.
-// A category with ANY non-empty description, however it got there
-// (hand-written locally, or filled by an earlier update), is never
-// touched -- same "don't clobber something already there" rule
-// BuildRework/BuildMergedRework apply to effect fields, just checked
-// directly against blankness instead of inferred from match provenance.
-//
-// Deliberately a single top-to-bottom pass over the WHOLE tree rather than
-// scoped to what the merge plan touched: a category can have sat blank for
-// releases with nothing ever relocating through it, so there's no rework/
-// insert entry to hang this off of. Run once, at the very end of
-// ApplyMergePlan (after inserts/relocations/pruning), so it only ever
-// looks at the tree's final shape -- see BuildDiffOverlayTree's own mirror
-// of this same pass for the preview side.
+// Walks every category in `category` -- freshly created, relocation targets,
+// and pre-existing ones alike -- filling `descriptions[path]` into any whose
+// own "description" is missing or empty; a category with any non-empty
+// description, however it got there, is never touched (the same blankness rule
+// BuildRework/BuildMergedRework apply to effect fields). A single top-to-bottom
+// pass over the whole tree, not scoped to what the merge plan touched: a
+// category can sit blank for releases with nothing ever relocating through it,
+// so there's no rework/insert entry to hang this off of. Runs once, at the end
+// of ApplyMergePlan, mirrored by BuildDiffOverlayTree for the preview side.
 //--------------------------------------------------------------------------------
 void FillBlankCategoryDescriptions(json& category, std::vector<std::string>& pathSoFar,
                                     const std::unordered_map<std::string, std::string>& descriptions)
@@ -699,16 +641,14 @@ void FillBlankCategoryDescriptions(json& category, std::vector<std::string>& pat
 // FindOrCreateCategory
 //--------------------------------------------------------------------------------
 // Finds, or creates and appends, the child category of oldParent whose name
-// matches `name`. Used while applying inserts (after every guid refresh
-// has already been applied) and while relocating any rework whose category
-// changed (1a/1b/1c/2a alike -- see BuildRework/BuildMergedRework).
-//
-// Deliberately description-agnostic -- a freshly-created category comes out
-// name-only here; FillBlankCategoryDescriptions (run once, at the very end
-// of ApplyMergePlan) is what seeds it, in the exact same pass that also
-// backfills a pre-existing-but-blank category elsewhere in the tree. See
-// that function's own doc for why centralizing it there, rather than here,
-// covers both cases with one rule instead of two.
+// matches `name`. Used while applying inserts (after every guid refresh has
+// already been applied) and while relocating any rework whose category changed
+// (1a/1b/1c/2a alike -- see BuildRework/BuildMergedRework).
+// Description-agnostic -- a freshly-created category comes out name-only here;
+// FillBlankCategoryDescriptions (run once, at the end of ApplyMergePlan) is
+// what seeds it, in the exact same pass that also backfills a
+// pre-existing-but-blank category elsewhere in the tree, so one rule covers
+// both cases instead of two.
 //--------------------------------------------------------------------------------
 json& FindOrCreateCategory(json& oldParent, const std::string& name)
 {
@@ -729,15 +669,15 @@ json& FindOrCreateCategory(json& oldParent, const std::string& name)
 // StripConflictingMergedAwayGuids
 //--------------------------------------------------------------------------------
 // Second pass over the fully-resolved plan: a rework's own oldGuids is its
-// identity key, but another rework's mergedAwayGuids can end up naming
-// that same guid (e.g. a guid gets folded into an unrelated effect's 1c
-// merge upstream, while the original effect picks up a new guid and is
-// found again via the name fallback). Both can't be right -- the effect is
-// alive under its own rework, not a duplicate to delete -- so any
-// mergedAwayGuids entry colliding with another rework's identity key is
-// dropped here, before ApplyMergePlan can destroy an object a sibling
-// rework just updated. Guid-based, not pointer-based, since this only
-// touches MergePlan's own strings, never oldFile/newFile.
+// identity key, but another rework's mergedAwayGuids can end up naming that
+// same guid (e.g. a guid gets folded into an unrelated effect's 1c merge
+// upstream, while the original effect picks up a new guid and is found again
+// via the name fallback). Both can't be right -- the effect is alive under its
+// own rework, not a duplicate to delete -- so any mergedAwayGuids entry
+// colliding with another rework's identity key is dropped here, before
+// ApplyMergePlan can destroy an object a sibling rework just updated.
+// Guid-based, not pointer-based, since this only touches MergePlan's own
+// strings, never oldFile/newFile.
 //--------------------------------------------------------------------------------
 void StripConflictingMergedAwayGuids(MergePlan& plan)
 {
@@ -758,18 +698,16 @@ void StripConflictingMergedAwayGuids(MergePlan& plan)
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // PruneEmptyCategories
 //--------------------------------------------------------------------------------
-// Recursively strips any subcategory left with no effects and no
-// non-empty subcategories of its own, post-order so a parent that's only
-// empty because its last surviving child was just pruned in this same
-// pass is caught too. Runs at the end of ApplyMergePlan so a relocation
-// that fully vacates an old branch (e.g. a category ArenaNet reorganized
-// upstream) doesn't leave a dead, effect-less shell of the old tree
-// sitting alongside the new one. Only ever prunes *subcategories* --
-// top-level categories are left alone even if empty, since those are
-// stable named groups the UI expects to always find; `category` itself is
-// mutated in place, and the return value tells the caller whether
-// `category` itself is now empty (so it, in turn, can be pruned by ITS
-// parent -- irrelevant for top-level callers, which ignore it).
+// Recursively strips any subcategory left with no effects and no non-empty
+// subcategories of its own, post-order so a parent that's only empty because
+// its last surviving child was just pruned in this same pass is caught too.
+// Runs at the end of ApplyMergePlan so a relocation that fully vacates an old
+// branch (e.g. a category ArenaNet reorganized upstream) doesn't leave a dead,
+// effect-less shell of the old tree alongside the new one. Only ever prunes
+// *subcategories* -- top-level categories are left alone even if empty, since
+// those are stable named groups the UI expects to always find. `category` is
+// mutated in place; the return value tells the caller whether it is now empty
+// too, so it can be pruned by its own parent in turn.
 //--------------------------------------------------------------------------------
 bool PruneEmptyCategories(json& category)
 {
@@ -791,6 +729,18 @@ bool PruneEmptyCategories(json& category)
 
 } //. namespace
 
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// ResolveMergePlan
+//--------------------------------------------------------------------------------
+// Builds oldFile's OldIndex once, then runs ResolveGuidPass over every
+// top-level category before ResolveNamePass runs at all -- see merge.h for the
+// case table. A single interleaved pass could let a guid match on one new
+// effect and a name match on an unrelated new effect resolve against the same
+// old effect (its guid reassigned upstream while its vacated name/slot got
+// independently reused), producing two reworks with the same identity key that
+// ApplyMergePlan would apply against the same node, silently dropping whichever
+// ran first.
+//--------------------------------------------------------------------------------
 MergePlan ResolveMergePlan(const json& oldFile, const json& newFile, bool& outOk)
 {
     MergePlan plan;
@@ -801,8 +751,7 @@ MergePlan ResolveMergePlan(const json& oldFile, const json& newFile, bool& outOk
     if (!newFile.contains("categories") || !newFile["categories"].is_array())
         return plan;
 
-    //_ oldFile is untouched here -- IndexCategory's non-const overload
-    // just also serves ApplyMergePlan's mutable-pointer needs below
+    //_ oldFile untouched; IndexCategory overload also serves ApplyMergePlan
     OldIndex idx;
     for (auto& cat : const_cast<json&>(oldFile)["categories"])
     {
@@ -811,9 +760,7 @@ MergePlan ResolveMergePlan(const json& oldFile, const json& newFile, bool& outOk
         IndexCategory(cat, std::vector<std::string>{ cat["name"].get<std::string>() }, idx);
     }
 
-    //_ Shared across every top-level category so a guid match anywhere in
-    // newFile is claimed before ResolveNamePass runs anywhere -- see the
-    // file header and ResolveGuidPass/ResolveNamePass for why that matters
+    //_ Shared across top-level categories -- see comment above for why
     std::unordered_set<const json*> claimed;
     std::vector<PendingByName> pending;
 
@@ -829,10 +776,7 @@ MergePlan ResolveMergePlan(const json& oldFile, const json& newFile, bool& outOk
 
     StripConflictingMergedAwayGuids(plan);
 
-    //_ Independent of guid/name matching above -- see the function's own
-    // comment. Populated unconditionally, whether or not this newFile
-    // category ends up needing to be freshly created; FindOrCreateCategory/
-    // FindOrCreateDiffCategory are what decide whether it's actually used.
+    //_ Independent of guid/name matching; always populated, used or not
     for (const auto& newTop : newFile["categories"])
     {
         if (!newTop.contains("name") || !newTop["name"].is_string())
@@ -849,15 +793,15 @@ MergePlan ResolveMergePlan(const json& oldFile, const json& newFile, bool& outOk
 // ApplyMergePlan
 //--------------------------------------------------------------------------------
 // Built as one OldIndex up front -- O(effects), not O(reworks x effects) --
-// then mutated in five strict phases so every captured pointer stays valid
-// throughout: (1) field updates only, never resizing an effects array; (2)
-// a single removal pass over the whole tree, using addresses from phase 1
-// while they're still valid; (3) re-insert every moved survivor at its new
-// location, only now that resizes are safe; (4) apply new-effect
-// insertions; (5) prune any subcategory branch left fully empty by phases
-// 2-3 (see PruneEmptyCategories). Reworks are looked up by guid, never
-// name, since rw.oldGuids/mergedAwayGuids pin down the exact node even
-// when several old effects share a name.
+// then mutated in six strict phases so every captured pointer stays valid
+// throughout: (1) field updates only, never resizing an effects array; (2) one
+// removal pass over the whole tree, using phase-1 addresses while they're still
+// valid; (3) re-insert every moved survivor at its new location, only now that
+// resizes are safe; (4) new-effect insertions; (5) prune any subcategory branch
+// left empty by phases 2-3 (see PruneEmptyCategories); (6) backfill any
+// category still missing a description (see FillBlankCategoryDescriptions).
+// Reworks are looked up by guid, never name, since rw.oldGuids/mergedAwayGuids
+// pin down the exact node even when several old effects share a name.
 //--------------------------------------------------------------------------------
 void ApplyMergePlan(json& oldFile, const MergePlan& plan)
 {
@@ -899,9 +843,7 @@ void ApplyMergePlan(json& oldFile, const MergePlan& plan)
                 toRemove.insert(it->second);
         }
 
-        //_ Relocate only if the update's path actually differs -- for
-        // 1a/2a this now fires too whenever upstream moved the effect's
-        // category (see BuildRework)
+        //_ Relocate only if the path differs -- 1a/2a fires too if moved
         if (!rw.newCategoryPath.empty() && rw.newCategoryPath != rw.oldCategoryPath)
         {
             toRemove.insert(survivor);
@@ -939,14 +881,11 @@ void ApplyMergePlan(json& oldFile, const MergePlan& plan)
         (*cursor)["effects"].push_back(ins.effect);
     }
 
-    //_ Phase 5: drop any subcategory branch a relocation left fully empty
-    // (e.g. the old side of a category ArenaNet reorganized upstream)
+    //_ Phase 5: drop any subcategory branch a relocation left empty
     for (auto& cat : oldFile["categories"])
         PruneEmptyCategories(cat);
 
-    //_ Phase 6: backfill any category -- new or pre-existing -- still
-    // missing a description upstream has one for. Run last, after pruning,
-    // so a category phase 5 is about to delete never gets written to first.
+    //_ Phase 6: backfill descriptions last, after pruning deletes its targets
     for (auto& cat : oldFile["categories"])
     {
         if (!cat.contains("name") || !cat["name"].is_string())

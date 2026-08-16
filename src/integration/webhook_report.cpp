@@ -1,29 +1,5 @@
 //################################################################################
-// webhook_report.cpp
-//--------------------------------------------------------------------------------
-// StartSendReport()              validates and starts sending a report
-// GetReportStatus()               current EReportStatus
-// GetLastReportOutcome()          EReportOutcome for the last Done/Error result
-// GetLastReportMessage()          most recent human-readable outcome
-// CancelInFlightReportRequest()   closes in-flight WinHTTP handles
-//--------------------------------------------------------------------------------
-// See webhook_report.h for the feature-level description. HTTP is via
-// WinHTTP, synchronous, always on a short-lived detached background
-// thread -- same shape as github_update.cpp's HttpsGetToString, but POST +
-// a JSON body instead of GET, against the report-relay Worker's host
-// instead of GitHub's -- deliberately not sharing code with
-// github_update.cpp, see webhook_report.h for why. All validation (empty
-// note, blank/duplicate guids, rendered-length) runs synchronously on the
-// calling thread before anything is queued; a rejected report never
-// touches the network. This file never renders a guid block's text
-// itself -- entries[].block arrives already-composed, so its only job
-// with it is passing it through into the JSON payload untouched, and (for
-// the length check) measuring it rather than reading it.
-//
-// Shared state: an atomic in-flight flag and status enum polled from the
-// render thread, a mutex-guarded last-result message, and the active
-// WinHTTP handles tracked so CancelInFlightReportRequest can interrupt a
-// hung call from another thread -- same split as github_update.cpp.
+// webhook_report.cpp   (see: webhook_report.h)
 //--------------------------------------------------------------------------------
 
 #pragma comment(lib, "winhttp.lib")
@@ -55,18 +31,16 @@ static HINTERNET  s_activeSession = nullptr;
 static HINTERNET  s_activeConnect = nullptr;
 static HINTERNET  s_activeRequest = nullptr;
 
-//_ See BeginReportShutdown/GetReportActiveThreadCount (webhook_report.h) --
-// same shape as github_update.cpp's s_shuttingDown/s_activeThreads pair,
-// kept separate rather than shared for the reasons in the header comment.
+//_ See BeginReportShutdown/GetReportActiveThreadCount (webhook_report.h) -- same shape as github_update.cpp's s_shuttingDown/s_activeThreads pair, kept separate instead of shared for the reasons in the header comment
 static std::atomic<bool> s_reportShuttingDown{false};
 static std::atomic<int>  s_activeReportThreads{0};
 
 //********************************************************************************
 // ActiveReportThreadGuard
 //--------------------------------------------------------------------------------
-// Same shape as github_update.cpp's ActiveThreadGuard -- constructed as
-// the first statement inside the send thread's lambda so the spawned
-// thread itself does the counting, destroyed on every return path.
+// Same shape as github_update.cpp's ActiveThreadGuard -- constructed as the first
+// statement inside the send thread's lambda so the spawned thread itself does the
+// counting, destroyed on every return path.
 //--------------------------------------------------------------------------------
 struct ActiveReportThreadGuard
 {
@@ -97,8 +71,8 @@ namespace {
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // Widen
 //--------------------------------------------------------------------------------
-// Assumes `s` is plain ASCII -- true of every webhook host/path this file
-// ever builds one from.
+// Assumes `s` is plain ASCII -- true of every webhook host/path this file ever
+// builds one from.
 //--------------------------------------------------------------------------------
 std::wstring Widen(const std::string& s)
 {
@@ -113,22 +87,19 @@ std::string Trim(const std::string& s)
     return s.substr(start, end - start);
 }
 
-//_ Discord's real webhook message-content limit -- see
-// EstimateDiscordContentLength, the actual check this backs.
+//_ Discord's real webhook message-content limit -- see EstimateDiscordContentLength, the actual check this backs
 constexpr size_t kDiscordContentLimit = 2000;
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // EstimateDiscordContentLength
 //--------------------------------------------------------------------------------
 // Mirrors vfxd-sins-report-relay/src/index.js's exact assembly:
-// `${reporterLine}\n\n${bodyParts.join("\n")}`, where bodyParts is every
-// surviving entry's block plus the note under an "Additional" heading,
-// blockquoted one "> " per line.
-//
-// Always assumes zero omitted guids -- the real worst case, since an
-// omitted guid drops its full block for just its bare 24-char text in
-// the omission list, only ever shrinking the message. Note is measured
-// after trimming (what's actually sent); blocks are measured as-is.
+// `${reporterLine}\n\n${bodyParts.join("\n")}`, where bodyParts is every surviving
+// entry's block plus the note under an "Additional" heading, blockquoted one
+// "> " per line. Always assumes zero omitted guids -- the real worst case, since
+// an omitted guid drops its full block for just its bare 24-char text in the
+// omission list, only ever shrinking the message. Note is measured after
+// trimming (what's actually sent); blocks are measured as-is.
 //--------------------------------------------------------------------------------
 size_t EstimateDiscordContentLength(const std::string& reporterLine,
                                     const std::vector<ReportGuidBlock>& entries,
@@ -139,27 +110,23 @@ size_t EstimateDiscordContentLength(const std::string& reporterLine,
     for (const auto& entry : entries)
         total += entry.block.size() + 1; //. block + its join("\n") separator
 
-    //_ "Additional\n" header (11 chars) + the note, blockquoted -- join
-    // preserves the note's own newline count, so only the "> " prefixes
-    // (2 chars per line) add length on top of trimmedNote.size() itself
+    //_ "Additional\n" header (11 chars) + the note, blockquoted -- join preserves the note's own newline count, so only the "> " prefixes (2 chars/line) add length on top of trimmedNote.size() itself
     size_t noteLines = 1 + std::count(trimmedNote.begin(), trimmedNote.end(), '\n');
     total += 11 + trimmedNote.size() + 2 * noteLines;
 
     return total;
 }
 
-//_ Not a secret itself -- obfuscates whatever URL
-// tools/generate_webhook_config.py wrote into webhook_config.h. Keep in
-// sync with that script's KEY list if this ever changes.
+//_ Not a secret itself -- obfuscates whatever URL tools/generate_webhook_config.py wrote into webhook_config.h; keep in sync with that script's KEY list if this ever changes
 constexpr unsigned char kWebhookXorKey[] = { 0x5A, 0x3C, 0x91, 0x7E, 0x2D, 0xC8, 0x11 };
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // DecodeWebhookUrl
 //--------------------------------------------------------------------------------
-// Reconstructs the real relay URL from webhook_config.h's obfuscated
-// bytes. Only ever called right before the POST that needs it -- the
-// plain URL exists in memory only as long as it takes WinHTTP to consume
-// it, same as any string ordinarily handed to WinHttpConnect.
+// Reconstructs the real relay URL from webhook_config.h's obfuscated bytes. Only
+// ever called right before the POST that needs it -- the plain URL exists in
+// memory only as long as it takes WinHTTP to consume it, same as any string
+// ordinarily handed to WinHttpConnect.
 //--------------------------------------------------------------------------------
 std::string DecodeWebhookUrl()
 {
@@ -176,13 +143,13 @@ std::string DecodeWebhookUrl()
 // Synchronous HTTPS POST of a JSON body against a full URL. Same shape as
 // github_update.cpp's HttpsGetToString (crack URL, WinHttpOpen/Connect/
 // OpenRequest/SendRequest/ReceiveResponse, handles tracked in s_active*/
-// CancelInFlightReportRequest so an addon unload can interrupt a hung
-// call) but POST with a body instead of GET, and this file's own
-// handle-tracking statics rather than shared ones. Unlike posting
-// straight to Discord (204 empty on success), the relay always returns a
-// small JSON body -- {"status": "sent"|"partial"|"duplicate", "sent":
-// [...], "omitted": [...]} on success, {"error": ...} plus an error code
-// on failure -- which StartSendReport's background thread parses.
+// CancelInFlightReportRequest so an addon unload can interrupt a hung call) but
+// POST with a body instead of GET, and this file's own handle-tracking statics
+// instead of shared ones. Unlike posting straight to Discord (204 empty on
+// success), the relay always returns a small JSON body -- {"status":
+// "sent"|"partial"|"duplicate", "sent": [...], "omitted": [...]} on success,
+// {"error": ...} plus an error code on failure -- which StartSendReport's
+// background thread parses.
 //--------------------------------------------------------------------------------
 bool HttpsPostJson(const std::wstring& url, const std::string& jsonBody, int& outStatusCode, std::string& outResponseBody)
 {
@@ -208,8 +175,7 @@ bool HttpsPostJson(const std::wstring& url, const std::string& jsonBody, int& ou
     if (!hSession) return false;
     { std::lock_guard<std::mutex> lock(s_activeHandlesMutex); s_activeSession = hSession; }
 
-    //_ A single small JSON message -- no need for the release-download's
-    // more generous timeouts in github_update.cpp
+    //_ A single small JSON message -- no need for the release-download's more generous timeouts in github_update.cpp
     WinHttpSetTimeouts(hSession, 10000, 10000, 10000, 15000);
 
     HINTERNET hConnect = WinHttpConnect(hSession, hostBuf, uc.nPort, 0);
@@ -279,11 +245,11 @@ bool HttpsPostJson(const std::wstring& url, const std::string& jsonBody, int& ou
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // StartSendReport
 //--------------------------------------------------------------------------------
-// Claims s_reportInFlight via compare_exchange (not load-then-store) so
-// two near-simultaneous calls can't both pass the in-flight check and
-// both spawn a send -- same CAS-then-release-on-bail shape github_update.cpp's
-// Start* functions use. Validation runs entirely before the claim is used
-// for anything; every failure path releases it again before returning.
+// Claims s_reportInFlight via compare_exchange (not load-then-store) so two
+// near-simultaneous calls can't both pass the in-flight check and both spawn a
+// send -- same CAS-then-release-on-bail shape github_update.cpp's Start*
+// functions use. Validation runs entirely before the claim is used for anything;
+// every failure path releases it again before returning.
 //--------------------------------------------------------------------------------
 bool StartSendReport(const std::string& reporterLine,
                      const std::vector<ReportGuidBlock>& entries,
@@ -305,9 +271,7 @@ bool StartSendReport(const std::string& reporterLine,
         return false;
     }
 
-    //_ Real enforcement of kMaxReportGuids -- a row-count bound only, not
-    // a length guarantee. See the EstimateDiscordContentLength check
-    // further down below for that.
+    //_ Real enforcement of kMaxReportGuids -- a row-count bound only, see the EstimateDiscordContentLength check further down for the actual length bound
     if (entries.size() > kMaxReportGuids)
     {
         outError = "Reports are capped at " + std::to_string(kMaxReportGuids) +
@@ -316,8 +280,7 @@ bool StartSendReport(const std::string& reporterLine,
         return false;
     }
 
-    //_ Blocks the whole submission (not just the offending row) so the
-    // user sees exactly what to fix; cross-user dedup is the relay's job
+    //_ Blocks the whole submission (not just the offending row) so the user sees exactly what to fix
     std::unordered_set<std::string> seenThisSubmission;
     for (const auto& entry : entries)
     {
@@ -336,9 +299,7 @@ bool StartSendReport(const std::string& reporterLine,
         }
     }
 
-    //_ Real enforcement of Discord's 2000-char content limit, computed
-    // from the actual reporterLine/blocks/note -- see
-    // EstimateDiscordContentLength's own comment for the worst-case logic.
+    //_ Real enforcement of Discord's 2000-char content limit, computed from the actual reporterLine/blocks/note -- see EstimateDiscordContentLength's own comment for the worst-case logic
     if (EstimateDiscordContentLength(reporterLine, entries, trimmedNote) > kDiscordContentLimit)
     {
         outError = "Report is too long -- shorten the note or remove a GUID.";
@@ -346,9 +307,7 @@ bool StartSendReport(const std::string& reporterLine,
         return false;
     }
 
-    //_ Built here, on the calling thread -- cheap, keeps the background
-    // thread doing nothing but the network call (same split github_update.cpp
-    // uses). Shape matches vfxd-sins-report-relay/src/index.js's Worker.
+    //_ Built here, on the calling thread -- cheap, keeps the background thread doing nothing but the network call (same split github_update.cpp uses); shape matches vfxd-sins-report-relay/src/index.js's Worker
     json payload;
     payload["reporterLine"] = reporterLine;
     json jsonEntries = json::array();
@@ -376,9 +335,7 @@ bool StartSendReport(const std::string& reporterLine,
         std::string responseBody;
         bool ok = HttpsPostJson(Widen(DecodeWebhookUrl()), body, statusCode, responseBody);
 
-        //_ The POST above is the only thing CancelInFlightReportRequest can
-        // interrupt; this doesn't skip disk work like github_update.cpp's
-        // checks do -- it just stops a report being marked Done post-unload.
+        //_ The POST above is the only thing CancelInFlightReportRequest can interrupt; this doesn't skip disk work like github_update.cpp's checks do -- it just stops a report being marked Done post-unload
         if (s_reportShuttingDown.load())
         {
             s_reportStatus.store(EReportStatus::Idle);
@@ -386,8 +343,7 @@ bool StartSendReport(const std::string& reporterLine,
             return;
         }
 
-        //_ Best-effort parse -- a malformed/empty body (e.g. a connection
-        // dying mid-response) falls through to the generic messages below
+        //_ Best-effort parse -- a malformed/empty body (e.g. a connection dying mid-response) falls through to the generic messages below
         json parsed;
         bool parsedOk = false;
         if (!responseBody.empty())
@@ -399,9 +355,7 @@ bool StartSendReport(const std::string& reporterLine,
         std::lock_guard<std::mutex> lock(s_messageMutex);
         if (ok && statusCode >= 200 && statusCode < 300)
         {
-            //_ Per-entry, not all-or-nothing: "sent"/"omitted" list which
-            // guids were forwarded vs. already known. "status" drives the
-            // wording directly, staying in sync with the relay (see index.js).
+            //_ Per-entry, not all-or-nothing: "sent"/"omitted" list which guids were forwarded vs. already known; "status" drives the wording directly, staying in sync with the relay (see index.js)
             std::string status = (parsedOk && parsed.contains("status") && parsed["status"].is_string())
                                       ? parsed["status"].get<std::string>()
                                       : "";
@@ -423,9 +377,7 @@ bool StartSendReport(const std::string& reporterLine,
             }
             else
             {
-                //_ "sent", or an unrecognized/missing status -- treat as
-                // the ordinary success case rather than silently doing
-                // nothing, same fallback spirit as the errCode handling below
+                //_ "sent", or an unrecognized/missing status -- treat as the ordinary success case instead of silently doing nothing, same fallback spirit as the errCode handling below
                 s_lastReportMessage = "Report sent -- thank you!";
                 s_reportOutcome.store(EReportOutcome::AllSent);
             }
@@ -433,9 +385,7 @@ bool StartSendReport(const std::string& reporterLine,
         }
         else if (ok)
         {
-            //_ 400s (invalid_guid/note_required/too_many_entries/
-            // note_too_long/content_too_long) shouldn't happen -- already
-            // validated client-side. rate_limited (429), discord_failed (502).
+            //_ 400s (invalid_guid/note_required/too_many_entries/note_too_long/content_too_long) shouldn't happen -- already validated client-side. rate_limited (429), discord_failed (502)
             std::string errCode = (parsedOk && parsed.contains("error") && parsed["error"].is_string())
                                        ? parsed["error"].get<std::string>()
                                        : "";

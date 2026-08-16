@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 
-# Compiler/target selection now lives in the toolchain file rather than being
-# hardcoded here, so the same CMakeLists.txt builds under either backend:
+# Compiler/target selection lives in the toolchain file, so the
+# same CMakeLists.txt builds under either backend:
 #   MinGW (default, unchanged, no -DCMAKE_TOOLCHAIN_FILE needed):
 #     cmake -B build/mingw
 #   MSVC-ABI via clang-cl + lld-link (xwin sysroot):

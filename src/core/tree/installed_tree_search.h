@@ -15,16 +15,16 @@
 //
 // The search *state* itself -- s_treeSearchBuf, s_treeSearchQueryLower,
 // s_treeSearchQueryChanged, kMinTreeSearchLength -- lives in
-// installed_tree_view.cpp, read/written by RenderCategoryTree/
-// RenderInstalledEffects's search-box UI. Every function here already
-// takes the query string as a parameter, so this is a real "no shared
-// state" move for the functions themselves, just not for every static
+// installed_tree_view.cpp, read/written by
+// RenderCategoryTree/RenderInstalledEffects's search-box UI. Every function
+// here already takes the query string as a parameter, so this is a real "no
+// shared state" move for the functions themselves, just not for every static
 // that used to sit next to them in the original file.
 //--------------------------------------------------------------------------------
 
 #pragma once
 
-#include "merge.h" //. nlohmann::ordered_json
+#include "nlohmann_json.hpp"
 
 #include <string>
 #include <unordered_map>
@@ -67,11 +67,11 @@ bool CategoryDescriptionMatches(const nlohmann::ordered_json& category, const st
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // CategorySubtreeMatchesSearch
 //--------------------------------------------------------------------------------
-// True if `category` (its own name/description), any effect directly
-// inside it, or any nested subcategory (recursively) matches `queryLower`.
-// The "does this subtree have anything worth showing at all" check
-// RenderCategoryTree uses to decide whether to draw a category during a
-// search rather than skip it outright.
+// True if `category` (its own name/description), any effect directly inside it,
+// or any nested subcategory (recursively) matches `queryLower`. The "does this
+// subtree have anything worth showing at all" check RenderCategoryTree uses to
+// decide whether to draw a category during a search instead of skipping it
+// outright.
 //--------------------------------------------------------------------------------
 bool CategorySubtreeMatchesSearch(const nlohmann::ordered_json& category, const std::string& queryLower);
 
@@ -80,28 +80,27 @@ bool CategorySubtreeMatchesSearch(const nlohmann::ordered_json& category, const 
 //--------------------------------------------------------------------------------
 // True if something *below* `category` (a direct effect, or a nested
 // subcategory by its own name/description or transitively) matches
-// `queryLower`. Deliberately excludes `category`'s own name/description --
-// this is only about whether opening THIS category is necessary to reveal
-// a match further down. That distinction keeps "Warrior" itself collapsed
-// when a search only matched its own name, while still forcing "Classes"
-// (Warrior's parent) open so Warrior's row isn't hidden.
+// `queryLower`. Excludes `category`'s own name/description -- this is only
+// about whether opening THIS category is necessary to reveal a match further
+// down. That distinction keeps "Warrior" itself collapsed when a search only
+// matched its own name, while still forcing "Classes" (Warrior's parent) open
+// so Warrior's row isn't hidden.
 //--------------------------------------------------------------------------------
 bool CategoryHasDescendantMatch(const nlohmann::ordered_json& category, const std::string& queryLower);
 
-//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-// CategoryMatchCache / EffectMatchCache / BuildCategoryMatchCache / Cached*
+//********************************************************************************
+// CategoryMatchResult / EffectMatchResult
 //--------------------------------------------------------------------------------
+// CategoryMatchResult:  subtreeMatches, hasDescendantMatch
+// EffectMatchResult:    matches, hiddenMatches
+//--------------------------------------------------------------------------------
+// Per-node cache entries.
 // CategorySubtreeMatchesSearch/CategoryHasDescendantMatch above are each
-// independently recursive, and effect matching means lowercasing/scanning
-// name, description, and every GUID -- calling any of these directly per
-// node/effect, every frame a search stays active, costs O(size x depth)
-// for categories, or re-scans every effect needlessly (the query hasn't
-// changed between frames).
-//
-// These caches hold the same answers per node, built in one bottom-up
-// pass (each node/effect visited once) so top-down lookups are O(1).
-// Keyed by each json node's own address -- safe to rebuild fresh every
-// frame, so nothing here is cached *across* frames.
+// independently recursive, and effect matching means lowercasing/scanning name,
+// description, and every GUID -- calling any of these directly per node/effect
+// every frame a search stays active costs O(size x depth) for categories, or
+// re-scans every effect needlessly. Keyed by each json node's own address --
+// safe to rebuild fresh every frame, so nothing here is cached *across* frames.
 //--------------------------------------------------------------------------------
 struct CategoryMatchResult
 {
@@ -109,8 +108,6 @@ struct CategoryMatchResult
     bool hasDescendantMatch  = false;   //. CategoryHasDescendantMatch's answer
 };
 
-//_ Same idea as CategoryMatchResult, but for a leaf effect node (see the
-// group comment above).
 struct EffectMatchResult
 {
     bool matches       = false;   //. EffectMatchesSearch's answer (name/hidden)
@@ -154,19 +151,14 @@ bool CachedEffectHiddenMatches(const nlohmann::ordered_json& effect, const std::
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // SilentlyCloseSubtree / SilentlyCloseChildren
 //--------------------------------------------------------------------------------
-// A category/effect's forced-open state only gets set on the frame the
-// query changes, for whatever RenderCategoryTree actually visits that
-// frame -- a collapsed or search-hidden category's children are never
-// visited, so force-CLOSING it leaves what's underneath untouched. A
-// grandchild force-opened by an earlier query stays "open" in ImGui's
-// per-ID memory though invisible, reappearing already expanded the next
-// time its ancestor opens.
-//
-// These two functions fix that by walking the JSON tree directly (nothing
-// drawn) and writing "closed" into ImGui's per-ID storage for every node
-// underneath, using the render pass's own ID scheme (PushID(index) for
-// siblings, GetID(name)/GetID("effect") for a category/effect). Only
-// worth calling on the frame the query changed -- see
+// A category/effect's forced-open state only gets set for whatever
+// RenderCategoryTree visits on the frame the query changes -- a collapsed or
+// hidden category's children are never visited, so force-CLOSING leaves what's
+// underneath untouched, and a grandchild force-opened earlier can stay "open"
+// in ImGui's per-ID memory though invisible, reappearing expanded once its
+// ancestor opens. These two functions fix that by walking the JSON tree
+// directly and writing "closed" into ImGui's per-ID storage for every node
+// underneath. Only worth calling on the frame the query changed -- see
 // installed_tree_view.cpp's s_treeSearchQueryChanged comment for why.
 //--------------------------------------------------------------------------------
 void SilentlyCloseSubtree(const nlohmann::ordered_json& category);

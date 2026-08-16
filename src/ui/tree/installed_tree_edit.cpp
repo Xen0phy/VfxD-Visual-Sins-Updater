@@ -1,12 +1,5 @@
 //################################################################################
-// installed_tree_edit.cpp
-//--------------------------------------------------------------------------------
-// See installed_tree_edit.h for the module contract. Owns: every one of
-// the six state machines' structs and statics, all file-local (wrapped
-// in anonymous namespaces) -- addon.cpp reaches this file only through
-// the header's accessor API. Extracted from addon.cpp as a mechanical
-// move, no behavior change beyond what crossing the file boundary
-// needed (raw static reads in addon.cpp became accessor calls).
+// installed_tree_edit.cpp   (see: installed_tree_edit.h)
 //--------------------------------------------------------------------------------
 
 #include "effect_db.h"              //. EffectDb_SetName, EffectDb_SetCategoryPath, EffectDb_GetEffect
@@ -21,8 +14,7 @@
 #include <sstream>
 
 namespace {
-//_ Shared by all six state machines -- see SetEditResultMessage's doc
-// comment in installed_tree_edit.h for why this isn't scoped to just one.
+//_ Shared by all six state machines -- see SetEditResultMessage in the .h.
 std::string s_editResultMessage;
 }
 
@@ -475,9 +467,7 @@ void ApplyPendingCreateCategory()
     if (!parent->contains("categories") || !(*parent)["categories"].is_array())
         (*parent)["categories"] = nlohmann::ordered_json::array();
 
-    //_ Errors out rather than silently reusing an existing same-named
-    // sibling -- the user asked for a new category, so finding one
-    // already there is worth surfacing, not hiding.
+    //_ Errors on an existing same-named sibling instead of silently reusing it.
     for (const auto& sub : (*parent)["categories"])
     {
         if (sub.contains("name") && sub["name"] == job.newName)
@@ -578,9 +568,7 @@ void ApplyPendingCategoryMove()
     }
 
     auto& siblings = (*parent)["categories"];
-    //_ Indexed lookup, not a name search -- sibling categories can
-    // share a name (same reasoning as the effect-side Apply functions
-    // further down).
+    //_ Indexed lookup, not a name search -- sibling categories can share a name.
     if (originalIndex < 0 || static_cast<size_t>(originalIndex) >= siblings.size())
     {
         SetEditResultMessage("Reorder failed: the category is no longer there.");
@@ -592,9 +580,7 @@ void ApplyPendingCategoryMove()
     nlohmann::ordered_json categoryCopy = std::move(*it);
     siblings.erase(it);
 
-    //_ destinationIndex is captured against `siblings` before the erase
-    // above runs; erasing shifts everything after originalIndex down by
-    // one, so a destination index from later in the same array needs -1.
+    //_ destinationIndex is pre-erase; a later index needs -1 after the shift.
     if (job.destinationIndex < 0)
     {
         siblings.push_back(std::move(categoryCopy));
@@ -605,9 +591,7 @@ void ApplyPendingCategoryMove()
         if (originalIndex < insertIndex)
             insertIndex -= 1;
 
-        //_ Defensive clamp -- shouldn't trigger given the drop-time
-        // no-op guards, but a stale index landing outside the array is
-        // worse than a slightly-off placement.
+        //_ Defensive clamp -- a stale index shouldn't land outside the array.
         if (insertIndex < 0)
             insertIndex = 0;
         if (static_cast<size_t>(insertIndex) > siblings.size())
@@ -729,9 +713,7 @@ bool IsEffectEditActive()
 
 void RenderEffectEditor()
 {
-    //_ Fixed width for all edit fields -- without this, InputText
-    // stretches to fill the whole options-panel width, way too wide
-    // for a short value like a name or a guid.
+    //_ Fixed width, or InputText stretches to fill the whole options panel.
     const float kFieldWidth = 250.0f;
 
     ImGui::TextDisabled("Editing this addon's own fields. Hide/Show/duration stay owned by VfxDenoiser.");
@@ -783,9 +765,7 @@ void ApplyPendingEdit()
 
     const EditSaveJob& job = s_pendingSave;
 
-    //_ Re-finds the source category/effect by path rather than carrying
-    // a pointer from render time -- same reasoning as ApplyMergePlan's
-    // re-derived index in merge.cpp; costs nothing, removes any doubt.
+    //_ Re-finds by path instead of carrying a pointer from render time.
     nlohmann::ordered_json* rootPtr = FindInstalledJsonMutable(job.sinName);
     if (!rootPtr)
     {
@@ -794,9 +774,7 @@ void ApplyPendingEdit()
     }
     nlohmann::ordered_json& root = *rootPtr;
 
-    //_ Indexed-by-path-and-index lookup, not a name search -- sibling
-    // effects can share a name. originalIndex can't have shifted since
-    // BeginEdit time (no other mutation of this array is allowed mid-edit).
+    //_ Indexed lookup, not by name -- originalIndex can't shift mid-edit.
     std::string findError;
     nlohmann::ordered_json* effect = FindEffectByPath(root, job.originalPath, job.originalIndex,
                                                         job.originalName, job.originalName, &findError);
@@ -806,9 +784,7 @@ void ApplyPendingEdit()
         return;
     }
 
-    //_ "guids" is always written, even empty -- clearing all guids is
-    // valid (just won't be tracked across a future update, see merge.h).
-    // Category placement isn't touched here; that's drag-and-drop's job.
+    //_ "guids" is always written, even empty; placement isn't touched here.
     nlohmann::ordered_json guidsArr = nlohmann::ordered_json::array();
     for (const auto& g : job.newGuids)
         guidsArr.push_back(g);
@@ -823,12 +799,7 @@ void ApplyPendingEdit()
     if (!TrySaveOrReport(job.sinName, "Edit applied"))
         return;
 
-    //_ Deliberately does NOT touch effect_db/SQL. Under the effect_id
-    // rework (see EFFECT_DB_SOURCE_OF_TRUTH_HANDOFF.md), SQL is the sole
-    // source of truth for name/category -- this tab edits JSON only, the
-    // DB tab edits SQL only, and neither reads or writes the other. This
-    // used to call EffectDb_SetName here as a "write both places" step;
-    // that's exactly the direction the rework removes.
+    //_ Does not touch effect_db/SQL -- JSON and SQL each own name/category.
     s_editResultMessage = "Saved changes to \"" + job.newName + "\".";
     InvalidateInstalledTree(); //. force reload on next expand
 }
@@ -950,11 +921,7 @@ void ApplyPendingDbEffectRename()
 
     const DbEffectRenameSaveJob& job = s_pendingDbEffectRename;
 
-    //_ Any one guid works -- EffectDb_SetName resolves to effect_id
-    // internally and updates every sibling row, not just the one bound
-    // here (see effect_db.h). job.guids can't be empty: BeginDbEffectRename
-    // is only ever called from a real DB tab node, which always has at
-    // least one guid by construction (see BuildDbTree).
+    //_ Any one guid works -- resolves to effect_id internally (see effect_db.h).
     if (job.guids.empty() || !EffectDb_SetName(job.guids.front(), job.newName))
     {
         s_editResultMessage = "Rename failed: this effect is no longer known to the effect database.";
@@ -962,9 +929,7 @@ void ApplyPendingDbEffectRename()
     }
 
     s_editResultMessage = "Renamed to \"" + job.newName + "\" in the effect database.";
-    //_ Deliberately NOT InvalidateInstalledTree() -- that's the JSON
-    // tab's overlay cache, which this never touches. The DB tab tracks
-    // its own rebuild-on-generation-change, see installed_tree_view.cpp.
+    //_ Not InvalidateInstalledTree() -- the JSON tab's cache, not touched here.
 }
 
 //********************************************************************************
@@ -1018,8 +983,7 @@ void ApplyPendingDbEffectCategoryPlacement()
     }
 
     s_editResultMessage = "Moved \"" + job.effectName + "\" to " + JoinPath(job.categoryPath) + ".";
-    //_ See ApplyPendingDbEffectRename's comment -- no InvalidateInstalledTree
-    // here either, same reasoning.
+    //_ No InvalidateInstalledTree here either -- see ApplyPendingDbEffectRename.
 }
 
 //********************************************************************************
@@ -1034,12 +998,11 @@ void ApplyPendingDbEffectCategoryPlacement()
 //                EditState's originalIndex); unused for a category delete
 // displayName    just for the confirmation text/messages
 //--------------------------------------------------------------------------------
-// Rendered inline right next to the item's own row (see the "-"
-// SmallButton in RenderCategoryTree), which is always visible whether or
-// not that row's TreeNode is open -- so unlike EditState, this
-// deliberately does NOT get cancelled just because the owning node is
-// collapsed; nothing about it was ever hidden by collapsing in the first
-// place.
+// Rendered inline right next to the item's own row (see the "-" SmallButton in
+// RenderCategoryTree), which is always visible whether or not that row's
+// TreeNode is open -- so unlike EditState, this does not get cancelled just
+// because the owning node is collapsed; nothing about it was ever hidden by
+// collapsing in the first place.
 //--------------------------------------------------------------------------------
 struct DeleteConfirmState
 {
@@ -1167,9 +1130,7 @@ void ApplyPendingDelete()
         }
 
         auto& siblings = (*parent)["categories"];
-        //_ Indexed lookup, not a name search -- sibling categories can
-        // share a name (same reasoning as the effect branch below); safe
-        // since only one edit/delete/create/rename is in flight at once.
+        //_ Indexed lookup, not by name -- sibling categories can share a name.
         if (myIndex < 0 || static_cast<size_t>(myIndex) >= siblings.size())
         {
             s_editResultMessage = "Delete failed: \"" + job.name + "\" is no longer there.";
@@ -1183,8 +1144,7 @@ void ApplyPendingDelete()
         }
         bool hasEffects = it->contains("effects") && !(*it)["effects"].empty();
         bool hasSubcats = it->contains("categories") && !(*it)["categories"].empty();
-        //_ Re-checked here, not just at the confirm prompt -- this is
-        // the authoritative check.
+        //_ Re-checked here, not just at the prompt -- authoritative.
         if (hasEffects || hasSubcats)
         {
             s_editResultMessage = "Delete failed: \"" + job.name + "\" isn't empty anymore.";
@@ -1194,9 +1154,7 @@ void ApplyPendingDelete()
     }
     else
     {
-        //_ Same indexed-by-path-and-index lookup as ApplyPendingEdit. Once
-        // found, re-resolve the category for an erasable iterator --
-        // guaranteed since FindEffectByPath just verified path/index/name.
+        //_ Same lookup as ApplyPendingEdit, re-resolved as an erasable iterator.
         std::string findError;
         if (!FindEffectByPath(root, job.path, job.index, job.name, job.name, &findError))
         {
@@ -1247,8 +1205,7 @@ void ApplyPendingMove()
 
     const EffectMoveJob& job = s_pendingMove;
 
-    //_ Re-finds the source category/effect by path rather than carrying
-    // a pointer from render time -- same reasoning as ApplyPendingEdit.
+    //_ Re-finds by path, not a carried pointer -- same as ApplyPendingEdit.
     nlohmann::ordered_json* rootPtr = FindInstalledJsonMutable(job.sinName);
     if (!rootPtr)
     {
@@ -1257,9 +1214,7 @@ void ApplyPendingMove()
     }
     nlohmann::ordered_json& root = *rootPtr;
 
-    //_ Same indexed-by-path-and-index lookup as ApplyPendingEdit. Once
-    // found, re-resolve the category for an erasable iterator --
-    // guaranteed to succeed since FindEffectByPath just verified path/index/name.
+    //_ Same lookup as ApplyPendingEdit, re-resolved as an erasable iterator.
     std::string findError;
     if (!FindEffectByPath(root, job.originalPath, job.originalIndex, job.effectName, job.effectName, &findError))
     {
@@ -1272,9 +1227,7 @@ void ApplyPendingMove()
     nlohmann::ordered_json effectCopy = std::move(*srcIt);
     effectsArr.erase(srcIt);
 
-    //_ destinationPath is a real, already-existing category (captured
-    // from the tree at drop time), never typed text -- resolved the same
-    // way srcCategory was, rather than creating anything new.
+    //_ destinationPath is a real category from the tree, not typed text.
     nlohmann::ordered_json* destCategory = FindCategoryByPath(root, job.destinationPath);
     if (!destCategory)
     {
@@ -1285,9 +1238,7 @@ void ApplyPendingMove()
         (*destCategory)["effects"] = nlohmann::ordered_json::array();
     auto& destEffectsArr = (*destCategory)["effects"];
 
-    //_ Append/insert convention: see EffectMoveJob (installed_tree_edit.h).
-    // Same-category moves need a -1 shift here since the erase above
-    // already moved everything after originalIndex down by one.
+    //_ See EffectMoveJob in the .h; same-category needs -1 after the erase shift.
     if (job.destinationIndex < 0)
     {
         destEffectsArr.push_back(std::move(effectCopy));
@@ -1298,8 +1249,7 @@ void ApplyPendingMove()
         if (job.originalPath == job.destinationPath && job.originalIndex < insertIndex)
             insertIndex -= 1;
 
-        //_ Defensive clamp -- see ApplyPendingCategoryMove's identical
-        // case for why this is worth having.
+        //_ Defensive clamp -- see ApplyPendingCategoryMove's identical case.
         if (insertIndex < 0)
             insertIndex = 0;
         if (static_cast<size_t>(insertIndex) > destEffectsArr.size())
@@ -1358,8 +1308,7 @@ void ApplyPendingGuidMerge()
         return;
     }
 
-    //_ Re-finds both effects by path/index rather than carrying pointers
-    // from render time -- same reasoning as ApplyPendingMove.
+    //_ Re-finds both effects by path, not pointers -- same as ApplyPendingMove.
     nlohmann::ordered_json* rootPtr = FindInstalledJsonMutable(job.sinName);
     if (!rootPtr)
     {
@@ -1368,9 +1317,7 @@ void ApplyPendingGuidMerge()
     }
     nlohmann::ordered_json& root = *rootPtr;
 
-    //_ Both effects resolved by path/index/name -- same reasoning as
-    // ApplyPendingEdit/ApplyPendingMove, just needed twice here since a
-    // merge touches two independent effects instead of one.
+    //_ Both resolved by path/index/name -- a merge touches two effects, not one.
     std::string findError;
     nlohmann::ordered_json* srcEffect = FindEffectByPath(root, job.originalPath, job.originalIndex,
                                                            job.effectName, job.effectName, &findError);
@@ -1394,9 +1341,7 @@ void ApplyPendingGuidMerge()
         return;
     }
 
-    //_ destinationPath/Index are a real, already-existing effect
-    // (captured from the tree at drop time), never typed text -- resolved
-    // the same way srcEffect was.
+    //_ destinationPath/Index are a real effect from the tree, not typed text.
     nlohmann::ordered_json* destEffect = FindEffectByPath(root, job.destinationPath, job.destinationIndex,
                                                             job.destinationEffectName, job.destinationEffectName, &findError);
     if (!destEffect)
@@ -1409,9 +1354,7 @@ void ApplyPendingGuidMerge()
         (*destEffect)["guids"] = nlohmann::ordered_json::array();
     auto& destGuids = (*destEffect)["guids"];
 
-    //_ Never creates a cross-effect duplicate -- if the target already
-    // has this GUID, the source copy is still removed (that's the point
-    // of the drag), it just isn't re-added on top of the existing one.
+    //_ Never creates a duplicate -- not re-added if already on the target.
     bool alreadyOnDest = std::any_of(destGuids.begin(), destGuids.end(),
         [&](const nlohmann::ordered_json& g) { return g.is_string() && g.get<std::string>() == job.guid; });
 
@@ -1529,9 +1472,7 @@ void RenderDeleteEmptyConfirm()
         int                      totalRemoved = 0;
         std::vector<std::string> failedSins;
 
-        //_ GetInstalledJson() just supplies the set of sin names to visit
-        // -- each one is then re-fetched mutably, same "look it up fresh,
-        // don't carry a pointer" reasoning as every Apply* above.
+        //_ GetInstalledJson() supplies names; each is re-fetched mutably below.
         std::vector<std::string> sinNames;
         for (const auto& [sinName, root] : GetInstalledJson())
             sinNames.push_back(sinName);

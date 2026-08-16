@@ -14,14 +14,13 @@
 // exactly one owning profession.
 //
 // Cross-source equivalence (RTAPI's EliteSpecialization and Mumble's
-// Identity.Specialization sharing this id space) is confirmed by
-// hand-testing: both resolve to the correct name for the same live
-// character.
+// Identity.Specialization sharing this id space) is confirmed by hand-testing:
+// both resolve to the correct name for the same live character.
 //--------------------------------------------------------------------------------
 
 #pragma once
 
-#include "game_state.h" //. pulls in Mumble.h (EProfession)
+#include "game_state.h" // IWYU pragma: keep
 
 //********************************************************************************
 // SpecializationInfo

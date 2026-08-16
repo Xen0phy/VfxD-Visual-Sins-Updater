@@ -1,9 +1,5 @@
 //################################################################################
-// live_log_ui.cpp
-//--------------------------------------------------------------------------------
-// "Live Log (VfxDenoiser)" options-panel section. Extracted from
-// addon.cpp -- a mechanical move, no behavior change. See live_log_ui.h
-// for what's exposed and why.
+// live_log_ui.cpp   (see: live_log_ui.h)
 //--------------------------------------------------------------------------------
 
 #include "effect_db.h"
@@ -17,30 +13,31 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <iterator>
 #include <map>
 #include <set>
 #include <string>
 #include <tuple>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace {
 
-//_ UI-only state, not persisted -- same "resets on reload" convention as
-// live_log.cpp's own s_typeEnabled defaults. s_quickEditGuid is which
-// entry (if any) has its inline rename editor open; only one at a time.
+//_ UI-only, not persisted -- same convention as live_log.cpp's s_typeEnabled.
 bool        s_forScienceView = false;
+//_ Which entry (if any) has its inline rename editor open; only one at a time.
 std::string s_quickEditGuid;
-char        s_quickEditBuf[128] = "";
+char        s_quickEditBuf[128] = "";   //. holds s_quickEditGuid's in-progress name
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // ForScienceGroupMemberLabel
 //--------------------------------------------------------------------------------
 // Same "prefer the db's own name, fall back to the raw guid" resolution
-// installed_tree_view.cpp's GroupMemberLabel uses -- kept as its own copy
-// here rather than shared, same reasoning RenderForScienceDetail's own
-// file comment already gives for reading EffectDb_Get* directly instead
-// of a json node: this panel has no tree cache to share it through.
+// installed_tree_view.cpp's GroupMemberLabel uses -- kept as its own copy here
+// instead of shared, same reasoning RenderForScienceDetail's own comment already
+// gives for reading EffectDb_Get* directly instead of a json node: this panel has
+// no tree cache to share it through.
 //--------------------------------------------------------------------------------
 std::string ForScienceGroupMemberLabel(const std::string& guid_b64)
 {
@@ -51,72 +48,17 @@ std::string ForScienceGroupMemberLabel(const std::string& guid_b64)
 }
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-// RenderForScienceGroupInfo
-//--------------------------------------------------------------------------------
-// The for-science panel's twin of installed_tree_view.cpp's
-// RenderGroupInfo -- same two-list shape (groups this guid started, and
-// groups it got swept into), but queries EffectDb_GetGroupsStarted/
-// EffectDb_GetGroupsMemberOf directly rather than reading a baked-in json
-// node, since this panel has no tree overlay cache backing it (see
-// RenderForScienceDetail's own file comment on why it reads
-// EffectDb_GetEffect/GetOccurrences straight rather than off a json node
-// -- the same reasoning applies to groups).
-//--------------------------------------------------------------------------------
-void RenderForScienceGroupInfo(const std::string& guid_b64)
-{
-    std::vector<EffectDbGroupInstance>   started   = EffectDb_GetGroupsStarted(guid_b64);
-    std::vector<EffectDbGroupMembership> memberOf  = EffectDb_GetGroupsMemberOf(guid_b64);
-    if (started.empty() && memberOf.empty())
-        return;   //. never opened or been swept into a group -- nothing worth a section for
-
-    if (ImGui::TreeNode("groupinfo", "Group info"))
-    {
-        if (!started.empty())
-        {
-            ImGui::TextDisabled("Groups started by this effect:");
-            int idx = 0;
-            for (const auto& inst : started)
-            {
-                ImGui::PushID(idx++);
-                if (ImGui::TreeNode("startedgroup", "duration:%d  a4:%u  (%d member%s)",
-                                     inst.duration, inst.a4, static_cast<int>(inst.memberGuids.size()),
-                                     inst.memberGuids.size() == 1 ? "" : "s"))
-                {
-                    for (const auto& member : inst.memberGuids)
-                        ImGui::BulletText("%s", ForScienceGroupMemberLabel(member).c_str());
-                    ImGui::TreePop();
-                }
-                ImGui::PopID();
-            }
-        }
-
-        if (!memberOf.empty())
-        {
-            ImGui::TextDisabled("Also seen as a member of other groups:");
-            for (const auto& m : memberOf)
-                ImGui::BulletText("%s  (duration:%d  a4:%u)",
-                                   ForScienceGroupMemberLabel(m.starterGuid_b64).c_str(), m.duration, m.a4);
-        }
-
-        ImGui::TreePop();
-    }
-}
-
-//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // DecodeSpecOrCoreId
 //--------------------------------------------------------------------------------
 // One raw id from EffectDb_SpecOrCoreIdsInMask (1..127, see effect_db.h's
-// EffectDbSpecializationMask) -> the profession display name and
-// spec/core-build label to bucket it under. A reserved pseudo-id
-// (>= kEffectDbCoreOnlyIdFloor) decodes straight to its profession via
-// EffectDb_ProfessionFromCoreOnlyId, with no real spec attached (core
-// build, no elite spec active); anything below that decodes through
-// specialization_info.h, falling back to a raw "Spec #N" label if the id
-// isn't in that table yet (mirrors GetSpecializationInfo's own "don't
-// guess" contract -- see that header). Same helper
-// installed_tree_view.cpp's RenderEffectDbDetail uses; kept as its own
-// copy here, same "no shared cache" reasoning as ForScienceGroupMemberLabel
-// below.
+// EffectDbSpecializationMask) to the profession display name and spec/core-build
+// label to bucket it under. A reserved pseudo-id (>= kEffectDbCoreOnlyIdFloor)
+// decodes straight to its profession via EffectDb_ProfessionFromCoreOnlyId, with
+// no real spec attached (core build, no elite spec active); anything below that
+// decodes through specialization_info.h, falling back to a raw "Spec #N" label if
+// the id isn't in that table yet (mirrors GetSpecializationInfo's "don't guess"
+// contract). Same helper installed_tree_view.cpp's RenderEffectDbDetail uses;
+// same copy reasoning as ForScienceGroupMemberLabel above.
 //--------------------------------------------------------------------------------
 void DecodeSpecOrCoreId(unsigned int id, std::string& outProfName, std::string& outSpecLabel)
 {
@@ -135,23 +77,15 @@ void DecodeSpecOrCoreId(unsigned int id, std::string& outProfName, std::string& 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // RenderForScienceDetail
 //--------------------------------------------------------------------------------
-// The for-science branch's expanded view (same grouping
-// RenderEffectDbDetail uses in installed_tree_view.cpp -- duration/a4/a6/
-// self_mask -> profession -> specialization, races seen as a sibling
-// annotation on the signature rather than nested under any one spec, since
-// one occurrences row carries every race and every profession+
-// specialization ever seen under it as sibling masks -- see effect_db.h's
-// EffectDbSpecializationMask doc comment), but reads straight from
-// EffectDb_GetEffect/EffectDb_GetOccurrences rather than the tree's
-// "__vfxd_db_by_guid" json, since the Live Log panel has no json node to
-// read this off of for a guid that isn't (yet) in any sin file.
-//
-// Deliberately leaves out the "GUID: ..." line and any
-// installedBehavior/"Configured behavior" text the tree's own version and
-// this panel's ordinary branch both show -- this branch's row header
-// already carries the guid/name identity (see RenderLiveLogSection), and
-// "for science" data has nothing to do with this user's own configured
-// behavior for the guid.
+// Same grouping RenderEffectDbDetail uses in installed_tree_view.cpp:
+// duration/a4/a6/self_mask -> profession -> specialization, races as a sibling
+// annotation since one occurrences row carries every race and profession+spec
+// seen (see effect_db.h's EffectDbSpecializationMask). Reads
+// EffectDb_GetEffect/EffectDb_GetOccurrences directly, since the Live Log panel
+// has no tree json node for a guid not yet in any sin file. Omits the "GUID: ..."
+// line and installedBehavior/"Configured behavior" text the tree's version and
+// the ordinary branch show -- the row header already carries identity, and
+// for-science data isn't this user's configured behavior.
 //--------------------------------------------------------------------------------
 void RenderForScienceDetail(const std::string& guid_b64)
 {
@@ -176,13 +110,23 @@ void RenderForScienceDetail(const std::string& guid_b64)
 
     static const char* kSelfMaskLabels[] = { "none", "target", "caster", "both" };
 
-    //_ (duration, a4, a6, self_mask) -> { profession -> specs seen,
-    // races seen }. std::map for stable iteration order (see
-    // RenderEffectDbDetail -- TreeNode open/closed state must persist).
+    //_ Keyed by (duration, a4) -- group rows share an occurrence's own signature.
+    std::vector<EffectDbGroupInstance>   started  = EffectDb_GetGroupsStarted(guid_b64);   //. maps below point into this
+    std::vector<EffectDbGroupMembership> memberOf = EffectDb_GetGroupsMemberOf(guid_b64);  //. maps below point into this
+
+    std::map<std::pair<int, unsigned int>, const EffectDbGroupInstance*> startedByDurationA4;
+    for (const auto& inst : started)
+        startedByDurationA4[{ inst.duration, inst.a4 }] = &inst;
+
+    std::multimap<std::pair<int, unsigned int>, const EffectDbGroupMembership*> memberOfByDurationA4;
+    for (const auto& m : memberOf)
+        memberOfByDurationA4.emplace(std::make_pair(m.duration, m.a4), &m);
+
+    //_ std::map for stable order -- TreeNode open/closed state must persist.
     struct SignatureGroup
     {
-        std::map<std::string, std::set<std::string>> specsByProfession;
-        std::set<std::string> racesSeen;
+        std::map<std::string, std::set<std::string>> specsByProfession;   //. profession -> specs seen
+        std::set<std::string> racesSeen;                                  //. races seen under signature
     };
     std::map<std::tuple<int, unsigned int, std::string, int>, SignatureGroup> groups;
 
@@ -210,6 +154,34 @@ void RenderForScienceDetail(const std::string& guid_b64)
         if (ImGui::TreeNode("occgroup", "duration:%d  a4:%u  a6:%s  self:%s",
                              duration, a4, a6.empty() ? "null" : a6.c_str(), selfLabel))
         {
+            //_ Starter and member rows merge here -- a guid can match both.
+            auto startedIt     = startedByDurationA4.find({ duration, a4 });
+            auto memberOfRange = memberOfByDurationA4.equal_range({ duration, a4 });
+            bool hasStarted     = startedIt != startedByDurationA4.end();
+            bool hasMemberOf    = memberOfRange.first != memberOfRange.second;
+
+            if (hasStarted || hasMemberOf)
+            {
+                int memberCount = (hasStarted ? static_cast<int>(startedIt->second->memberGuids.size()) : 0)
+                    + static_cast<int>(std::distance(memberOfRange.first, memberOfRange.second));
+
+                if (ImGui::TreeNode("groupmembers", "Group members (%d)", memberCount))
+                {
+                    if (hasStarted)
+                    {
+                        for (const auto& member : startedIt->second->memberGuids)
+                            ImGui::BulletText("%s", ForScienceGroupMemberLabel(member).c_str());
+                    }
+
+                    //_ Labeled by starter guid -- only ID a member_of row has.
+                    for (auto it = memberOfRange.first; it != memberOfRange.second; ++it)
+                        ImGui::BulletText("%s (started this group)",
+                                           ForScienceGroupMemberLabel(it->second->starterGuid_b64).c_str());
+
+                    ImGui::TreePop();
+                }
+            }
+
             for (const auto& [profName, specs] : group.specsByProfession)
             {
                 if (ImGui::TreeNode(profName.c_str(), "%s", profName.c_str()))
@@ -232,18 +204,16 @@ void RenderForScienceDetail(const std::string& guid_b64)
         }
         ImGui::PopID();
     }
-
-    RenderForScienceGroupInfo(guid_b64);
 }
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // GroupStripColor
 //--------------------------------------------------------------------------------
-// groupId < 0 (not currently part of a group, see live_log.h/.cpp) gets a
-// dim neutral gray; otherwise cycles through a small fixed palette.
-// Colors are reused once groupId wraps past the palette length -- fine,
-// since only groups visible in the list at the same time need to read as
-// distinct, and this is a per-row hint, not a rigorous unique-ID color.
+// groupId < 0 (not currently part of a group, see live_log.h/.cpp) gets a dim
+// neutral gray; otherwise cycles through a small fixed palette. Colors are reused
+// once groupId wraps past the palette length -- fine, since only groups visible
+// in the list at the same time need to read as distinct, and this is a per-row
+// hint, not a rigorous unique-ID color.
 //--------------------------------------------------------------------------------
 ImVec4 GroupStripColor(int groupId)
 {
@@ -266,18 +236,13 @@ ImVec4 GroupStripColor(int groupId)
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // RenderGroupMatchStrip
 //--------------------------------------------------------------------------------
-// The colored strip in the left margin, one segment per distinct group
-// `entry` recently belonged to (oldest left, newest right, capped at
-// kLiveLogGroupHistoryCap), plus its hover tooltip. Factored out of the
-// ordinary branch's row rendering so the for-science branch can draw the
-// same strip -- entry->recentGroupIds/groupId are populated identically
-// for both stores (ApplyGroupHistory, shared by IngestLogLine's ordinary
-// entry and UpdateForScienceEntry -- see live_log.cpp), so there was
-// never a reason this was ordinary-branch-only; it just hadn't been
-// wired into the for-science branch's row yet.
-//
-// Returns the strip's pixel width, in case the caller wants it before
-// deciding how much to Indent by -- both current callers do.
+// The colored strip in the left margin, one segment per distinct group `entry`
+// recently belonged to (oldest left, newest right, capped at
+// kLiveLogGroupHistoryCap), plus its hover tooltip. Shared by both branches since
+// entry->recentGroupIds/groupId are populated identically for both stores
+// (ApplyGroupHistory, shared by IngestLogLine's ordinary entry and
+// UpdateForScienceEntry -- see live_log.cpp). Returns the strip's pixel width;
+// both callers use it to decide how much to Indent by.
 //--------------------------------------------------------------------------------
 float RenderGroupMatchStrip(const LiveLogEntry& entry)
 {
@@ -337,15 +302,14 @@ float RenderGroupMatchStrip(const LiveLogEntry& entry)
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // RenderLiveLogSection
 //--------------------------------------------------------------------------------
-// Own collapsible header, separate from Installed Effects / Backups /
-// Report an Effect -- this is live incoming data over the Nexus event
-// bridge (live_log.h/vfxd_sins_bridge.h), not anything read off disk.
+// Own collapsible header, separate from Installed Effects / Backups / Report an
+// Effect -- this is live incoming data over the Nexus event bridge
+// (live_log.h/vfxd_sins_bridge.h), not anything read off disk.
 //
-// The per-type "log this at all" filters below are checked at ingestion
-// and are independent of the listen toggle and "hide known". Deliberately
-// not persisted -- they reset to built-in defaults every reload (see
-// live_log.cpp), since they're exploratory filters for characterizing
-// each numeric type, not settings meant to stick.
+// The per-type "log this at all" filters below are checked at ingestion and are
+// independent of the listen toggle and "hide known". Not persisted -- they reset
+// to built-in defaults every reload (see live_log.cpp), since they're exploratory
+// filters for characterizing each numeric type, not settings meant to stick.
 //--------------------------------------------------------------------------------
 void RenderLiveLogSection(AddonAPI_t* aApi, const std::string& denoiserAddonDir)
 {
@@ -353,9 +317,7 @@ void RenderLiveLogSection(AddonAPI_t* aApi, const std::string& denoiserAddonDir)
     if (!IsInstalledTreeLoaded())
         LoadInstalledEffectsTree(denoiserAddonDir);
 
-    //_ Same per-frame-rebuild cost s_overlayCache's comment warns about
-    // (installed_tree_view.cpp) -- cache and gate on tree generation
-    // instead of walking every guid in every sin file each frame.
+    //_ Cached and gated on tree generation, same cost concern as s_overlayCache.
     static std::unordered_map<std::string, std::string> s_guidNameCache;
     static std::unordered_map<std::string, std::string> s_guidBehaviorCache;
     static int s_guidCacheGeneration = -1;
@@ -418,9 +380,7 @@ void RenderLiveLogSection(AddonAPI_t* aApi, const std::string& denoiserAddonDir)
 
     ImGui::Separator();
 
-    //_ Hard-gated on VfxD_Greed.json already existing by hand -- never
-    // auto-created (see effect_db.h). ImGui 1.80 has no BeginDisabled, so
-    // "unavailable" here is plain disabled text with a tooltip, same as above.
+    //_ Gated on VfxD_Greed.json existing by hand -- never auto-created.
     bool greedExists = EffectDb_GreedFileExists(denoiserAddonDir);
     if (!greedExists)
     {
@@ -447,11 +407,7 @@ void RenderLiveLogSection(AddonAPI_t* aApi, const std::string& denoiserAddonDir)
                     "\"Capture live\" above is off -- nothing is actually being recorded right now.");
         }
 
-        //_ Switches the list below from the ordinary filtered display
-        // into the effect db's own capture stream -- self only, every
-        // type, same block/occurrence detail as the tree (see live_log.h).
-        // Disabled while background-only mode is on below -- nothing to
-        // switch to, the list itself isn't rendered at all in that mode.
+        //_ Db capture stream (self, all types); hidden while background-only is on.
         bool backgroundOnly = LiveLog_GetForScienceOnly();
         if (!backgroundOnly)
         {
@@ -465,21 +421,13 @@ void RenderLiveLogSection(AddonAPI_t* aApi, const std::string& denoiserAddonDir)
 
         ImGui::Spacing();
 
-        //_ Single self-contained switch for "just let this run": turns on
-        // everything for-science capture actually needs (EffectDb_SetEnabled
-        // + LiveLog_SetListening, since IngestLogLine never even sees an
-        // event unless listening is on) and tells IngestLogLine to skip its
-        // own ordinary s_entries fold entirely (LiveLog_SetForScienceOnly --
-        // see that function's doc comment in live_log.h), not just hide it
-        // from view. Turning it off is symmetric -- stops listening and
-        // capture together, rather than leaving them on with nothing
-        // controlling them, so the checkbox alone is a complete on/off.
+        //_ Toggles capture+listening+ForScienceOnly; that skips, not hides, s_entries.
         if (ImGui::Checkbox("Background only -- capture silently, skip the live log entirely", &backgroundOnly))
         {
             LiveLog_SetForScienceOnly(backgroundOnly);
             LiveLog_SetListening(aApi, backgroundOnly);
             EffectDb_SetEnabled(backgroundOnly, denoiserAddonDir);
-            s_forScienceView = false; //. nothing left to switch to/from while this is on
+            s_forScienceView = false; //. unused while background-only
         }
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(
@@ -505,8 +453,7 @@ void RenderLiveLogSection(AddonAPI_t* aApi, const std::string& denoiserAddonDir)
         return;
     }
 
-    //_ Sorted by firstSeenSeq (order first received), not alphabetical,
-    // so the list doesn't reshuffle as an already-seen entry updates.
+    //_ Sorted by firstSeenSeq so an updating entry doesn't reshuffle the list.
     std::vector<const LiveLogEntry*> sorted;
     sorted.reserve(entries.size());
     for (const auto& [guid, entry] : entries)
@@ -522,24 +469,17 @@ void RenderLiveLogSection(AddonAPI_t* aApi, const std::string& denoiserAddonDir)
 
         if (forScienceView)
         {
-            //_ Same colored strip the ordinary branch below draws --
-            // recentGroupIds/groupId are populated identically for both
-            // stores (see RenderGroupMatchStrip), so this branch shows it too.
             float stripWidth = RenderGroupMatchStrip(*entry);
             ImGui::Indent(stripWidth + 4.0f);
 
-            //_ Prefer the db's own name once quick-edit has set one, else
-            // fall back to the raw guid -- never the sin JSON name here,
-            // since a guid with a JSON name has no edit control (see knownInSin below).
+            //_ Db name if quick-edited, else raw guid -- never sin JSON name here.
             EffectDbEffect eff{};
             bool dbKnown = EffectDb_GetEffect(entry->guid_b64, eff);
             std::string label = (dbKnown && !eff.name.empty()) ? eff.name : entry->guid_b64;
 
             bool open = ImGui::TreeNode(label.c_str());
 
-            //_ Replaces "report" in this branch -- offered only while
-            // knownInSin is false, since renaming here only touches the
-            // db. Every guid here has an EFFECTS row, so EffectDb_SetName always succeeds.
+            //_ Replaces "report" in this branch -- shown only while !knownInSin.
             if (!entry->knownInSin)
             {
                 ImGui::SameLine();
@@ -580,30 +520,23 @@ void RenderLiveLogSection(AddonAPI_t* aApi, const std::string& denoiserAddonDir)
             ImGui::Indent(stripWidth + 4.0f);
             bool open = ImGui::TreeNode(entry->displayName.c_str());
 
-            //_ Always offered, even when knownInSin -- dedup happens
-            // server-side, and knownInSin only reflects *this* user's sin
-            // file, which may be stale or a fork missing an effect the original still has.
+            //_ Offered even if knownInSin -- dedup is server-side; this sin may be stale.
             ImGui::SameLine();
             if (ImGui::SmallButton("report"))
                 AddReportRowFromLiveLogEntry(*entry);
 
             if (open)
             {
-                //_ Shown regardless once unfolded (secondary if a name
-                // already exists) -- unknown entries show the guid as
-                // their collapsed-row label already.
+                //_ Shown for knownInSin only -- unknowns already show guid as their label.
                 if (entry->knownInSin)
                 {
                     ImGui::Text("GUID: %s", entry->guid_b64.c_str());
-                    //_ Looked up against *this user's* installed sin JSON, not
-                    // the incoming event -- the trustworthy source now that
-                    // VfxDenoiser's own event-side resolution is gone.
+                    //_ From the sin JSON -- VfxDenoiser no longer resolves this itself.
                     ImGui::Text("Configured behavior: %s",
                                  entry->installedBehavior.empty() ? "(not configured)" : entry->installedBehavior.c_str());
                 }
 
-                //_ a4/a6 stay internal-only (opaque, never rendered) --
-                // only Type/Duration/Target/Caster show here.
+                //_ a4/a6 stay internal-only -- only Type/Duration/Target/Caster show here.
                 if (ImGui::TreeNode("Data"))
                 {
                     ImGui::Text("Type: %d", entry->type);
@@ -613,9 +546,7 @@ void RenderLiveLogSection(AddonAPI_t* aApi, const std::string& denoiserAddonDir)
                     ImGui::TreePop();
                 }
 
-                //_ Persists once a self-event is ever seen (see IngestLogLine);
-                // stays visible even if later logged by someone else.
-                // Specialization may show a raw id until its table fills in.
+                //_ Persists once self-seen (IngestLogLine); spec may show a raw id at first.
                 if (entry->hasSelfContext && ImGui::TreeNode("Self (last seen)"))
                 {
                     ImGui::Text("MapID: %u", entry->mapID);

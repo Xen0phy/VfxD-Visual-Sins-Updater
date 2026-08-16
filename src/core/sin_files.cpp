@@ -1,7 +1,5 @@
 //################################################################################
-// sin_files.cpp
-//--------------------------------------------------------------------------------
-// See sin_files.h for the module contract.
+// sin_files.cpp   (see: sin_files.h)
 //--------------------------------------------------------------------------------
 
 #include "sin_files.h"
@@ -39,9 +37,7 @@ std::vector<InstalledSinFile> ScanInstalledSinFiles(const std::string& denoiserA
     if (!fs::exists(denoiserAddonDir, ec) || ec)
         return out;   //. not installed, nothing to find
 
-    //_ Matches "VfxD_<Name>[-v<N>|_v<N>].json" -- both separators are seen
-    // in the wild. <Name> is any letters/digits run, not a fixed list (see
-    // sin_files.h), so a hand-edited "VfxD_Greed.json" with no version matches too.
+    //_ Kind 1 pattern from sin_files.h -- both "-v"/"_v" separators match.
     static const std::regex kVfxdPattern(R"(^VfxD_([A-Za-z0-9]+)(?:[-_]v(\d+))?\.json$)");
 
     for (const auto& entry : fs::directory_iterator(denoiserAddonDir, ec))
@@ -61,17 +57,13 @@ std::vector<InstalledSinFile> ScanInstalledSinFiles(const std::string& denoiserA
         std::smatch m;
         if (std::regex_match(fileName, m, kVfxdPattern))
         {
-            //_ Classic VfxD_<Name>[-v<N>].json naming -- filename alone
-            // is enough, no need to open the file just to confirm what
-            // it already told us.
+            //_ Filename alone is enough -- no need to open the file.
             sin.sinName = m[1].str();
             sin.version = m[2].matched ? std::stoi(m[2].str()) : -1;
         }
         else
         {
-            //_ Anything else only counts if its content says so -- a
-            // top-level "version" key, same shape VfxD writes (numbers
-            // never checked, see sin_files.h) -- so any arbitrarily-named file matches too.
+            //_ Kind 2 from sin_files.h -- a top-level "version" key counts.
             std::ifstream in(path, std::ios::binary);
             if (!in) continue;
 
@@ -82,7 +74,7 @@ std::vector<InstalledSinFile> ScanInstalledSinFiles(const std::string& denoiserA
             }
             catch (const nlohmann::json::exception&)
             {
-                continue;   //. not valid JSON at all -- not ours
+                continue;   //. invalid JSON -- not ours
             }
 
             if (!probe.is_object() || !probe.contains("version")) continue;

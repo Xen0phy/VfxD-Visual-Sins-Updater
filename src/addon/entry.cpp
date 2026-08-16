@@ -6,16 +6,15 @@
 // GetAddonDef()     sole DLL export Nexus looks for
 // DllMain           standard Windows DLL entry point
 //--------------------------------------------------------------------------------
-// Nexus wiring: the AddonLoad/AddonUnload functions assigned into
-// AddonDefinition_t (including everything that happens on load/unload
-// itself - locating VfxDenoiser, wiring up the game-state/live-log/
-// update-check subsystems, registering the options-panel callback, and
-// tearing all of that down again), plus GetAddonDef and DllMain. addon.cpp
-// only owns what happens after load: the options-panel UI
-// (OptionsRenderCallback) and the addon state (Addon_Init) that UI reads.
-// Kept separate on purpose: this file is "what Nexus expects from an
-// addon, and what happens at those two moments", addon.cpp is "what the
-// addon looks like the rest of the time".
+// Nexus wiring: the AddonLoad/AddonUnload functions assigned into AddonDefinition_t
+// (including everything that happens on load/unload itself - locating VfxDenoiser,
+// wiring up the game-state/live-log/update-check subsystems, registering the
+// options-panel callback, and tearing all of that down again), plus GetAddonDef and
+// DllMain. addon.cpp only owns what happens after load: the options-panel UI
+// (OptionsRenderCallback) and the addon state (Addon_Init) that UI reads. Kept
+// separate on purpose: this file is "what Nexus expects from an addon, and what
+// happens at those two moments", addon.cpp is "what the addon looks like the rest
+// of the time".
 //--------------------------------------------------------------------------------
 
 #include "addon.h"
@@ -42,14 +41,12 @@ static AddonAPI_t*       s_api = nullptr;
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // FlushEffectDbRenderCallback
 //--------------------------------------------------------------------------------
-// Registered under RT_PostRender rather than folded into
-// OptionsRenderCallback (RT_OptionsRender) because it has to run every
-// real frame regardless of whether the options panel is open -- capture
-// keeps running with the panel closed, and EffectDb_FlushPendingWrites
-// is what commits whatever EffectDb_RecordEvent buffered up since the
-// last frame (see that pair's comments in effect_db.h/.cpp). A no-op
-// call (nothing pending) is a single boolean check, so registering it
-// unconditionally here is cheap.
+// Registered under RT_PostRender because it has to run every real frame
+// regardless of whether the options panel is open -- capture keeps running with
+// the panel closed, and EffectDb_FlushPendingWrites is what commits whatever
+// EffectDb_RecordEvent buffered up since the last frame (see that pair's comments
+// in effect_db.h/.cpp). A no-op call (nothing pending) is a single boolean check,
+// so registering it unconditionally here is cheap.
 //--------------------------------------------------------------------------------
 static void FlushEffectDbRenderCallback()
 {
@@ -59,14 +56,15 @@ static void FlushEffectDbRenderCallback()
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // AddonLoad / AddonUnload
 //--------------------------------------------------------------------------------
-// Nexus load/unload callbacks assigned into AddonDefinition_t (see
-// GetAddonDef). The load-time update check is version numbers only, no
-// downloading (see StartUpdateCheck's alsoLoadDiff parameter) - it just
-// leaves a note in the options panel; the "Check now" button is what
-// actually downloads and diffs anything. On unload, background WinHTTP
-// calls are cancelled and given a brief best-effort window to exit before
-// the DLL may get unloaded out from under them; this is a minimal safety
-// net, not a guarantee.
+// Nexus load/unload callbacks assigned into AddonDefinition_t (see GetAddonDef).
+// The load-time update check is version numbers only, no downloading (see
+// StartUpdateCheck's alsoLoadDiff parameter) - it just leaves a note in the
+// options panel; the "Check now" button is what actually downloads and diffs
+// anything. On unload, shutdown flags are flipped before the WinHTTP calls are
+// cancelled, since a thread already past its call (e.g. mid file-write) can only
+// be caught by that flag, not by cancellation. The thread-count poll that follows
+// has a fixed deadline, since Nexus doesn't wait on unload to finish; this is a
+// minimal safety net, not a guarantee.
 //--------------------------------------------------------------------------------
 void AddonLoad(AddonAPI_t* aApi)
 {
@@ -74,25 +72,21 @@ void AddonLoad(AddonAPI_t* aApi)
 
     ImGui::SetCurrentContext((ImGuiContext*)aApi->ImguiContext);
 
-    //_ Lets github_update.cpp's background-thread failures reach Nexus's
-    //_ log too.
+    //_ Lets github_update.cpp's background-thread failures reach Nexus's log too.
     SetUpdaterLogger(aApi);
-    //_ Same reasoning, for sql_update.cpp's own (synchronous) write path
-    //_ -- see sql_update.h's SetSqlUpdateLogger.
+    //_ Same reasoning, for sql_update.cpp's own synchronous write path.
     SetSqlUpdateLogger(aApi);
     GameState_Init(aApi);   //. caches DataLink pointers, see game_state.h
     LiveLog_Init(aApi);     //. subscribes EV_VFXD_SINS_LOG
-    EffectDb_SetApi(aApi);  //. log pointer only -- EffectDb_Open happens lazily,
-                             //. the first time EffectDb_SetEnabled(true) succeeds
+    //_ Only stores the log pointer; EffectDb_Open happens lazily on first enable.
+    EffectDb_SetApi(aApi);
 
-    //_ Paths_GetAddonDirectory only constructs the path string; checking
-    //_ fs::is_directory here is what makes `found` mean what it says.
+    //_ Checking fs::is_directory here is what makes `found` mean what it says.
     std::string denoiserAddonDir = aApi->Paths_GetAddonDirectory("VfxDenoiser");
     std::error_code ec;
     bool found = !denoiserAddonDir.empty() && fs::is_directory(denoiserAddonDir, ec) && !ec;
 
-    //_ Hands addon.cpp the api pointer and this load-time result; both are
-    //_ referenced throughout the options-panel rendering, not just here.
+    //_ Values here are also referenced throughout the options-panel rendering.
     Addon_Init(aApi, denoiserAddonDir, found);
 
     aApi->GUI_Register(RT_OptionsRender, OptionsRenderCallback);
@@ -117,25 +111,19 @@ void AddonUnload()
     }
 
     LiveLog_Shutdown(s_api); //. unsubscribes, stops capture if on
-    EffectDb_Close();        //. finalizes prepared statements + closes the sqlite connection,
-                              //. same "tear down before Nexus can unload the DLL" reasoning as LiveLog above
+    //_ Finalizes statements, closes the sqlite connection -- same reasoning as above.
+    EffectDb_Close();
     GameState_Shutdown();    //. clears cached DataLink pointers
 
-    //_ Flip the shutdown flags first -- a thread already past its WinHTTP
-    // call (e.g. mid file-write) can't be reached by the cancel calls
-    // below at all, only by checking this flag, so set it early.
+    //_ Ordering vs. the cancels below explained in the block comment above.
     BeginUpdateShutdown();
     BeginReportShutdown();
 
-    //_ Still worth calling -- for any thread that's currently blocked
-    // inside a WinHTTP call, closing its handles is faster than waiting
-    // for the flag check on its next step boundary.
+    //_ Still worth it: closing handles is faster than waiting for the flag check.
     CancelInFlightUpdateRequest();
     CancelInFlightReportRequest();
 
-    //_ Poll for the real thread count hitting zero instead of guessing
-    // with a fixed sleep -- fast in the common case, bounded in the
-    // worst case. Nexus doesn't wait on this, so don't block forever.
+    //_ Polls for zero threads instead of a fixed sleep (deadline explained above).
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
     while (std::chrono::steady_clock::now() < deadline &&
            (GetUpdateActiveThreadCount() > 0 || GetReportActiveThreadCount() > 0))
@@ -143,9 +131,7 @@ void AddonUnload()
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
-    //_ Still running past the timeout -- log via LogCritical (not just a
-    // warning), matching how every other unrecoverable failure in this
-    // addon is logged (see LogCritical in github_update.cpp).
+    //_ Logged as critical, matching every other unrecoverable failure in this addon.
     const int stillRunning = GetUpdateActiveThreadCount() + GetReportActiveThreadCount();
     if (stillRunning > 0 && s_api)
     {

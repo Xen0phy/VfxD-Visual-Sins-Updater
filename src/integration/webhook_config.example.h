@@ -7,29 +7,20 @@
 // Template for webhook_config.h, which report.cpp actually includes.
 // webhook_config.h itself is gitignored -- never commit it.
 //
-// Don't hand-edit the byte array below -- regenerate it instead, from the
-// repo root:
+// Don't hand-edit the byte array below -- regenerate it instead, from the repo
+// root:
 //
 //     python3 tools/generate_webhook_config.py "https://<your-worker>.<your-subdomain>.workers.dev" > src/integration/webhook_config.h
 //
-// That produces a real src/integration/webhook_config.h next to this file
-// (gitignored, untracked, stays only on your machine).
+// XOR-obfuscated with a fixed key (see kWebhookXorKey in webhook_report.cpp),
+// NOT encrypted -- keeps the URL out of a strings/hex-editor pass over the DLL
+// only, not from a debugger, hook, or network proxy (DecodeWebhookUrl()
+// reconstructs it in memory before every request regardless). Not a credential
+// -- the relay is rate-limited, validate+forward only -- so this guards
+// against casual scraping, not a secret.
 //
-// What this obfuscation is and isn't: the URL below is XOR-obfuscated with
-// a fixed key (see kWebhookXorKey in webhook_report.cpp), NOT encrypted --
-// its only job is to keep the URL from showing up as one plain readable
-// string in a `strings`/hex-editor pass over the built DLL. It does
-// nothing against a debugger, a WinHTTP-call hook, or a network-level
-// proxy watching the actual (TLS-protected) POST go out --
-// DecodeWebhookUrl() has to reconstruct the real URL in memory right
-// before the request either way. Unlike a raw Discord webhook, this URL
-// isn't a credential -- the relay is rate-limited and does nothing but
-// validate+forward -- so the obfuscation here is about not handing the
-// endpoint to casual scraping, not about protecting a secret.
-//
-// The array below decodes to the placeholder URL
-// "https://example-worker.example.workers.dev" -- harmless to leave committed
-// as-is; it isn't a real relay URL.
+// Decodes to the placeholder "https://example-worker.example.workers.dev",
+// harmless to leave committed as-is.
 //--------------------------------------------------------------------------------
 
 #pragma once

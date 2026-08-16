@@ -1,3 +1,7 @@
+//################################################################################
+// sin_generator.cpp   (see: sin_generator.h)
+//--------------------------------------------------------------------------------
+
 #include "sin_generator.h"
 
 #include "effect_db.h"
@@ -8,9 +12,13 @@
 namespace
 {
 
-//_ Local map key only -- doesn't need to match effect_db.cpp's private
-// kCategoryDelim ('\x1f'), since this is never written to SQL, only used
-// to look an already-split EffectDbCategory::categoryPath up by value.
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// JoinKey
+//--------------------------------------------------------------------------------
+// Local map key only -- doesn't need to match effect_db.cpp's private
+// kCategoryDelim ('\x1f') since this is never written to SQL, only used to look
+// an already-split EffectDbCategory::categoryPath up by value.
+//--------------------------------------------------------------------------------
 std::string JoinKey(const std::vector<std::string>& path)
 {
     std::string out;
@@ -23,13 +31,12 @@ std::string JoinKey(const std::vector<std::string>& path)
 }
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-// NormalizeBehaviorForVariant
+// NormalizeCaster
 //--------------------------------------------------------------------------------
-// generate_sins.py's own transform (see HANDOFF_VfxSins.md, not in this
-// repo -- rules confirmed against it in TODO_B.md item 7): Pride and
-// Sloth both switch every Hide/SetDuration entry whose caster is All to
-// Others. Show entries, and any entry not caster:All (already Others,
-// say), pass through untouched. Gluttony never calls this.
+// Mirrors generate_sins.py's own transform (not in this repo): Pride and Sloth
+// both switch every Hide/SetDuration entry whose caster is All to Others. Show
+// entries, and any entry not caster:All (already Others, say), pass through
+// untouched. Gluttony never calls this.
 //--------------------------------------------------------------------------------
 std::string NormalizeCaster(const std::string& type, const std::string& caster)
 {
@@ -42,16 +49,15 @@ std::string NormalizeCaster(const std::string& type, const std::string& caster)
 // FindOrCreateCategory
 //--------------------------------------------------------------------------------
 // Same "materialize on first reference" shape db_tree_view.cpp's
-// FindOrCreateDbCategory uses, deliberately not shared with it -- that
-// one always creates both "categories"/"effects" arrays (fine for an
-// internal render tree everything else reads via .contains()) and tags
-// nodes __vfxd_virtual (meaningless for a real output file). This one
-// only adds "categories"/"effects" once something is actually placed
-// under them, and pulls each category's own "description" from the
-// externally-seeded `categories` table -- matching the hand-authored
-// master's own minimal-keys shape (see the real VfxD_Greed.json: a
-// category with no direct effects has no "effects" key at all, one with
-// no description has no "description" key).
+// FindOrCreateDbCategory uses, not shared with it -- that one always creates
+// both "categories"/"effects" arrays (fine for an internal render tree
+// everything else reads via .contains()) and tags nodes __vfxd_virtual
+// (meaningless for a real output file). This one only adds
+// "categories"/"effects" once something is actually placed under them, and
+// pulls each category's own "description" from the externally-seeded
+// `categories` table -- matching the hand-authored master's own minimal-keys
+// shape (see the real VfxD_Greed.json: a category with no direct effects has no
+// "effects" key at all, one with no description has no "description" key).
 //--------------------------------------------------------------------------------
 nlohmann::ordered_json* FindOrCreateCategory(nlohmann::ordered_json& root,
                                               const std::vector<std::string>& path,
@@ -94,9 +100,6 @@ nlohmann::ordered_json* FindOrCreateCategory(nlohmann::ordered_json& root,
 nlohmann::ordered_json SinGenerator_Generate(ESinGeneratorVariant variant, int major, int minor)
 {
     nlohmann::ordered_json root;
-    //_ {major, minor} object, not a bare int -- matches the shape VfxD
-    // itself writes at the top of every file it manages (see sin_files.h's
-    // ScanInstalledSinFiles doc and this function's own header comment).
     root["version"]["major"] = major;
     root["version"]["minor"] = minor;
 
@@ -107,33 +110,19 @@ nlohmann::ordered_json SinGenerator_Generate(ESinGeneratorVariant variant, int m
     for (const auto& c : allCategories)
         categoriesByKey[JoinKey(c.categoryPath)] = &c;
 
-    //_ Group by effect_id first -- every guid sharing one effect_id is one
-    // curated effect, one output node. name/category_path/description/
-    // behavior*/sort_order are identical across the group by construction
-    // (one shared effect_meta row), so reading them off the first member
-    // is never wrong, same reasoning db_tree_view.cpp's BuildDbTree uses.
+    //_ Grouped by effect_id -- shared metadata read off the first member.
     std::map<int64_t, std::vector<const EffectDbEffect*>> byEffectId;
     for (const auto& e : allEffects)
     {
-        //_ Matches BuildDbTree's own "Uncategorized" carve-out reasoning,
-        // inverted: an uncategorized effect has nowhere real to land in a
-        // generated file, so it's excluded entirely rather than invented
-        // a bucket for -- see this file's header comment.
         if (e.categoryPath.empty())
             continue;
-        //_ Sloth drops the entire top-level "Caution" category, whatever
-        // it contains -- checked here (not just at materialization) so a
-        // Caution-only sub-branch never even allocates an entry in
-        // byEffectId, matching "gets dropped, not filtered post-hoc".
+        //_ Sloth drops "Caution" entirely here -- not filtered post-hoc.
         if (variant == ESinGeneratorVariant::Sloth && e.categoryPath.front() == "Caution")
             continue;
         byEffectId[e.effect_id].push_back(&e);
     }
 
-    //_ Ascending sort_order, effect_id as a stable tiebreaker only (two
-    // effects should never truly share a sort_order from a real seed, but
-    // std::map already handles the primary key -- this just keeps the
-    // walk fully deterministic if they ever do).
+    //_ effect_id is just a tiebreaker -- sort_order duplicates aren't expected.
     std::vector<std::pair<int64_t, const std::vector<const EffectDbEffect*>*>> ordered;
     ordered.reserve(byEffectId.size());
     for (const auto& [effectId, members] : byEffectId)
@@ -148,10 +137,6 @@ nlohmann::ordered_json SinGenerator_Generate(ESinGeneratorVariant variant, int m
             return a.first < b.first;
         });
 
-    //_ Construction order IS the final order here -- deliberately no
-    // alphabetical SortTreeRecursive the way db_tree_view.cpp's DB tab
-    // applies; that sort is a DB-tab display convenience and would
-    // defeat sort_order's entire purpose in a generated file.
     for (const auto& [effectId, membersPtr] : ordered)
     {
         const auto& members = *membersPtr;
@@ -169,13 +154,7 @@ nlohmann::ordered_json SinGenerator_Generate(ESinGeneratorVariant variant, int m
             guids.push_back(m->guid_b64);
         node["guids"] = std::move(guids);
 
-        //_ Owner-confirmed: real effects always carry exactly one
-        // behavior (see TODO_B.md item 7), so effect_meta's single
-        // behavior_type/caster/duration columns round-trip into a
-        // one-entry array without any collapse ambiguity. An effect
-        // whose behavior_type is blank (never captured/seeded a
-        // default) writes an empty array, same as a real installed
-        // effect with no behaviors set yet.
+        //_ Blank behaviorType writes an empty array, matching an unset effect.
         nlohmann::ordered_json behaviors = nlohmann::ordered_json::array();
         if (!rep.behaviorType.empty())
         {
@@ -203,10 +182,6 @@ nlohmann::ordered_json SinGenerator_Generate(ESinGeneratorVariant variant, int m
 
 int SinGenerator_CountEmittedGuids(ESinGeneratorVariant variant)
 {
-    //_ effects is one row per guid_b64 (see effect_db.h), so counting
-    // rows that survive the same filter SinGenerator_Generate applies
-    // before grouping by effect_id is exactly the guid count generation
-    // would emit -- no need to actually group/build anything here.
     std::vector<EffectDbEffect> allEffects = EffectDb_GetAllEffects();
 
     int count = 0;
